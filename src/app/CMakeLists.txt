@@ -21,6 +21,10 @@ if(UNIX AND NOT APPLE)
             DESTINATION share/applications)
     install(FILES   ${CMAKE_SOURCE_DIR}/packaging/linux/firstcontact.appdata.xml
             DESTINATION share/metainfo)
+    install(FILES   ${CMAKE_SOURCE_DIR}/resources/icons/firstcontact.png
+            DESTINATION share/icons/hicolor/256x256/apps)
+    install(FILES   ${CMAKE_SOURCE_DIR}/resources/icons/firstcontact.svg
+            DESTINATION share/icons/hicolor/scalable/apps)
 endif()
 
 fc_set_warnings(firstcontact)

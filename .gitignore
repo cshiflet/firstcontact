@@ -3,6 +3,8 @@ build-*/
 out/
 Testing/
 .cache/
+AppDir/
+*.AppImage
 .vscode/
 .idea/
 *.user
