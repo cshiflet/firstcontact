@@ -15,7 +15,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-option(FC_ENABLE_WEBENGINE "Build the optional QtWebEngine HTML renderer plugin (Phase 3)" OFF)
+option(FC_ENABLE_WEBENGINE "Build the optional QtWebEngine HTML renderer plugin" ON)
 option(FC_BUILD_TESTS      "Build unit and integration tests"                    ON)
 option(FC_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds"                  OFF)
 
@@ -24,6 +24,10 @@ include(Sanitizers)
 include(Qt6Setup)
 
 add_subdirectory(src)
+
+if(FC_ENABLE_WEBENGINE)
+    add_subdirectory(src/ui/reader/webengine_plugin)
+endif()
 
 if(FC_BUILD_TESTS)
     enable_testing()

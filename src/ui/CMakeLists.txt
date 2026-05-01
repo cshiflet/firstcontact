@@ -5,6 +5,8 @@ qt_add_library(fc_ui STATIC
     messagelist/MessageItemDelegate.h messagelist/MessageItemDelegate.cpp
     messagelist/MessageListView.h messagelist/MessageListView.cpp
     reader/ReaderPane.h reader/ReaderPane.cpp
+    reader/IHtmlRenderHost.h
+    reader/HtmlRenderHostLoader.h reader/HtmlRenderHostLoader.cpp
     compose/ComposeWindow.h compose/ComposeWindow.cpp
     tray/Notifier.h tray/Notifier.cpp
     tray/TrayController.h tray/TrayController.cpp

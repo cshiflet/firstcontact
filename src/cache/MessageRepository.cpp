@@ -236,6 +236,20 @@ fc::Message MessageRepository::byId(const QString& id) {
     return {};
 }
 
+std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    if (threadId.isEmpty()) return out;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT * FROM messages WHERE thread_id = :t "
+        "ORDER BY internal_date ASC"));
+    q.bindValue(QStringLiteral(":t"), threadId);
+    if (!q.exec()) return out;
+    while (q.next()) out.push_back(rowToMessage(q));
+    return out;
+}
+
 bool MessageRepository::exists(const QString& id) {
     auto db = databaseHandle();
     QSqlQuery q(db);

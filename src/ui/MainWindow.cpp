@@ -4,9 +4,11 @@
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
 #include "cache/Database.h"
+#include "cache/DraftRepository.h"
 #include "cache/LabelRepository.h"
 #include "cache/MessageRepository.h"
 #include "cache/OutboxRepository.h"
+#include "cache/PendingOpsRepository.h"
 #include "common/Shortcuts.h"
 #include "compose/ComposeWindow.h"
 #include "messagelist/MessageListView.h"
@@ -15,7 +17,9 @@
 #include "reader/ReaderPane.h"
 #include "setup/SetupWizard.h"
 #include "sidebar/SidebarWidget.h"
+#include "sync/DraftSync.h"
 #include "sync/OutboxWorker.h"
+#include "sync/PendingOpsWorker.h"
 #include "sync/SyncService.h"
 #include "tray/Notifier.h"
 #include "tray/TrayController.h"
@@ -43,19 +47,25 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
                        fc::api::GmailClient* gmail,
                        fc::sync::SyncService* sync,
                        fc::sync::OutboxWorker* outbox,
+                       fc::sync::PendingOpsWorker* pending,
+                       fc::sync::DraftSync* drafts,
                        QWidget* parent)
     : QMainWindow(parent),
-      config_(config), auth_(auth), gmail_(gmail), sync_(sync), outbox_(outbox) {
+      config_(config), auth_(auth), gmail_(gmail),
+      sync_(sync), outbox_(outbox), pending_(pending), drafts_(drafts) {
     setWindowTitle(QStringLiteral("FirstContact"));
     resize(1200, 760);
     fc::cache::Database::initialize();
 
     buildLayout();
     buildToolBar();
-    wireSignals();
 
-    tray_ = new TrayController(this, this);
+    // tray_ and shortcuts_ must be constructed BEFORE wireSignals connects to
+    // them — otherwise the QObject::connect calls fire against null pointers.
+    tray_      = new TrayController(this, this);
     shortcuts_ = new Shortcuts(this);
+
+    wireSignals();
 
     statusBar()->showMessage(tr("Ready."));
     refreshAccountIndicator();
@@ -70,6 +80,8 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         sync_->runOnce();
         sync_->startScheduler();
         outbox_->start();
+        pending_->start();
+        drafts_->start();
     }
 }
 
@@ -99,9 +111,12 @@ void MainWindow::buildToolBar() {
     auto* tb = addToolBar(tr("Main"));
     tb->setMovable(false);
 
-    auto* signIn   = tb->addAction(tr("Sign In"));
-    auto* refresh  = tb->addAction(tr("Refresh"));
-    auto* compose  = tb->addAction(tr("Compose"));
+    auto* signIn      = tb->addAction(tr("Sign In"));
+    auto* refresh     = tb->addAction(tr("Refresh"));
+    auto* compose     = tb->addAction(tr("Compose"));
+    auto* reply       = tb->addAction(tr("Reply"));
+    auto* replyAll    = tb->addAction(tr("Reply All"));
+    auto* forwardAct  = tb->addAction(tr("Forward"));
     tb->addSeparator();
     searchEdit_ = new QLineEdit(this);
     searchEdit_->setPlaceholderText(tr("Search mail (operators: from: subject: has:attachment is:unread …)"));
@@ -111,11 +126,14 @@ void MainWindow::buildToolBar() {
     auto* signOut  = tb->addAction(tr("Sign Out"));
     auto* quit     = tb->addAction(tr("Quit"));
 
-    connect(signIn,  &QAction::triggered, this, &MainWindow::onSignIn);
-    connect(refresh, &QAction::triggered, this, &MainWindow::onRefresh);
-    connect(compose, &QAction::triggered, this, &MainWindow::onComposeNew);
-    connect(signOut, &QAction::triggered, this, &MainWindow::onSignOut);
-    connect(quit,    &QAction::triggered, qApp, &QApplication::quit);
+    connect(signIn,     &QAction::triggered, this, &MainWindow::onSignIn);
+    connect(refresh,    &QAction::triggered, this, &MainWindow::onRefresh);
+    connect(compose,    &QAction::triggered, this, &MainWindow::onComposeNew);
+    connect(reply,      &QAction::triggered, this, &MainWindow::onReplyCurrent);
+    connect(replyAll,   &QAction::triggered, this, &MainWindow::onReplyAllCurrent);
+    connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
+    connect(signOut,    &QAction::triggered, this, &MainWindow::onSignOut);
+    connect(quit,       &QAction::triggered, qApp, &QApplication::quit);
 
     connect(searchEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearchSubmit);
     connect(searchEdit_, &QLineEdit::textChanged,   this, &MainWindow::onSearchChanged);
@@ -139,6 +157,8 @@ void MainWindow::wireSignals() {
         sync_->runOnce();
         sync_->startScheduler();
         outbox_->start();
+        pending_->start();
+        drafts_->start();
     });
     connect(auth_, &fc::auth::OAuthClient::failed, this,
             [this](const QString& reason) {
@@ -171,6 +191,20 @@ void MainWindow::wireSignals() {
                 statusBar()->showMessage(tr("Send failed: %1").arg(err), 5000);
             });
 
+    connect(pending_, &fc::sync::PendingOpsWorker::itemDropped, this,
+            [this](qint64, const QString& reason) {
+                // The local optimistic edit no longer matches the server —
+                // surface that so the user knows to refresh or re-act.
+                statusBar()->showMessage(
+                    tr("Server rejected an offline edit (%1). "
+                       "Refresh to reconcile.").arg(reason), 6000);
+            });
+    connect(drafts_, &fc::sync::DraftSync::draftFailed, this,
+            [this](const QString&, const QString& reason) {
+                statusBar()->showMessage(
+                    tr("Draft sync failed: %1").arg(reason), 5000);
+            });
+
     if (tray_) {
         connect(tray_, &TrayController::composeRequested,
                 this,  &MainWindow::onComposeNew);
@@ -186,7 +220,9 @@ void MainWindow::wireSignals() {
 
     connect(shortcuts_, &Shortcuts::focusSearch,    this, [this]{ searchEdit_->setFocus(); });
     connect(shortcuts_, &Shortcuts::composeNew,     this, &MainWindow::onComposeNew);
-    connect(shortcuts_, &Shortcuts::replyToCurrent, this, &MainWindow::onReplyCurrent);
+    connect(shortcuts_, &Shortcuts::replyToCurrent,    this, &MainWindow::onReplyCurrent);
+    connect(shortcuts_, &Shortcuts::replyAllToCurrent, this, &MainWindow::onReplyAllCurrent);
+    connect(shortcuts_, &Shortcuts::forwardCurrent,    this, &MainWindow::onForwardCurrent);
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
@@ -208,8 +244,8 @@ void MainWindow::wireSignals() {
         QMessageBox::information(this, tr("Keyboard shortcuts"),
             tr("/  focus search\n"
                "j  next message\nk  previous message\n"
-               "c  compose\nr  reply\ne  archive\n#  delete\n"
-               "s  toggle star\n?  this help"));
+               "c  compose\nr  reply\nShift+R  reply all\nf  forward\n"
+               "e  archive\n#  delete\ns  toggle star\n?  this help"));
     });
 }
 
@@ -238,6 +274,8 @@ void MainWindow::onSignOut() {
         auth_->signOut();
         sync_->stopScheduler();
         outbox_->stop();
+        pending_->stop();
+        drafts_->stop();
     }
 }
 
@@ -277,26 +315,34 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
     currentRow_ = row;
 
     fc::Message cached = fc::cache::MessageRepository::byId(messageId);
+
+    auto renderThread = [this](const fc::Message& selected) {
+        currentMessage_ = selected;
+        auto thread = fc::cache::MessageRepository::byThread(selected.threadId);
+        if (thread.size() > 1) {
+            reader_->showThread(thread);
+        } else {
+            reader_->showMessage(selected);
+        }
+        fc::cache::MessageRepository::markAccessed(selected.id);
+    };
+
     if (!cached.id.isEmpty() && !cached.bodyText.isEmpty()) {
-        currentMessage_ = cached;
-        reader_->showMessage(cached);
-        fc::cache::MessageRepository::markAccessed(messageId);
+        renderThread(cached);
         return;
     }
 
     reader_->showLoading();
     QPointer<MainWindow> self(this);
     gmail_->getMessage(messageId,
-        [self, messageId](fc::Message m, fc::api::ApiError err) {
+        [self, messageId, renderThread](fc::Message m, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 self->reader_->showEmpty(tr("Failed to load: %1").arg(err.message));
                 return;
             }
             fc::cache::MessageRepository::upsert(m);
-            fc::cache::MessageRepository::markAccessed(messageId);
-            self->currentMessage_ = m;
-            self->reader_->showMessage(m);
+            renderThread(m);
         });
 }
 
@@ -338,10 +384,14 @@ void MainWindow::onSearchSubmit() {
         });
 }
 
-void MainWindow::onComposeNew() {
+void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
     if (!auth_->isAuthorized()) { onSignIn(); return; }
+
     auto* w = new ComposeWindow(auth_->accountEmail(), QString(), this);
     w->setAttribute(Qt::WA_DeleteOnClose);
+    if (parent) {
+        w->prefillFrom(*parent, static_cast<ComposeWindow::Mode>(mode));
+    }
     connect(w, &ComposeWindow::composeReady, this,
         [this](const fc::util::OutgoingMessage& msg, const QString& threadId) {
             const QByteArray rfc = fc::util::MimeBuilder::build(msg);
@@ -350,25 +400,47 @@ void MainWindow::onComposeNew() {
             item.threadId = threadId;
             fc::cache::OutboxRepository::enqueue(item);
             outbox_->flush();
+        });
+    connect(w, &ComposeWindow::saveDraftRequested, this,
+        [this, w](const fc::util::OutgoingMessage& msg, const QString& threadId,
+                  const QString& existingDraftId) {
+            fc::cache::DraftRow row;
+            row.id                 = existingDraftId;
+            row.threadId           = threadId;
+            row.subject            = msg.subject;
+            row.toAddrs            = msg.to;
+            row.ccAddrs            = msg.cc;
+            row.bccAddrs           = msg.bcc;
+            row.bodyText           = msg.bodyText;
+            row.inReplyToMessageId = msg.rfc822InReplyTo;
+            row.dirty              = true;
+            const QString id = fc::cache::DraftRepository::upsert(row);
+            // Thread the assigned id back into the still-open compose window
+            // so the next save updates instead of creating a new draft.
+            w->loadFromDraft(id, threadId, msg.subject, msg.to, msg.cc, msg.bodyText);
+            drafts_->flush();
+            statusBar()->showMessage(tr("Draft saved."), 2000);
         });
     w->show();
 }
 
+void MainWindow::onComposeNew() {
+    openComposeWindow(nullptr, int(ComposeWindow::Mode::New));
+}
+
 void MainWindow::onReplyCurrent() {
-    if (currentMessage_.id.isEmpty() || !auth_->isAuthorized()) return;
-    auto* w = new ComposeWindow(auth_->accountEmail(), QString(), this);
-    w->setAttribute(Qt::WA_DeleteOnClose);
-    w->prefillFrom(currentMessage_, ComposeWindow::Mode::Reply);
-    connect(w, &ComposeWindow::composeReady, this,
-        [this](const fc::util::OutgoingMessage& msg, const QString& threadId) {
-            const QByteArray rfc = fc::util::MimeBuilder::build(msg);
-            fc::cache::OutboxItem item;
-            item.rfc5322  = rfc;
-            item.threadId = threadId;
-            fc::cache::OutboxRepository::enqueue(item);
-            outbox_->flush();
-        });
-    w->show();
+    if (currentMessage_.id.isEmpty()) return;
+    openComposeWindow(&currentMessage_, int(ComposeWindow::Mode::Reply));
+}
+
+void MainWindow::onReplyAllCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    openComposeWindow(&currentMessage_, int(ComposeWindow::Mode::ReplyAll));
+}
+
+void MainWindow::onForwardCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    openComposeWindow(&currentMessage_, int(ComposeWindow::Mode::Forward));
 }
 
 void MainWindow::onCreateLabel(const QString& parentLabelId) {
@@ -443,40 +515,26 @@ void MainWindow::onDeleteLabel(const QString& labelId) {
 }
 
 void MainWindow::onToggleStar() {
-    if (currentMessage_.id.isEmpty() || !auth_->isAuthorized()) return;
+    if (currentMessage_.id.isEmpty()) return;
     const bool wasStarred = currentMessage_.isStarred;
     QStringList add, rem;
     if (wasStarred) rem << QStringLiteral("STARRED");
     else            add << QStringLiteral("STARRED");
-    QPointer<MainWindow> self(this);
-    gmail_->modifyMessage(currentMessage_.id, add, rem,
-        [self, id = currentMessage_.id, add, rem](fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->statusBar()->showMessage(
-                    tr("Star toggle failed: %1").arg(err.message));
-                return;
-            }
-            fc::cache::MessageRepository::applyLabelDiff(id, add, rem);
-            self->reloadCurrentLabel();
-        });
+
+    // Optimistic local edit, then queue the server reconciliation.
+    fc::cache::MessageRepository::applyLabelDiff(currentMessage_.id, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentMessage_.id, add, rem);
+    pending_->flush();
+    reloadCurrentLabel();
 }
 
 void MainWindow::onArchiveCurrent() {
-    if (currentMessage_.id.isEmpty() || !auth_->isAuthorized()) return;
-    QPointer<MainWindow> self(this);
-    gmail_->modifyMessage(currentMessage_.id, {}, QStringList{QStringLiteral("INBOX")},
-        [self, id = currentMessage_.id](fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->statusBar()->showMessage(
-                    tr("Archive failed: %1").arg(err.message));
-                return;
-            }
-            fc::cache::MessageRepository::applyLabelDiff(
-                id, {}, QStringList{QStringLiteral("INBOX")});
-            self->reloadCurrentLabel();
-        });
+    if (currentMessage_.id.isEmpty()) return;
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(currentMessage_.id, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentMessage_.id, {}, rem);
+    pending_->flush();
+    reloadCurrentLabel();
 }
 
 void MainWindow::onNewMessages(int count) {

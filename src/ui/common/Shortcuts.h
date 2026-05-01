@@ -22,6 +22,8 @@ signals:
     void selectPrev();
     void composeNew();
     void replyToCurrent();
+    void replyAllToCurrent();
+    void forwardCurrent();
     void archiveCurrent();
     void deleteCurrent();
     void toggleStar();

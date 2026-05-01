@@ -9,16 +9,6 @@
 
 namespace fc::cache {
 
-namespace {
-
-QString deriveParentId(const QString& name) {
-    const int slash = name.lastIndexOf('/');
-    if (slash <= 0) return {};
-    return name.left(slash);
-}
-
-}  // namespace
-
 void LabelRepository::upsert(const LabelRow& l) {
     auto db = databaseHandle();
     QSqlQuery q(db);
@@ -36,8 +26,14 @@ void LabelRepository::upsert(const LabelRow& l) {
     q.bindValue(QStringLiteral(":id"),     l.id);
     q.bindValue(QStringLiteral(":name"),   l.name);
     q.bindValue(QStringLiteral(":type"),   l.type);
-    q.bindValue(QStringLiteral(":parent"),
-                l.parentId.isEmpty() ? deriveParentId(l.name) : l.parentId);
+    // parent_id is purely informational — Gmail's API doesn't expose a parent
+    // id and the visual tree comes from "/"-splitting the label name in
+    // LabelTreeModel. We persist NULL unless callers explicitly hand us one.
+    if (l.parentId.isEmpty()) {
+        q.bindValue(QStringLiteral(":parent"), QVariant(QMetaType(QMetaType::QString)));
+    } else {
+        q.bindValue(QStringLiteral(":parent"), l.parentId);
+    }
     q.bindValue(QStringLiteral(":bg"),     l.colorBg);
     q.bindValue(QStringLiteral(":fg"),     l.colorFg);
     q.bindValue(QStringLiteral(":u"),      l.unreadCount);

@@ -6,7 +6,9 @@
 #include "auth/OAuthClient.h"
 #include "auth/TokenStore.h"
 #include "cache/Database.h"
+#include "sync/DraftSync.h"
 #include "sync/OutboxWorker.h"
+#include "sync/PendingOpsWorker.h"
 #include "sync/SyncService.h"
 #include "ui/MainWindow.h"
 
@@ -22,7 +24,10 @@ Bootstrap::Bootstrap(QObject* parent) : QObject(parent) {
     gmail_      = new fc::api::GmailClient(rest_, this);
     sync_       = new fc::sync::SyncService(gmail_, this);
     outbox_     = new fc::sync::OutboxWorker(gmail_, this);
-    window_     = new fc::ui::MainWindow(config_, auth_, gmail_, sync_, outbox_);
+    pending_    = new fc::sync::PendingOpsWorker(gmail_, this);
+    drafts_     = new fc::sync::DraftSync(gmail_, this);
+    window_     = new fc::ui::MainWindow(config_, auth_, gmail_,
+                                         sync_, outbox_, pending_, drafts_);
 }
 
 Bootstrap::~Bootstrap() {

@@ -11,7 +11,8 @@ class QLineEdit;
 namespace fc { class MessageListModel; }
 namespace fc::auth  { class OAuthClient; class ClientConfig; }
 namespace fc::api   { class GmailClient; }
-namespace fc::sync  { class SyncService; class OutboxWorker; }
+namespace fc::sync  { class SyncService; class OutboxWorker;
+                      class PendingOpsWorker; class DraftSync; }
 
 namespace fc::ui {
 
@@ -32,6 +33,8 @@ public:
                fc::api::GmailClient* gmail,
                fc::sync::SyncService* sync,
                fc::sync::OutboxWorker* outbox,
+               fc::sync::PendingOpsWorker* pending,
+               fc::sync::DraftSync* drafts,
                QWidget* parent = nullptr);
 
 private slots:
@@ -44,6 +47,8 @@ private slots:
     void onSearchSubmit();
     void onComposeNew();
     void onReplyCurrent();
+    void onReplyAllCurrent();
+    void onForwardCurrent();
     void onCreateLabel(const QString& parentLabelId);
     void onRenameLabel(const QString& labelId);
     void onDeleteLabel(const QString& labelId);
@@ -59,12 +64,15 @@ private:
     void buildLayout();
     void wireSignals();
     void refreshAccountIndicator();
+    void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
 
-    fc::auth::ClientConfig*  config_;
-    fc::auth::OAuthClient*   auth_;
-    fc::api::GmailClient*    gmail_;
-    fc::sync::SyncService*   sync_;
-    fc::sync::OutboxWorker*  outbox_;
+    fc::auth::ClientConfig*    config_;
+    fc::auth::OAuthClient*     auth_;
+    fc::api::GmailClient*      gmail_;
+    fc::sync::SyncService*     sync_;
+    fc::sync::OutboxWorker*    outbox_;
+    fc::sync::PendingOpsWorker* pending_;
+    fc::sync::DraftSync*       drafts_;
 
     QSplitter*               splitter_;
     SidebarWidget*           sidebar_;

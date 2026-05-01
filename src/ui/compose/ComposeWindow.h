@@ -27,14 +27,37 @@ public:
     // Pre-fills To/Subject/References from a parent message.
     void prefillFrom(const fc::Message& parent, Mode mode);
 
+    // Pre-fills the entire window from an existing draft (for editing).
+    void loadFromDraft(const QString& draftId,
+                       const QString& threadId,
+                       const QString& subject,
+                       const QStringList& to,
+                       const QStringList& cc,
+                       const QString& body);
+
+    // Returns the local draft id assigned on the first save (empty if not
+    // saved yet).
+    QString draftId() const;
+
 signals:
     // Emitted when the user clicks Send. `outgoing` is fully populated and
     // ready to feed to MimeBuilder; threadId is set on reply/replyAll.
     void composeReady(const fc::util::OutgoingMessage& outgoing,
                       const QString& threadId);
 
+    // Emitted when the user clicks Save Draft (or closes a dirty window after
+    // confirming). MainWindow persists into DraftRepository and triggers
+    // DraftSync to push to Gmail.
+    void saveDraftRequested(const fc::util::OutgoingMessage& outgoing,
+                            const QString& threadId,
+                            const QString& existingDraftId);
+
 private slots:
     void onSend();
+    void onSaveDraft();
+
+protected:
+    void closeEvent(QCloseEvent* e) override;
 
 private:
     QString    fromAddr_;
@@ -49,6 +72,11 @@ private:
 
     QString    inReplyToHeader_;
     QStringList referencesHeader_;
+    QString    draftId_;
+    bool       dirty_ = false;
+    bool       suppressClosePrompt_ = false;
+
+    fc::util::OutgoingMessage currentMessage() const;
 };
 
 }  // namespace fc::ui

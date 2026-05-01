@@ -30,6 +30,9 @@ public:
     static fc::Message byId(const QString& id);
     static bool exists(const QString& id);
 
+    // Returns all messages in a thread, ordered ascending by internal_date.
+    static std::vector<fc::Message> byThread(const QString& threadId);
+
     // Apply local label add/remove (and update is_unread/starred derived flags).
     static void applyLabelDiff(const QString& messageId,
                                const QStringList& added,

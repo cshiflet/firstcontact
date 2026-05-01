@@ -24,6 +24,10 @@ Shortcuts::Shortcuts(QMainWindow* main) : QObject(main) {
             &QShortcut::activated, this, &Shortcuts::composeNew);
     connect(make(main, QKeySequence(QStringLiteral("r"))),
             &QShortcut::activated, this, &Shortcuts::replyToCurrent);
+    connect(make(main, QKeySequence(QStringLiteral("Shift+R"))),
+            &QShortcut::activated, this, &Shortcuts::replyAllToCurrent);
+    connect(make(main, QKeySequence(QStringLiteral("f"))),
+            &QShortcut::activated, this, &Shortcuts::forwardCurrent);
     connect(make(main, QKeySequence(QStringLiteral("e"))),
             &QShortcut::activated, this, &Shortcuts::archiveCurrent);
     connect(make(main, QKeySequence(QStringLiteral("#"))),

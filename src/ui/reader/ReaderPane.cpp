@@ -1,97 +1,215 @@
 #include "ReaderPane.h"
 
+#include "HtmlRenderHostLoader.h"
+#include "IHtmlRenderHost.h"
 #include "util/HtmlSanitizer.h"
 #include "util/Html2Text.h"
 #include "util/Linkify.h"
 
 #include <QDateTime>
+#include <QFrame>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
+#include <QScrollArea>
 #include <QTextBrowser>
 #include <QVBoxLayout>
 
 namespace fc::ui {
 
+namespace {
+
+QString formatDate(qint64 ms) {
+    if (ms <= 0) return {};
+    return QDateTime::fromMSecsSinceEpoch(ms).toLocalTime()
+        .toString(QStringLiteral("ddd, MMM d, yyyy h:mm AP"));
+}
+
+QString fromDisplay(const fc::Message& m) {
+    if (!m.fromName.isEmpty() && !m.fromAddr.isEmpty())
+        return QStringLiteral("%1 &lt;%2&gt;")
+            .arg(m.fromName.toHtmlEscaped(), m.fromAddr.toHtmlEscaped());
+    return m.fromAddr.toHtmlEscaped();
+}
+
+QString headerHtml(const fc::Message& m, bool full) {
+    QString h = QStringLiteral(
+        "<div style='font-weight:bold; font-size:11pt;'>%1</div>"
+        "<div style='color:gray; font-size:9pt;'>%2 — %3</div>")
+        .arg(m.subject.toHtmlEscaped(),
+             fromDisplay(m),
+             formatDate(m.internalDate));
+    if (full) {
+        if (!m.toAddrs.isEmpty()) {
+            h += QStringLiteral("<div style='color:gray; font-size:9pt;'>"
+                                "<b>To:</b> %1</div>")
+                    .arg(m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+        }
+        if (!m.ccAddrs.isEmpty()) {
+            h += QStringLiteral("<div style='color:gray; font-size:9pt;'>"
+                                "<b>Cc:</b> %1</div>")
+                    .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+        }
+    }
+    return h;
+}
+
+QString bodyHtml(const fc::Message& m) {
+    if (!m.bodyText.isEmpty()) return util::linkifyPlainText(m.bodyText);
+    if (!m.bodyHtml.isEmpty()) {
+        const auto safe = util::sanitizeHtml(m.bodyHtml);
+        QString r = safe.html;
+        if (safe.remoteImagesBlocked) {
+            r.prepend(QStringLiteral(
+                "<div style='background:#fff8c4;padding:6px;"
+                "border:1px solid #d4d000;'><i>Remote images blocked.</i></div>"));
+        }
+        return r;
+    }
+    if (m.bodyHtmlPresent) {
+        return QStringLiteral("<p><i>HTML content not yet fetched.</i></p>");
+    }
+    return QStringLiteral("<p><i>(empty message)</i></p>");
+}
+
+}  // namespace
+
 ReaderPane::ReaderPane(QWidget* parent) : QWidget(parent) {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(12, 8, 12, 12);
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
 
-    headerLabel_ = new QLabel(this);
-    headerLabel_->setTextFormat(Qt::RichText);
-    headerLabel_->setWordWrap(true);
-    headerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(headerLabel_);
+    scroll_ = new QScrollArea(this);
+    scroll_->setWidgetResizable(true);
+    scroll_->setFrameShape(QFrame::NoFrame);
 
-    body_ = new QTextBrowser(this);
-    body_->setOpenExternalLinks(true);
-    body_->setReadOnly(true);
-    layout->addWidget(body_, /*stretch=*/1);
+    content_ = new QWidget(scroll_);
+    contentLayout_ = new QVBoxLayout(content_);
+    contentLayout_->setContentsMargins(12, 8, 12, 12);
+    contentLayout_->setSpacing(8);
+    contentLayout_->addStretch(1);
+
+    scroll_->setWidget(content_);
+    root->addWidget(scroll_);
 
     showEmpty();
 }
 
+void ReaderPane::clearStack() {
+    while (auto* item = contentLayout_->takeAt(0)) {
+        if (auto* w = item->widget()) w->deleteLater();
+        delete item;
+    }
+    contentLayout_->addStretch(1);
+}
+
+QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpanded) {
+    auto* card = new QFrame(content_);
+    card->setFrameShape(QFrame::StyledPanel);
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(10, 8, 10, 10);
+
+    auto* header = new QLabel(card);
+    header->setTextFormat(Qt::RichText);
+    header->setWordWrap(true);
+    header->setText(headerHtml(m, /*full=*/initiallyExpanded));
+    cardLayout->addWidget(header);
+
+    auto* body = new QTextBrowser(card);
+    body->setOpenExternalLinks(true);
+    body->setReadOnly(true);
+    body->setFrameShape(QFrame::NoFrame);
+    body->setHtml(bodyHtml(m));
+    body->setVisible(initiallyExpanded);
+    cardLayout->addWidget(body);
+
+    // Offer "Show full HTML" only for messages where the message has HTML
+    // and the optional QtWebEngine plugin is deployed.
+    if (initiallyExpanded
+        && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
+        && HtmlRenderHostLoader::available()) {
+        auto* row = new QHBoxLayout;
+        row->addStretch(1);
+        auto* webBtn = new QPushButton(tr("Show full HTML"), card);
+        webBtn->setFlat(true);
+        webBtn->setCursor(Qt::PointingHandCursor);
+        row->addWidget(webBtn);
+        cardLayout->addLayout(row);
+
+        const QString html = m.bodyHtml.isEmpty()
+            ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
+            : m.bodyHtml;
+
+        QObject::connect(webBtn, &QPushButton::clicked, card,
+            [card, cardLayout, body, webBtn, html]() {
+                auto* host = HtmlRenderHostLoader::create(card);
+                if (!host) return;
+                body->hide();
+                webBtn->setEnabled(false);
+                webBtn->setText(QObject::tr("Loading full HTML…"));
+                QWidget* w = host->widget();
+                w->setMinimumHeight(400);
+                cardLayout->addWidget(w);
+                host->render(html, /*allowRemote=*/false);
+                // Tie the host's lifetime to its widget so a new message
+                // selection (which destroys the card) tears down the
+                // off-the-record QWebEngineProfile too.
+                QObject::connect(w, &QWidget::destroyed, [host] { delete host; });
+            });
+    }
+
+    if (!initiallyExpanded) {
+        // Click anywhere on a collapsed card's header to expand.
+        header->setCursor(Qt::PointingHandCursor);
+        QObject::connect(header, &QLabel::linkActivated,
+                         body, [](const QString&) { /* let body handle */ });
+        // We don't have a click signal on QLabel; wrap via event filter using
+        // a button-like approach: add a small ▾ toggle.
+        auto* toggle = new QPushButton(QStringLiteral("Show"), card);
+        toggle->setFlat(true);
+        toggle->setCursor(Qt::PointingHandCursor);
+        cardLayout->addWidget(toggle, 0, Qt::AlignRight);
+        QObject::connect(toggle, &QPushButton::clicked,
+                         body, [body, header, m, toggle]() {
+            const bool now = !body->isVisible();
+            body->setVisible(now);
+            header->setText(headerHtml(m, /*full=*/now));
+            toggle->setText(now ? QStringLiteral("Hide")
+                                : QStringLiteral("Show"));
+        });
+    }
+
+    return card;
+}
+
 void ReaderPane::showLoading() {
-    headerLabel_->setText(QStringLiteral("<i>Loading…</i>"));
-    body_->clear();
+    clearStack();
+    auto* l = new QLabel(QStringLiteral("<i>Loading…</i>"), content_);
+    l->setTextFormat(Qt::RichText);
+    contentLayout_->insertWidget(0, l);
 }
 
 void ReaderPane::showEmpty(const QString& reason) {
-    headerLabel_->setText(reason.isEmpty()
+    clearStack();
+    auto* l = new QLabel(reason.isEmpty()
         ? QStringLiteral("<i>Select a message.</i>")
-        : QStringLiteral("<i>%1</i>").arg(reason.toHtmlEscaped()));
-    body_->clear();
+        : QStringLiteral("<i>%1</i>").arg(reason.toHtmlEscaped()), content_);
+    l->setTextFormat(Qt::RichText);
+    contentLayout_->insertWidget(0, l);
 }
 
 void ReaderPane::showMessage(const fc::Message& m) {
-    const QString from = m.fromName.isEmpty()
-        ? m.fromAddr
-        : QStringLiteral("%1 <%2>").arg(m.fromName, m.fromAddr);
-    const QString date = QDateTime::fromMSecsSinceEpoch(m.internalDate)
-                            .toLocalTime()
-                            .toString(QStringLiteral("ddd, MMM d, yyyy h:mm AP"));
+    clearStack();
+    contentLayout_->insertWidget(0, buildMessageCard(m, /*initiallyExpanded=*/true));
+}
 
-    QString header = QStringLiteral(
-        "<div style='font-size:13pt;font-weight:bold;'>%1</div>"
-        "<div><b>From:</b> %2</div>"
-        "<div><b>To:</b> %3</div>")
-        .arg(m.subject.toHtmlEscaped(),
-             from.toHtmlEscaped(),
-             m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
-    if (!m.ccAddrs.isEmpty()) {
-        header += QStringLiteral("<div><b>Cc:</b> %1</div>")
-                    .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
-    }
-    header += QStringLiteral("<div style='color:gray;'>%1</div>").arg(date);
-    headerLabel_->setText(header);
+void ReaderPane::showThread(const std::vector<fc::Message>& messages) {
+    clearStack();
+    if (messages.empty()) { showEmpty(); return; }
 
-    if (!m.bodyText.isEmpty()) {
-        body_->setHtml(util::linkifyPlainText(m.bodyText));
-    } else if (!m.bodyHtml.isEmpty()) {
-        const auto safe = util::sanitizeHtml(m.bodyHtml);
-        QString rendered = safe.html;
-        if (safe.remoteImagesBlocked) {
-            rendered.prepend(QStringLiteral(
-                "<div style='background:#fff8c4;padding:6px;border:1px solid #d4d000;'>"
-                "<i>Remote images blocked. Showing as plain HTML.</i></div>"));
-        }
-        body_->setHtml(rendered);
-    } else if (m.bodyHtmlPresent) {
-        // We know the message has HTML but haven't fetched it; fall back
-        // to a notice. Once Phase 4 fetches HTML on demand this branch
-        // will trigger an async getMessage(format=full).
-        body_->setHtml(QStringLiteral("<p><i>This message has HTML content "
-                                      "that hasn't been fetched yet.</i></p>"));
-    } else {
-        body_->setHtml(QStringLiteral("<p><i>(empty message)</i></p>"));
-    }
-
-    if (!m.attachments.empty()) {
-        QString att = QStringLiteral("<hr><b>Attachments:</b><ul>");
-        for (const auto& a : m.attachments) {
-            att += QStringLiteral("<li>%1 (%2 bytes)</li>")
-                       .arg(a.filename.toHtmlEscaped()).arg(a.size);
-        }
-        att += QStringLiteral("</ul>");
-        body_->append(att);
+    // All messages collapsed except the most recent.
+    for (int i = 0; i < int(messages.size()); ++i) {
+        const bool isLatest = (i == int(messages.size()) - 1);
+        contentLayout_->insertWidget(i, buildMessageCard(messages[i], isLatest));
     }
 }
 

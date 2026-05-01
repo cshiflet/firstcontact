@@ -4,7 +4,8 @@
 
 namespace fc::auth { class ClientConfig; class TokenStore; class OAuthClient; }
 namespace fc::api  { class RestClient;   class GmailClient; }
-namespace fc::sync { class SyncService;  class OutboxWorker; }
+namespace fc::sync { class SyncService;  class OutboxWorker;
+                     class PendingOpsWorker; class DraftSync; }
 namespace fc::ui   { class MainWindow; }
 
 namespace fc::app {
@@ -25,9 +26,11 @@ private:
     fc::auth::OAuthClient*   auth_;
     fc::api::RestClient*     rest_;
     fc::api::GmailClient*    gmail_;
-    fc::sync::SyncService*   sync_;
-    fc::sync::OutboxWorker*  outbox_;
-    fc::ui::MainWindow*      window_;
+    fc::sync::SyncService*    sync_;
+    fc::sync::OutboxWorker*   outbox_;
+    fc::sync::PendingOpsWorker* pending_;
+    fc::sync::DraftSync*      drafts_;
+    fc::ui::MainWindow*       window_;
 };
 
 }  // namespace fc::app

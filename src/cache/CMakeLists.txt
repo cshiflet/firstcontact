@@ -4,6 +4,8 @@ qt_add_library(fc_cache STATIC
     MessageRepository.h MessageRepository.cpp
     LabelRepository.h LabelRepository.cpp
     OutboxRepository.h OutboxRepository.cpp
+    PendingOpsRepository.h PendingOpsRepository.cpp
+    DraftRepository.h DraftRepository.cpp
     MetaRepository.h MetaRepository.cpp
 )
 qt_add_resources(fc_cache "fc_cache_schema"
