@@ -61,14 +61,23 @@ void writeLabelEdges(QSqlDatabase& db, const QString& messageId,
     del.bindValue(QStringLiteral(":m"), messageId);
     del.exec();
 
+    // Sub-select guards against FK violations: only insert when the label
+    // actually exists in our labels table. Gmail can return label_ids we
+    // haven't synced yet (e.g. CHAT, labels created on another client
+    // between our syncs) and we'd rather drop the edge than have a missing
+    // label fail the whole message upsert.
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
         "INSERT OR IGNORE INTO message_labels(message_id, label_id) "
-        "VALUES (:m, :l)"));
+        "SELECT :m, :l WHERE EXISTS (SELECT 1 FROM labels WHERE id = :l)"));
     for (const auto& l : labelIds) {
         ins.bindValue(QStringLiteral(":m"), messageId);
         ins.bindValue(QStringLiteral(":l"), l);
-        ins.exec();
+        if (!ins.exec()) {
+            qWarning("writeLabelEdges (msg=%s, label=%s): %s",
+                     qUtf8Printable(messageId), qUtf8Printable(l),
+                     qUtf8Printable(ins.lastError().text()));
+        }
     }
 }
 
@@ -76,6 +85,38 @@ void writeLabelEdges(QSqlDatabase& db, const QString& messageId,
 
 qint64 MessageRepository::upsert(const fc::Message& m) {
     auto db = databaseHandle();
+
+    // Atomic 3-step write: thread row first (the message FK requires it),
+    // then the message itself, then the label edges. Wrapped in a transaction
+    // so a failure in any step leaves the cache untouched.
+    db.transaction();
+
+    // 1. Thread upsert. messages.thread_id REFERENCES threads(id), so this
+    //    has to land before the message INSERT or PRAGMA foreign_keys = ON
+    //    rejects the message with "FOREIGN KEY constraint failed".
+    {
+        QSqlQuery threadUp(db);
+        threadUp.prepare(QStringLiteral(
+            "INSERT INTO threads(id, history_id, snippet, last_message_internal_date) "
+            "VALUES(:id, :h, :s, :d) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  history_id = excluded.history_id, "
+            "  snippet    = excluded.snippet, "
+            "  last_message_internal_date = MAX(threads.last_message_internal_date, "
+            "                                   excluded.last_message_internal_date)"));
+        threadUp.bindValue(QStringLiteral(":id"), m.threadId);
+        threadUp.bindValue(QStringLiteral(":h"),  m.historyId);
+        threadUp.bindValue(QStringLiteral(":s"),  m.snippet);
+        threadUp.bindValue(QStringLiteral(":d"),  m.internalDate);
+        if (!threadUp.exec()) {
+            qWarning("MessageRepository::upsert (thread): %s",
+                     qUtf8Printable(threadUp.lastError().text()));
+            db.rollback();
+            return 0;
+        }
+    }
+
+    // 2. Message upsert.
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO messages(id, thread_id, history_id, internal_date, "
@@ -136,26 +177,19 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
     q.bindValue(QStringLiteral(":created_at"),       now);
 
     if (!q.exec()) {
-        qWarning("MessageRepository::upsert: %s",
+        qWarning("MessageRepository::upsert (message): %s",
                  qUtf8Printable(q.lastError().text()));
+        db.rollback();
         return 0;
     }
 
-    QSqlQuery threadUp(db);
-    threadUp.prepare(QStringLiteral(
-        "INSERT INTO threads(id, history_id, snippet, last_message_internal_date) "
-        "VALUES(:id, :h, :s, :d) "
-        "ON CONFLICT(id) DO UPDATE SET "
-        "  history_id = excluded.history_id, "
-        "  snippet    = excluded.snippet, "
-        "  last_message_internal_date = MAX(threads.last_message_internal_date, excluded.last_message_internal_date)"));
-    threadUp.bindValue(QStringLiteral(":id"), m.threadId);
-    threadUp.bindValue(QStringLiteral(":h"),  m.historyId);
-    threadUp.bindValue(QStringLiteral(":s"),  m.snippet);
-    threadUp.bindValue(QStringLiteral(":d"),  m.internalDate);
-    threadUp.exec();
-
+    // 3. Label edges. Skip any label_id that doesn't exist in the labels
+    //    table — Gmail can return labels we haven't synced yet (e.g.
+    //    CHAT, or labels created on another client between syncs) and we
+    //    don't want a single missing label to fail the whole upsert.
     writeLabelEdges(db, m.id, m.labelIds);
+
+    db.commit();
     return q.lastInsertId().toLongLong();
 }
 
