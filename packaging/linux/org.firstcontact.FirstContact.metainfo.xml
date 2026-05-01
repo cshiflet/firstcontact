@@ -3,18 +3,43 @@
     <id>org.firstcontact.FirstContact</id>
     <name>FirstContact</name>
     <summary>Native Gmail client built on Qt 6</summary>
+
     <metadata_license>CC0-1.0</metadata_license>
     <project_license>AGPL-3.0-only</project_license>
+
     <description>
         <p>FirstContact is a resource-efficient native Gmail client. It uses the
         Gmail REST API directly, caches messages locally in SQLite for offline
         reading and full-text search, and renders HTML email only on demand to
         keep idle memory low.</p>
     </description>
+
     <launchable type="desktop-id">firstcontact.desktop</launchable>
+
     <provides>
         <binary>firstcontact</binary>
     </provides>
+
     <url type="homepage">https://github.com/cshiflet/firstcontact</url>
-    <developer_name>FirstContact contributors</developer_name>
+    <url type="bugtracker">https://github.com/cshiflet/firstcontact/issues</url>
+
+    <developer id="org.firstcontact">
+        <name>FirstContact contributors</name>
+    </developer>
+
+    <!-- Empty rating element = "no objectionable content for any age". -->
+    <content_rating type="oars-1.1" />
+
+    <categories>
+        <category>Network</category>
+        <category>Email</category>
+    </categories>
+
+    <releases>
+        <release version="0.1.0" date="2026-05-01">
+            <description>
+                <p>Initial development build.</p>
+            </description>
+        </release>
+    </releases>
 </component>

@@ -19,7 +19,7 @@ install(TARGETS firstcontact
 if(UNIX AND NOT APPLE)
     install(FILES   ${CMAKE_SOURCE_DIR}/packaging/linux/firstcontact.desktop
             DESTINATION share/applications)
-    install(FILES   ${CMAKE_SOURCE_DIR}/packaging/linux/firstcontact.appdata.xml
+    install(FILES   ${CMAKE_SOURCE_DIR}/packaging/linux/org.firstcontact.FirstContact.metainfo.xml
             DESTINATION share/metainfo)
     install(FILES   ${CMAKE_SOURCE_DIR}/resources/icons/firstcontact.png
             DESTINATION share/icons/hicolor/256x256/apps)
