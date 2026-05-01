@@ -15,6 +15,7 @@ public:
 
 private slots:
     void onThemeChanged(int idx);
+    void onHtmlPreviewChanged(int idx);
 };
 
 }  // namespace fc::ui

@@ -2,7 +2,10 @@
 
 #include "HtmlRenderHostLoader.h"
 #include "IHtmlRenderHost.h"
+#include "LocalHtmlServer.h"
+#include "ui/common/Preferences.h"
 #include "ui/common/Theme.h"
+#include "util/Browser.h"
 #include "util/HtmlSanitizer.h"
 #include "util/Html2Text.h"
 #include "util/Linkify.h"
@@ -50,7 +53,7 @@ ThemeColors themeColors() {
                        == Theme::Mode::Dark;
     if (dark) {
         return {
-            QStringLiteral("#e8eaed"),  // primary text
+            QStringLiteral("#f1f3f4"),  // primary text — near-white for contrast
             QStringLiteral("#9aa0a6"),  // secondary text
             QStringLiteral("#3a341a"),  // warning bg (dim amber)
             QStringLiteral("#5e5021"),  // warning border
@@ -58,7 +61,11 @@ ThemeColors themeColors() {
         };
     }
     return {
-        QStringLiteral("#202124"),
+        // Push primary all the way to near-black so the rich-text inline
+        // styles win against any palette-inherited grey, especially under
+        // Fusion + QSS where palette colors don't always cascade into
+        // QLabel's QTextDocument the way a naive reader would expect.
+        QStringLiteral("#0d0d0d"),
         QStringLiteral("#5f6368"),
         QStringLiteral("#fff8c4"),
         QStringLiteral("#d4d000"),
@@ -169,6 +176,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     header->setTextFormat(Qt::RichText);
     header->setWordWrap(true);
     header->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // Belt-and-braces: also set the QLabel's foreground via QPalette in
+    // case the QLabel's QTextDocument decides to override our inline style
+    // colors with the inherited palette text. Both the inline color: rules
+    // in headerHtml() and this palette agree on the active theme's primary.
+    {
+        const ThemeColors c = themeColors();
+        QPalette pal = header->palette();
+        pal.setColor(QPalette::WindowText, QColor(c.primary));
+        pal.setColor(QPalette::Text,       QColor(c.primary));
+        header->setPalette(pal);
+    }
     header->setText(headerHtml(m, /*full=*/initiallyExpanded));
     cardLayout->addWidget(header);
 
@@ -183,15 +201,20 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setVisible(initiallyExpanded);
     cardLayout->addWidget(body, /*stretch=*/1);
 
-    // Offer "Show full HTML" only for messages where the message has HTML
-    // and the optional QtWebEngine plugin is deployed.
+    // Offer "Show full HTML" only when the message actually has HTML and the
+    // user hasn't disabled the feature in Preferences. The button does
+    // different things depending on the chosen mode.
+    const auto previewMode = Preferences::htmlPreview();
     if (initiallyExpanded
         && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
-        && HtmlRenderHostLoader::available()) {
+        && previewMode != Preferences::HtmlPreview::Disabled) {
         auto* row = new QHBoxLayout;
         row->addStretch(1);
-        auto* webBtn = new QPushButton(tr("Show full HTML"), card);
-        webBtn->setFlat(true);
+        auto* webBtn = new QPushButton(
+            previewMode == Preferences::HtmlPreview::ExternalBrowser
+                ? tr("Open in browser")
+                : tr("Show full HTML"), card);
+        webBtn->setObjectName(QStringLiteral("link"));
         webBtn->setCursor(Qt::PointingHandCursor);
         row->addWidget(webBtn);
         cardLayout->addLayout(row);
@@ -202,19 +225,50 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
 
         QObject::connect(webBtn, &QPushButton::clicked, card,
             [card, cardLayout, body, webBtn, html]() {
-                auto* host = HtmlRenderHostLoader::create(card);
-                if (!host) return;
-                body->hide();
-                webBtn->setEnabled(false);
-                webBtn->setText(QObject::tr("Loading full HTML…"));
-                QWidget* w = host->widget();
-                w->setMinimumHeight(400);
-                cardLayout->addWidget(w);
-                host->render(html, /*allowRemote=*/false);
-                // Tie the host's lifetime to its widget so a new message
-                // selection (which destroys the card) tears down the
-                // off-the-record QWebEngineProfile too.
-                QObject::connect(w, &QWidget::destroyed, [host] { delete host; });
+                const auto mode = Preferences::htmlPreview();
+
+                if (mode == Preferences::HtmlPreview::ExternalBrowser) {
+                    // Spin up a one-shot loopback HTTP server, hand the URL
+                    // (with random token) to the system browser. No Chromium
+                    // ever loaded into our process. The server self-destructs
+                    // after the browser fetches the page or after 60 s.
+                    auto* srv = new LocalHtmlServer(html.toUtf8(), card);
+                    if (!srv->start()) {
+                        webBtn->setText(QObject::tr("Couldn't start local server"));
+                        srv->deleteLater();
+                        return;
+                    }
+                    const QUrl u = srv->url();
+                    qInfo("LocalHtmlServer: serving HTML at %s",
+                          qUtf8Printable(u.toString()));
+                    fc::util::launchBrowser(u);
+                    webBtn->setEnabled(false);
+                    webBtn->setText(QObject::tr("Opened in browser"));
+                    QObject::connect(srv, &LocalHtmlServer::expired, webBtn,
+                        [webBtn] { webBtn->setText(QObject::tr("Open in browser")); webBtn->setEnabled(true); });
+                    return;
+                }
+
+                if (mode == Preferences::HtmlPreview::InlineWebEngine
+                    && HtmlRenderHostLoader::available()) {
+                    auto* host = HtmlRenderHostLoader::create(card);
+                    if (!host) {
+                        webBtn->setText(QObject::tr("WebEngine plugin not available"));
+                        return;
+                    }
+                    body->hide();
+                    webBtn->setEnabled(false);
+                    webBtn->setText(QObject::tr("Loading full HTML…"));
+                    QWidget* w = host->widget();
+                    w->setMinimumHeight(400);
+                    cardLayout->addWidget(w);
+                    host->render(html, /*allowRemote=*/false);
+                    QObject::connect(w, &QWidget::destroyed,
+                                     [host] { delete host; });
+                    return;
+                }
+
+                webBtn->setText(QObject::tr("HTML preview unavailable — see Settings"));
             });
     }
 

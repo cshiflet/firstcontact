@@ -2,12 +2,11 @@
 
 #include "ClientConfig.h"
 #include "util/Base64Url.h"
+#include "util/Browser.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QEventLoop>
-#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMutex>
@@ -17,10 +16,7 @@
 #include <QNetworkRequest>
 #include <QOAuth2AuthorizationCodeFlow>
 #include <QOAuthHttpServerReplyHandler>
-#include <QProcess>
-#include <QProcessEnvironment>
 #include <QRandomGenerator>
-#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -58,114 +54,6 @@ QByteArray makeCodeVerifier() {
 
 QByteArray makeCodeChallenge(const QByteArray& verifier) {
     return util::base64UrlEncode(QCryptographicHash::hash(verifier, QCryptographicHash::Sha256));
-}
-
-// True if we're running inside WSL (Windows Subsystem for Linux). Cached.
-bool isWsl() {
-    static bool checked = false;
-    static bool result = false;
-    if (!checked) {
-        checked = true;
-        if (!QProcessEnvironment::systemEnvironment()
-                 .value(QStringLiteral("WSL_DISTRO_NAME")).isEmpty()) {
-            result = true;
-        } else {
-            QFile f(QStringLiteral("/proc/version"));
-            if (f.open(QIODevice::ReadOnly)) {
-                const QByteArray v = f.readAll();
-                result = v.contains("Microsoft") || v.contains("microsoft")
-                      || v.contains("WSL");
-            }
-        }
-        if (result) qInfo("OAuth: WSL environment detected");
-    }
-    return result;
-}
-
-// True if WSL has Windows interop reachable. False when the user has
-// `automount = false` in /etc/wsl.conf or otherwise lacks /mnt/c — in that
-// case wslview / cmd.exe / powershell.exe will all fail the moment they
-// shell out, even though startDetached returns success because the launcher
-// scripts fork before erroring out. Skipping them gives us cleaner logs and
-// quicker fall-through to the URL dialog the user will actually use.
-bool wslHasWindowsInterop() {
-    if (!QStandardPaths::findExecutable(QStringLiteral("cmd.exe")).isEmpty())
-        return true;
-    return QFileInfo::exists(QStringLiteral("/mnt/c/Windows/System32/cmd.exe"));
-}
-
-// Try increasingly specific strategies to launch the system browser. Returns
-// true on the first one that successfully starts a child process. Logs the
-// strategy used (or all the failures) for diagnostics.
-//
-// Why we don't trust QDesktopServices::openUrl alone: on Linux it relies on
-// xdg-open / xdg-utils, which is missing from minimal images, and there have
-// been long-running issues (Qt bug 90984 et al.) where the call silently
-// returns false when xdg-open is present but can't reach a snap-confined
-// browser. WSL is its own can of worms — there's no Linux browser at all,
-// so we have to bridge to the Windows host via wslview / cmd.exe.
-bool launchBrowser(const QUrl& url) {
-    const QString u = url.toString();
-
-    auto tryRun = [&](const QString& label, const QString& exe,
-                      const QStringList& args) {
-        if (QStandardPaths::findExecutable(exe).isEmpty()) return false;
-        if (!QProcess::startDetached(exe, args)) return false;
-        qInfo("OAuth: launched browser via '%s'", qUtf8Printable(label));
-        return true;
-    };
-
-    // On WSL the Linux side typically has no browser at all — bridge to the
-    // Windows host before falling back to Linux launchers. The redirect
-    // back to http://127.0.0.1:<port>/ works because WSL2 forwards
-    // localhost between Windows and Linux automatically.
-    if (isWsl()) {
-        if (!wslHasWindowsInterop()) {
-            qInfo("OAuth: WSL has no Windows interop (/mnt/c not mounted?) "
-                  "- skipping wslview/cmd.exe/powershell.exe; user will use "
-                  "the URL dialog");
-        } else {
-            // wslview (from the wslu package) is the canonical WSL equivalent
-            // of xdg-open and quotes URLs correctly.
-            if (tryRun("wslview", "wslview", {u})) return true;
-            // cmd.exe - empty-string title arg keeps `start` from interpreting
-            // the URL as a window title.
-            if (tryRun("cmd.exe",        "cmd.exe",
-                       {"/c", "start", "", u})) return true;
-            if (tryRun("powershell.exe", "powershell.exe",
-                       {"-NoProfile", "-Command",
-                        QStringLiteral("Start-Process '%1'").arg(u)})) return true;
-        }
-    }
-
-    if (QDesktopServices::openUrl(url)) {
-        qInfo("OAuth: launched browser via QDesktopServices");
-        return true;
-    }
-
-    const QString browserEnv =
-        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BROWSER"));
-    if (!browserEnv.isEmpty()
-        && tryRun("$BROWSER", browserEnv, {u})) return true;
-
-    if (tryRun("xdg-open",         "xdg-open",         {u})) return true;
-    if (tryRun("sensible-browser", "sensible-browser", {u})) return true;
-    if (tryRun("gio open",         "gio",              {"open", u})) return true;
-    if (tryRun("kde-open5",        "kde-open5",        {u})) return true;
-    if (tryRun("gnome-open",       "gnome-open",       {u})) return true;
-
-    for (const QString& exe : {QStringLiteral("firefox"),
-                                QStringLiteral("google-chrome"),
-                                QStringLiteral("chromium"),
-                                QStringLiteral("chromium-browser"),
-                                QStringLiteral("brave-browser"),
-                                QStringLiteral("microsoft-edge")}) {
-        if (tryRun(exe, exe, {u})) return true;
-    }
-
-    qWarning("OAuth: every browser launch strategy failed — "
-             "the user will need to copy the URL manually");
-    return false;
 }
 
 }  // namespace
@@ -294,7 +182,7 @@ void OAuthClient::authorize() {
     authUrl.setQuery(q);
 
     qInfo("OAuth authorize URL: %s", qUtf8Printable(authUrl.toString()));
-    const bool opened = launchBrowser(authUrl);
+    const bool opened = util::launchBrowser(authUrl);
     emit browserAuthRequested(authUrl, opened);
 }
 

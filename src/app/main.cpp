@@ -2,6 +2,7 @@
 #include "Bootstrap.h"
 
 #include "ui/MainWindow.h"
+#include "ui/common/Preferences.h"
 #include "ui/common/Theme.h"
 #include "util/Logger.h"
 #include "util/Paths.h"
@@ -9,6 +10,7 @@
 #include <QCoreApplication>
 #include <QLibrary>
 #include <QLockFile>
+#include <QSettings>
 
 int main(int argc, char** argv) {
     // Qt WebEngine requires Qt::AA_ShareOpenGLContexts to be set BEFORE
@@ -16,19 +18,34 @@ int main(int argc, char** argv) {
     // when WebEngine is never used.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
-    // If Qt6WebEngineCore is installed, pre-load it now so its static
-    // initializers run before QApplication. Without this, dynamically
-    // loading the firstcontact_html_renderer plugin via QLibrary later in
-    // the run trips the "WebEngine seems to be initialized from a plugin"
-    // diagnostic and segfaults during the first QWebEngineView construction.
-    // No-op (with an info log) on systems without WebEngine.
+    // We need to read the html-preview preference before QApplication is
+    // constructed (so we can decide whether to pre-load Qt6WebEngineCore).
+    // QSettings keys off the org/app names, so set those first — the same
+    // values Application::Application sets later.
+    QCoreApplication::setOrganizationName(QStringLiteral("FirstContact"));
+    QCoreApplication::setApplicationName(QStringLiteral("FirstContact"));
+
+    // Only pay the WebEngine pre-load cost (≈50–80 MB resident in this
+    // process plus Chromium init time) when the user has explicitly opted
+    // into the inline rich preview. Disabled and external-browser modes
+    // never need WebEngine, so they get a leaner idle.
     {
-        QLibrary core(QStringLiteral("Qt6WebEngineCore"), 6);
-        if (!core.load()) {
-            qInfo("Qt6WebEngineCore not available — 'Show full HTML' will be "
-                  "unavailable: %s", qUtf8Printable(core.errorString()));
+        QSettings s;
+        const auto mode = fc::ui::Preferences::htmlPreviewFromString(
+            s.value(QLatin1String(fc::ui::Preferences::htmlPreviewKey()),
+                    QStringLiteral("external")).toString());
+        if (mode == fc::ui::Preferences::HtmlPreview::InlineWebEngine) {
+            QLibrary core(QStringLiteral("Qt6WebEngineCore"), 6);
+            if (core.load()) {
+                qInfo("Qt6WebEngineCore pre-loaded for inline HTML preview");
+            } else {
+                qInfo("Inline HTML preview requested but Qt6WebEngineCore is "
+                      "unavailable: %s — falling back to external-browser mode "
+                      "at runtime", qUtf8Printable(core.errorString()));
+            }
         } else {
-            qInfo("Qt6WebEngineCore pre-loaded for HTML rendering");
+            qInfo("HTML preview mode: %s — WebEngine pre-load skipped",
+                  qUtf8Printable(fc::ui::Preferences::htmlPreviewToString(mode)));
         }
     }
 
