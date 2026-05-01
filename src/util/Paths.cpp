@@ -1,6 +1,9 @@
 #include "Paths.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileDevice>
+#include <QFileInfo>
 #include <QStandardPaths>
 
 namespace fc::util {
@@ -30,6 +33,16 @@ QString cacheDbPath() {
 
 QString singleInstanceLockPath() {
     return dataDir() + QStringLiteral("/firstcontact.lock");
+}
+
+void restrictPermissionsToOwner(const QString& path) {
+    if (!QFileInfo::exists(path)) return;
+    QFile f(path);
+    const QFileDevice::Permissions wanted =
+        QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+    if (!f.setPermissions(wanted)) {
+        qWarning("Failed to set 0600 permissions on %s", qUtf8Printable(path));
+    }
 }
 
 }  // namespace fc::util

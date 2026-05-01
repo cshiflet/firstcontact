@@ -8,6 +8,7 @@
 #include <QStringList>
 
 #include <functional>
+#include <vector>
 
 namespace fc::api {
 
@@ -44,6 +45,63 @@ public:
         QString historyId;
     };
     void getProfile(std::function<void(Profile, ApiError)> cb);
+
+    // Labels --------------------------------------------------------------
+
+    struct Label {
+        QString id;
+        QString name;
+        QString type;     // "system" | "user"
+        QString colorBg;
+        QString colorFg;
+    };
+    void listLabels(std::function<void(std::vector<Label>, ApiError)> cb);
+    void createLabel(const QString& name,
+                     std::function<void(Label, ApiError)> cb);
+    void updateLabel(const QString& id, const QString& newName,
+                     std::function<void(Label, ApiError)> cb);
+    void deleteLabel(const QString& id,
+                     std::function<void(ApiError)> cb);
+
+    // Modify message labels (add/remove). Used by both online edits and the
+    // pending-ops worker after offline edits.
+    void modifyMessage(const QString& messageId,
+                       const QStringList& addLabels,
+                       const QStringList& removeLabels,
+                       std::function<void(ApiError)> cb);
+
+    // History -------------------------------------------------------------
+
+    struct HistoryEntry {
+        QString id;
+        QStringList messagesAdded;
+        QStringList messagesDeleted;
+        // (Phase 2.5: labelsAdded/Removed deltas if we want richer behaviour.)
+    };
+    struct HistoryPage {
+        std::vector<HistoryEntry> entries;
+        QString historyId;
+        QString nextPageToken;
+        bool    historyTooOld = false;   // 404
+    };
+    void listHistory(const QString& startHistoryId,
+                     const QString& pageToken,
+                     std::function<void(HistoryPage, ApiError)> cb);
+
+    // Send / drafts -------------------------------------------------------
+
+    // Sends a fully-built RFC 5322 blob. `threadId` ties the message into an
+    // existing thread when replying.
+    void sendRaw(const QByteArray& rfc5322,
+                 const QString& threadId,
+                 std::function<void(QString messageId, ApiError)> cb);
+
+    // Phase-3 draft helpers — full surface lands when ComposeWindow is wired.
+    void createDraft(const QByteArray& rfc5322,
+                     const QString& threadId,
+                     std::function<void(QString draftId, ApiError)> cb);
+    void deleteDraft(const QString& draftId,
+                     std::function<void(ApiError)> cb);
 
 private:
     RestClient* rest_;

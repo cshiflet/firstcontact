@@ -184,32 +184,45 @@ void OAuthClient::persistFromFlow() {
 }
 
 bool OAuthClient::refreshIfNeededLocked() {
-    // tokenMutex held.
+    // tokenMutex held on entry. We RELEASE it across the event loop so other
+    // threads can read tokens (e.g. concurrent batched requests). A second
+    // refresh racing this one would be wasteful but not incorrect — both end
+    // up writing the latest server-issued access_token.
     if (!d_->tokens.valid()) return false;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     if (d_->tokens.expiresAtUnix - now > 60) return true;
 
-    QNetworkRequest req{QUrl(QLatin1String(kTokenEndpoint))};
-    req.setHeader(QNetworkRequest::ContentTypeHeader,
-                  QStringLiteral("application/x-www-form-urlencoded"));
+    const QString clientId     = d_->config->clientId();
+    const QString refreshToken = d_->tokens.refreshToken;
 
-    QUrlQuery q;
-    q.addQueryItem(QStringLiteral("client_id"),     d_->config->clientId());
-    q.addQueryItem(QStringLiteral("grant_type"),    QStringLiteral("refresh_token"));
-    q.addQueryItem(QStringLiteral("refresh_token"), d_->tokens.refreshToken);
+    d_->tokenMutex.unlock();
+    QByteArray body;
+    QNetworkReply::NetworkError netErr;
+    QString netErrText;
+    {
+        QNetworkRequest req{QUrl(QLatin1String(kTokenEndpoint))};
+        req.setHeader(QNetworkRequest::ContentTypeHeader,
+                      QStringLiteral("application/x-www-form-urlencoded"));
 
-    // Synchronous in-place wait — this method is called from the sync thread.
-    QEventLoop loop;
-    auto* reply = d_->nam->post(req, q.toString(QUrl::FullyEncoded).toUtf8());
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("client_id"),     clientId);
+        q.addQueryItem(QStringLiteral("grant_type"),    QStringLiteral("refresh_token"));
+        q.addQueryItem(QStringLiteral("refresh_token"), refreshToken);
 
-    const auto body = reply->readAll();
-    const auto err  = reply->error();
-    reply->deleteLater();
+        QEventLoop loop;
+        auto* reply = d_->nam->post(req, q.toString(QUrl::FullyEncoded).toUtf8());
+        connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
 
-    if (err != QNetworkReply::NoError) {
-        qWarning("Token refresh failed: %s", qUtf8Printable(reply->errorString()));
+        body       = reply->readAll();
+        netErr     = reply->error();
+        netErrText = reply->errorString();
+        reply->deleteLater();
+    }
+    d_->tokenMutex.lock();
+
+    if (netErr != QNetworkReply::NoError) {
+        qWarning("Token refresh failed: %s", qUtf8Printable(netErrText));
         return false;
     }
     const auto o = QJsonDocument::fromJson(body).object();
@@ -245,7 +258,16 @@ void OAuthClient::signOut() {
         q.addQueryItem(QStringLiteral("token"), copy.refreshToken);
         u.setQuery(q);
         auto* reply = d_->nam->post(QNetworkRequest(u), QByteArray());
-        connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+        connect(reply, &QNetworkReply::finished, reply, [reply] {
+            if (reply->error() != QNetworkReply::NoError) {
+                qWarning("Refresh-token revoke failed: %s — token may still "
+                         "be valid on Google. Visit "
+                         "https://myaccount.google.com/permissions to revoke "
+                         "manually.",
+                         qUtf8Printable(reply->errorString()));
+            }
+            reply->deleteLater();
+        });
     }
     d_->store->erase([this](bool, QString) { emit signedOut(); });
 }

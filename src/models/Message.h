@@ -32,6 +32,7 @@ struct Message {
     QString subject;
     QString snippet;
     QString bodyText;             // text/plain part (may be empty)
+    QString bodyHtml;             // text/html part (may be empty)
     bool    bodyHtmlPresent = false;
 
     bool isUnread    = false;

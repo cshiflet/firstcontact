@@ -1,5 +1,7 @@
 #include "ReaderPane.h"
 
+#include "util/HtmlSanitizer.h"
+#include "util/Html2Text.h"
 #include "util/Linkify.h"
 
 #include <QDateTime>
@@ -63,10 +65,21 @@ void ReaderPane::showMessage(const fc::Message& m) {
 
     if (!m.bodyText.isEmpty()) {
         body_->setHtml(util::linkifyPlainText(m.bodyText));
+    } else if (!m.bodyHtml.isEmpty()) {
+        const auto safe = util::sanitizeHtml(m.bodyHtml);
+        QString rendered = safe.html;
+        if (safe.remoteImagesBlocked) {
+            rendered.prepend(QStringLiteral(
+                "<div style='background:#fff8c4;padding:6px;border:1px solid #d4d000;'>"
+                "<i>Remote images blocked. Showing as plain HTML.</i></div>"));
+        }
+        body_->setHtml(rendered);
     } else if (m.bodyHtmlPresent) {
-        body_->setHtml(QStringLiteral(
-            "<p><i>This message is HTML-only. Rich rendering arrives in "
-            "Phase 3 — the “Show HTML” option will load it on demand.</i></p>"));
+        // We know the message has HTML but haven't fetched it; fall back
+        // to a notice. Once Phase 4 fetches HTML on demand this branch
+        // will trigger an async getMessage(format=full).
+        body_->setHtml(QStringLiteral("<p><i>This message has HTML content "
+                                      "that hasn't been fetched yet.</i></p>"));
     } else {
         body_->setHtml(QStringLiteral("<p><i>(empty message)</i></p>"));
     }

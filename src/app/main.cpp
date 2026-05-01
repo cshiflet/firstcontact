@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     fc::util::installLogger();
 
     QLockFile lock(fc::util::singleInstanceLockPath());
-    lock.setStaleLockTime(0);
+    lock.setStaleLockTime(30'000);   // 30s — clear locks left by crashed processes
     if (!lock.tryLock(0)) {
         qWarning("Another FirstContact instance is already running.");
         return 0;

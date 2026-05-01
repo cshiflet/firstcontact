@@ -4,6 +4,8 @@ add_library(fc_util STATIC
     Logger.h Logger.cpp
     Linkify.h Linkify.cpp
     Html2Text.h Html2Text.cpp
+    HtmlSanitizer.h HtmlSanitizer.cpp
+    MimeBuilder.h MimeBuilder.cpp
 )
 target_include_directories(fc_util PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_util PUBLIC Qt6::Core Qt6::Gui)

@@ -82,6 +82,10 @@ void walkPart(const QJsonObject& part, fc::Message& msg) {
         msg.bodyText = QString::fromUtf8(util::base64UrlDecode(raw));
     } else if (mime == QLatin1String("text/html")) {
         msg.bodyHtmlPresent = true;
+        if (msg.bodyHtml.isEmpty()) {
+            const QByteArray raw = body.value(QStringLiteral("data")).toString().toLatin1();
+            msg.bodyHtml = QString::fromUtf8(util::base64UrlDecode(raw));
+        }
     }
 }
 

@@ -78,4 +78,182 @@ void GmailClient::getProfile(std::function<void(Profile, ApiError)> cb) {
         });
 }
 
+namespace {
+
+GmailClient::Label labelFromJson(const QJsonObject& o) {
+    GmailClient::Label l;
+    l.id   = o.value(QStringLiteral("id")).toString();
+    l.name = o.value(QStringLiteral("name")).toString();
+    l.type = o.value(QStringLiteral("type")).toString();
+    const auto color = o.value(QStringLiteral("color")).toObject();
+    l.colorBg = color.value(QStringLiteral("backgroundColor")).toString();
+    l.colorFg = color.value(QStringLiteral("textColor")).toString();
+    return l;
+}
+
+}  // namespace
+
+void GmailClient::listLabels(std::function<void(std::vector<Label>, ApiError)> cb) {
+    rest_->send(RestClient::Verb::Get, base(QStringLiteral("/labels")), {}, {},
+        [cb = std::move(cb)](QByteArray body, ApiError err) {
+            if (err) { cb({}, err); return; }
+            std::vector<Label> out;
+            for (const auto v : QJsonDocument::fromJson(body)
+                                    .object().value(QStringLiteral("labels")).toArray()) {
+                out.push_back(labelFromJson(v.toObject()));
+            }
+            cb(std::move(out), {});
+        });
+}
+
+void GmailClient::createLabel(const QString& name,
+                              std::function<void(Label, ApiError)> cb) {
+    QJsonObject body{
+        {QStringLiteral("name"), name},
+        {QStringLiteral("messageListVisibility"), QStringLiteral("show")},
+        {QStringLiteral("labelListVisibility"),   QStringLiteral("labelShow")},
+    };
+    rest_->send(RestClient::Verb::Post, base(QStringLiteral("/labels")),
+        QJsonDocument(body).toJson(QJsonDocument::Compact),
+        "application/json",
+        [cb = std::move(cb)](QByteArray data, ApiError err) {
+            if (err) { cb({}, err); return; }
+            cb(labelFromJson(QJsonDocument::fromJson(data).object()), {});
+        });
+}
+
+void GmailClient::updateLabel(const QString& id, const QString& newName,
+                              std::function<void(Label, ApiError)> cb) {
+    QJsonObject body{ {QStringLiteral("name"), newName} };
+    rest_->send(RestClient::Verb::Patch,
+        base(QStringLiteral("/labels/") + id),
+        QJsonDocument(body).toJson(QJsonDocument::Compact),
+        "application/json",
+        [cb = std::move(cb)](QByteArray data, ApiError err) {
+            if (err) { cb({}, err); return; }
+            cb(labelFromJson(QJsonDocument::fromJson(data).object()), {});
+        });
+}
+
+void GmailClient::deleteLabel(const QString& id,
+                              std::function<void(ApiError)> cb) {
+    rest_->send(RestClient::Verb::Delete,
+        base(QStringLiteral("/labels/") + id), {}, {},
+        [cb = std::move(cb)](QByteArray, ApiError err) { cb(err); });
+}
+
+void GmailClient::modifyMessage(const QString& messageId,
+                                const QStringList& addLabels,
+                                const QStringList& removeLabels,
+                                std::function<void(ApiError)> cb) {
+    QJsonArray adds;     for (const auto& s : addLabels)    adds.append(s);
+    QJsonArray removes;  for (const auto& s : removeLabels) removes.append(s);
+    QJsonObject body{
+        {QStringLiteral("addLabelIds"),    adds},
+        {QStringLiteral("removeLabelIds"), removes},
+    };
+    rest_->send(RestClient::Verb::Post,
+        base(QStringLiteral("/messages/") + messageId + QStringLiteral("/modify")),
+        QJsonDocument(body).toJson(QJsonDocument::Compact),
+        "application/json",
+        [cb = std::move(cb)](QByteArray, ApiError err) { cb(err); });
+}
+
+void GmailClient::listHistory(const QString& startHistoryId,
+                              const QString& pageToken,
+                              std::function<void(HistoryPage, ApiError)> cb) {
+    QUrl url = base(QStringLiteral("/history"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("startHistoryId"), startHistoryId);
+    q.addQueryItem(QStringLiteral("historyTypes"),   QStringLiteral("messageAdded"));
+    q.addQueryItem(QStringLiteral("historyTypes"),   QStringLiteral("messageDeleted"));
+    q.addQueryItem(QStringLiteral("historyTypes"),   QStringLiteral("labelAdded"));
+    q.addQueryItem(QStringLiteral("historyTypes"),   QStringLiteral("labelRemoved"));
+    if (!pageToken.isEmpty()) q.addQueryItem(QStringLiteral("pageToken"), pageToken);
+    url.setQuery(q);
+
+    rest_->send(RestClient::Verb::Get, url, {}, {},
+        [cb = std::move(cb)](QByteArray body, ApiError err) {
+            HistoryPage p;
+            if (err.kind == ApiErrorKind::NotFound) {
+                p.historyTooOld = true;
+                cb(p, {});
+                return;
+            }
+            if (err) { cb({}, err); return; }
+            const auto o = QJsonDocument::fromJson(body).object();
+            p.historyId     = QString::number(static_cast<qint64>(
+                                o.value(QStringLiteral("historyId")).toDouble()));
+            p.nextPageToken = o.value(QStringLiteral("nextPageToken")).toString();
+            for (const auto v : o.value(QStringLiteral("history")).toArray()) {
+                const auto h = v.toObject();
+                HistoryEntry e;
+                e.id = QString::number(static_cast<qint64>(
+                            h.value(QStringLiteral("id")).toDouble()));
+                for (const auto m : h.value(QStringLiteral("messagesAdded")).toArray()) {
+                    e.messagesAdded
+                        << m.toObject().value(QStringLiteral("message"))
+                                       .toObject().value(QStringLiteral("id")).toString();
+                }
+                for (const auto m : h.value(QStringLiteral("messagesDeleted")).toArray()) {
+                    e.messagesDeleted
+                        << m.toObject().value(QStringLiteral("message"))
+                                       .toObject().value(QStringLiteral("id")).toString();
+                }
+                p.entries.push_back(std::move(e));
+            }
+            cb(p, {});
+        });
+}
+
+void GmailClient::sendRaw(const QByteArray& rfc5322,
+                          const QString& threadId,
+                          std::function<void(QString, ApiError)> cb) {
+    QJsonObject body{
+        {QStringLiteral("raw"),
+         QString::fromLatin1(rfc5322.toBase64(
+             QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))},
+    };
+    if (!threadId.isEmpty()) {
+        body.insert(QStringLiteral("threadId"), threadId);
+    }
+    rest_->send(RestClient::Verb::Post, base(QStringLiteral("/messages/send")),
+        QJsonDocument(body).toJson(QJsonDocument::Compact),
+        "application/json",
+        [cb = std::move(cb)](QByteArray data, ApiError err) {
+            if (err) { cb({}, err); return; }
+            cb(QJsonDocument::fromJson(data).object()
+                  .value(QStringLiteral("id")).toString(), {});
+        });
+}
+
+void GmailClient::createDraft(const QByteArray& rfc5322,
+                              const QString& threadId,
+                              std::function<void(QString, ApiError)> cb) {
+    QJsonObject message{
+        {QStringLiteral("raw"),
+         QString::fromLatin1(rfc5322.toBase64(
+             QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))},
+    };
+    if (!threadId.isEmpty()) {
+        message.insert(QStringLiteral("threadId"), threadId);
+    }
+    QJsonObject body{ {QStringLiteral("message"), message} };
+    rest_->send(RestClient::Verb::Post, base(QStringLiteral("/drafts")),
+        QJsonDocument(body).toJson(QJsonDocument::Compact),
+        "application/json",
+        [cb = std::move(cb)](QByteArray data, ApiError err) {
+            if (err) { cb({}, err); return; }
+            cb(QJsonDocument::fromJson(data).object()
+                  .value(QStringLiteral("id")).toString(), {});
+        });
+}
+
+void GmailClient::deleteDraft(const QString& draftId,
+                              std::function<void(ApiError)> cb) {
+    rest_->send(RestClient::Verb::Delete,
+        base(QStringLiteral("/drafts/") + draftId), {}, {},
+        [cb = std::move(cb)](QByteArray, ApiError err) { cb(err); });
+}
+
 }  // namespace fc::api

@@ -5,17 +5,24 @@
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
 #include "auth/TokenStore.h"
+#include "cache/Database.h"
+#include "sync/OutboxWorker.h"
+#include "sync/SyncService.h"
 #include "ui/MainWindow.h"
 
 namespace fc::app {
 
 Bootstrap::Bootstrap(QObject* parent) : QObject(parent) {
+    fc::cache::Database::initialize();
+
     config_     = new fc::auth::ClientConfig;            // value type, raw owner
     tokenStore_ = new fc::auth::TokenStore(this);
     auth_       = new fc::auth::OAuthClient(config_, tokenStore_, this);
-    rest_       = new fc::api::RestClient(auth_, this);  // Phase-2 moves to sync thread
+    rest_       = new fc::api::RestClient(auth_, this);
     gmail_      = new fc::api::GmailClient(rest_, this);
-    window_     = new fc::ui::MainWindow(config_, auth_, gmail_);
+    sync_       = new fc::sync::SyncService(gmail_, this);
+    outbox_     = new fc::sync::OutboxWorker(gmail_, this);
+    window_     = new fc::ui::MainWindow(config_, auth_, gmail_, sync_, outbox_);
 }
 
 Bootstrap::~Bootstrap() {

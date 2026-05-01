@@ -77,6 +77,7 @@ void installLogger() {
     QFile& file = *gLogFile();
     file.setFileName(logDir() + QStringLiteral("/firstcontact.log"));
     file.open(QIODevice::Append | QIODevice::Text);
+    restrictPermissionsToOwner(file.fileName());
     qInstallMessageHandler(handler);
 }
 
