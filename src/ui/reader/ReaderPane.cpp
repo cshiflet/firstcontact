@@ -2,6 +2,7 @@
 
 #include "HtmlRenderHostLoader.h"
 #include "IHtmlRenderHost.h"
+#include "ui/common/Theme.h"
 #include "util/HtmlSanitizer.h"
 #include "util/Html2Text.h"
 #include "util/Linkify.h"
@@ -33,26 +34,63 @@ QString fromDisplay(const fc::Message& m) {
     return m.fromAddr.toHtmlEscaped();
 }
 
+// Active-theme color tokens. We mirror the values in resources/themes/*.qss
+// here because QPalette doesn't reflect QSS-set colors and the inline styles
+// inside our header HTML need to render against the current theme.
+struct ThemeColors {
+    QString primary;
+    QString secondary;
+    QString warningBg;
+    QString warningBorder;
+    QString warningText;
+};
+
+ThemeColors themeColors() {
+    const bool dark = Theme::resolveMode(Theme::currentMode())
+                       == Theme::Mode::Dark;
+    if (dark) {
+        return {
+            QStringLiteral("#e8eaed"),  // primary text
+            QStringLiteral("#9aa0a6"),  // secondary text
+            QStringLiteral("#3a341a"),  // warning bg (dim amber)
+            QStringLiteral("#5e5021"),  // warning border
+            QStringLiteral("#fdd663"),  // warning text
+        };
+    }
+    return {
+        QStringLiteral("#202124"),
+        QStringLiteral("#5f6368"),
+        QStringLiteral("#fff8c4"),
+        QStringLiteral("#d4d000"),
+        QStringLiteral("#5e5500"),
+    };
+}
+
 QString headerHtml(const fc::Message& m, bool full) {
+    const ThemeColors c = themeColors();
     QString h = QStringLiteral(
-        "<div style='font-weight:600; font-size:13pt; line-height:1.3;'>%1</div>"
-        "<div style='color:#5f6368; font-size:10pt; margin-top:2px;'>"
-        "<span style='font-weight:500; color:#202124;'>%2</span> &nbsp;·&nbsp; %3</div>")
-        .arg(m.subject.isEmpty()
+        "<div style='font-weight:600; font-size:13pt; line-height:1.3; color:%1;'>%2</div>"
+        "<div style='color:%3; font-size:10pt; margin-top:2px;'>"
+        "<span style='font-weight:500; color:%1;'>%4</span> &nbsp;·&nbsp; %5</div>")
+        .arg(c.primary,
+             m.subject.isEmpty()
                  ? QStringLiteral("<i>(no subject)</i>")
                  : m.subject.toHtmlEscaped(),
+             c.secondary,
              fromDisplay(m),
              formatDate(m.internalDate));
     if (full) {
         if (!m.toAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:#5f6368; font-size:9pt; margin-top:4px;'>"
-                                "<b>to</b> %1</div>")
-                    .arg(m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:9pt; margin-top:4px;'>"
+                                "<b>to</b> %2</div>")
+                    .arg(c.secondary,
+                         m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
         if (!m.ccAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:#5f6368; font-size:9pt;'>"
-                                "<b>cc</b> %1</div>")
-                    .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:9pt;'>"
+                                "<b>cc</b> %2</div>")
+                    .arg(c.secondary,
+                         m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
     }
     return h;
@@ -64,9 +102,11 @@ QString bodyHtml(const fc::Message& m) {
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;
         if (safe.remoteImagesBlocked) {
+            const ThemeColors c = themeColors();
             r.prepend(QStringLiteral(
-                "<div style='background:#fff8c4;padding:6px;"
-                "border:1px solid #d4d000;'><i>Remote images blocked.</i></div>"));
+                "<div style='background:%1;padding:6px;border:1px solid %2;"
+                "color:%3;'><i>Remote images blocked.</i></div>")
+                .arg(c.warningBg, c.warningBorder, c.warningText));
         }
         return r;
     }
@@ -137,9 +177,11 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
     body->setStyleSheet(QStringLiteral("background: transparent;"));
+    body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    body->setMinimumHeight(360);   // floor so the card has a useful default
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
-    cardLayout->addWidget(body);
+    cardLayout->addWidget(body, /*stretch=*/1);
 
     // Offer "Show full HTML" only for messages where the message has HTML
     // and the optional QtWebEngine plugin is deployed.
@@ -218,7 +260,14 @@ void ReaderPane::showEmpty(const QString& reason) {
 
 void ReaderPane::showMessage(const fc::Message& m) {
     clearStack();
-    contentLayout_->insertWidget(0, buildMessageCard(m, /*initiallyExpanded=*/true));
+    // Single-message view: drop the trailing stretch so the card fills the
+    // pane vertically. The card's body has Expanding size policy so it
+    // grows with the available height.
+    if (auto* tail = contentLayout_->takeAt(contentLayout_->count() - 1)) {
+        delete tail;
+    }
+    auto* card = buildMessageCard(m, /*initiallyExpanded=*/true);
+    contentLayout_->addWidget(card, /*stretch=*/1);
 }
 
 void ReaderPane::showThread(const std::vector<fc::Message>& messages) {
