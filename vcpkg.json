@@ -1,0 +1,17 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "firstcontact",
+    "version-string": "0.1.0",
+    "description": "Native Gmail client built on Qt 6",
+    "license": "AGPL-3.0-only",
+    "dependencies": [
+        { "name": "qtkeychain-qt6", "default-features": false }
+    ],
+    "features": {
+        "tests": {
+            "description": "Build unit + integration tests",
+            "dependencies": [ "gtest" ]
+        }
+    },
+    "builtin-baseline": "0000000000000000000000000000000000000000"
+}

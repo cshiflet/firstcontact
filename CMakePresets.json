@@ -1,0 +1,66 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "vcpkg",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "type": "FILEPATH",
+                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                }
+            }
+        },
+        {
+            "name": "linux-debug",
+            "displayName": "Linux Debug",
+            "inherits": ["base", "vcpkg"],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "FC_ENABLE_SANITIZERS": "ON"
+            },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux Release",
+            "inherits": ["base", "vcpkg"],
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        },
+        {
+            "name": "windows-msvc-release",
+            "displayName": "Windows MSVC Release",
+            "inherits": ["base", "vcpkg"],
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "macos-release",
+            "displayName": "macOS Release",
+            "inherits": ["base", "vcpkg"],
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "linux-debug",         "configurePreset": "linux-debug" },
+        { "name": "linux-release",       "configurePreset": "linux-release" },
+        { "name": "windows-msvc-release","configurePreset": "windows-msvc-release" },
+        { "name": "macos-release",       "configurePreset": "macos-release" }
+    ],
+    "testPresets": [
+        { "name": "linux-debug", "configurePreset": "linux-debug",
+          "output": { "outputOnFailure": true } }
+    ]
+}

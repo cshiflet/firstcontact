@@ -1,0 +1,6 @@
+add_subdirectory(util)
+add_subdirectory(models)
+add_subdirectory(auth)
+add_subdirectory(api)
+add_subdirectory(ui)
+add_subdirectory(app)

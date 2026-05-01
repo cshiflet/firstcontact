@@ -1,0 +1,28 @@
+build/
+build-*/
+out/
+Testing/
+.cache/
+.vscode/
+.idea/
+*.user
+*.user.*
+.DS_Store
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# vcpkg
+vcpkg_installed/
+
+# Qt
+*.qm
+*.pro.user
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h

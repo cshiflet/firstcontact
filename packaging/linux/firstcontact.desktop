@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=FirstContact
+GenericName=Email
+Comment=Native Gmail client built on Qt 6
+Exec=firstcontact %u
+Icon=firstcontact
+Terminal=false
+Categories=Network;Email;Qt;
+StartupNotify=true
+StartupWMClass=firstcontact
+MimeType=x-scheme-handler/mailto;
+Keywords=Email;Gmail;Mail;

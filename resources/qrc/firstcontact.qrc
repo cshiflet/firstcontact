@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/schema">
+        <file alias="0001_init.sql">../schema/0001_init.sql</file>
+        <file alias="0002_fts.sql">../schema/0002_fts.sql</file>
+    </qresource>
+</RCC>
