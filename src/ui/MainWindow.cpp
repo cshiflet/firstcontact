@@ -178,47 +178,48 @@ void MainWindow::wireSignals() {
     });
     connect(auth_, &fc::auth::OAuthClient::browserAuthRequested, this,
             [this](const QUrl& url, bool openedAutomatically) {
-                if (openedAutomatically) {
-                    statusBar()->showMessage(
-                        tr("Browser opened — complete consent and we'll catch "
-                           "the redirect automatically."), 0);
-                    return;
-                }
-                // Auto-launch failed. Pop a non-modal dialog with a selectable,
-                // pre-copied URL and clear instructions: the loopback handler
-                // is still listening, so completing sign-in in any browser
-                // closes the loop.
+                // Always show the dialog with the URL — auto-launch can
+                // report success while the launcher (e.g. wslview on a
+                // non-standard Windows install) silently fails downstream.
+                // The dialog auto-closes once the loopback handler catches
+                // the redirect, so successful auto-launches still get the
+                // expected one-click flow.
                 QApplication::clipboard()->setText(url.toString());
-                statusBar()->showMessage(
-                    tr("Couldn't auto-launch a browser — see the dialog "
-                       "for the sign-in URL."), 0);
 
                 auto* dlg = new QDialog(this);
                 dlg->setAttribute(Qt::WA_DeleteOnClose);
-                dlg->setWindowTitle(tr("Open this URL to sign in"));
-                dlg->resize(600, 220);
+                dlg->setWindowTitle(tr("Sign in with Google"));
+                dlg->resize(640, 240);
 
                 auto* layout = new QVBoxLayout(dlg);
-                auto* msg = new QLabel(tr(
-                    "<p>Couldn't launch your default browser automatically. "
-                    "The sign-in URL has been copied to your clipboard.</p>"
-                    "<p><b>Paste it into any browser to continue.</b> "
-                    "FirstContact is still listening on a local port — once "
-                    "you complete consent, the redirect will land here and "
-                    "this dialog will close itself.</p>"), dlg);
+                const QString headline = openedAutomatically
+                    ? tr("<p>We tried to open your browser. "
+                         "<b>If a sign-in page didn't appear, paste this URL "
+                         "into your browser:</b></p>")
+                    : tr("<p>Couldn't launch your default browser "
+                         "automatically. <b>Paste this URL into any browser "
+                         "to continue.</b></p>");
+                const QString footnote = tr(
+                    "<p>The URL is already on your clipboard. FirstContact is "
+                    "listening on a local port — once you complete consent, "
+                    "the redirect will land here and this dialog will close "
+                    "itself.</p>");
+
+                auto* msg = new QLabel(headline + footnote, dlg);
                 msg->setWordWrap(true);
                 msg->setTextFormat(Qt::RichText);
                 layout->addWidget(msg);
 
                 auto* urlField = new QLineEdit(url.toString(), dlg);
                 urlField->setReadOnly(true);
+                urlField->setCursorPosition(0);
                 urlField->selectAll();
                 layout->addWidget(urlField);
 
                 auto* btnRow = new QHBoxLayout;
-                auto* copyBtn  = new QPushButton(tr("Copy URL"),       dlg);
-                auto* retryBtn = new QPushButton(tr("Try Browser Again"), dlg);
-                auto* closeBtn = new QPushButton(tr("Close"),          dlg);
+                auto* copyBtn  = new QPushButton(tr("Copy URL"),         dlg);
+                auto* retryBtn = new QPushButton(tr("Open in Browser"),  dlg);
+                auto* closeBtn = new QPushButton(tr("Close"),            dlg);
                 btnRow->addWidget(copyBtn);
                 btnRow->addWidget(retryBtn);
                 btnRow->addStretch(1);
