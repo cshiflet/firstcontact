@@ -71,12 +71,18 @@ void SetupWizard::onOpenConsole() {
 
 void SetupWizard::onSave() {
     const QString id = idEdit_->text().trimmed();
+    // Real-world Google OAuth client IDs look like
+    //   123456789012-1abc-2def-3ghi.apps.googleusercontent.com
+    // i.e. digits, then a hyphen, then a hash made of letters / digits /
+    // hyphens / underscores, then the fixed apps.googleusercontent.com suffix.
+    // The previous regex disallowed hyphens in the hash and silently rejected
+    // legitimate IDs.
     static const QRegularExpression re(
-        QStringLiteral(R"(^[0-9]+-[A-Za-z0-9_]+\.apps\.googleusercontent\.com$)"));
+        QStringLiteral(R"(^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$)"));
     if (!re.match(id).hasMatch()) {
         statusLabel_->setText(tr(
-            "That doesn't look like a Google OAuth client ID. It should end in "
-            "<i>.apps.googleusercontent.com</i>."));
+            "That doesn't look like a Google OAuth client ID. It should be "
+            "of the form <code>123456789012-abcdef…apps.googleusercontent.com</code>."));
         return;
     }
     config_->setClientId(id);

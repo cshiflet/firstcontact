@@ -112,6 +112,13 @@ void OAuthClient::wireFlow() {
 
     d_->flow    = new QOAuth2AuthorizationCodeFlow(d_->nam, this);
     d_->handler = new QOAuthHttpServerReplyHandler(0, this);  // ephemeral port
+    if (!d_->handler->isListening()) {
+        qWarning("OAuth loopback handler failed to bind a port — "
+                 "the redirect after Google consent will time out");
+    } else {
+        qInfo("OAuth loopback handler listening on %s",
+              qUtf8Printable(d_->handler->callback()));
+    }
 
     d_->flow->setAuthorizationUrl(QUrl(QLatin1String(kAuthEndpoint)));
     d_->flow->setAccessTokenUrl(QUrl(QLatin1String(kTokenEndpoint)));
@@ -144,7 +151,16 @@ void OAuthClient::wireFlow() {
         });
 
     connect(d_->flow, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser,
-            this, [](const QUrl& url) { QDesktopServices::openUrl(url); });
+            this, [this](const QUrl& url) {
+                qInfo("OAuth authorize URL: %s", qUtf8Printable(url.toString()));
+                const bool opened = QDesktopServices::openUrl(url);
+                if (!opened) {
+                    qWarning("QDesktopServices::openUrl returned false — "
+                             "no system browser handler for %s",
+                             qUtf8Printable(url.toString()));
+                }
+                emit browserAuthRequested(url, opened);
+            });
 
     connect(d_->flow, &QOAuth2AuthorizationCodeFlow::granted, this, [this] {
         persistFromFlow();

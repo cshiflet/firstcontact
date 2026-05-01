@@ -27,6 +27,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenuBar>
@@ -169,6 +170,28 @@ void MainWindow::wireSignals() {
         listModel_->replaceAll({});
         reader_->showEmpty();
     });
+    connect(auth_, &fc::auth::OAuthClient::browserAuthRequested, this,
+            [this](const QUrl& url, bool openedAutomatically) {
+                if (openedAutomatically) {
+                    statusBar()->showMessage(
+                        tr("Browser opened — complete consent and we'll catch the redirect."),
+                        0);
+                    return;
+                }
+                // Fall back to a copy-paste dialog. AppImages, sandboxes, and
+                // headless boxes can all silently fail QDesktopServices.
+                QApplication::clipboard()->setText(url.toString());
+                QMessageBox box(this);
+                box.setWindowTitle(tr("Open this URL to sign in"));
+                box.setIcon(QMessageBox::Information);
+                box.setText(tr(
+                    "Couldn't launch your default browser automatically.\n\n"
+                    "The sign-in URL has been copied to your clipboard. "
+                    "Paste it into a browser to continue.\n\n"
+                    "URL: %1").arg(url.toString()));
+                box.setStandardButtons(QMessageBox::Ok);
+                box.exec();
+            });
 
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
@@ -264,6 +287,8 @@ void MainWindow::onSignIn() {
         SetupWizard wiz(config_, this);
         if (wiz.exec() != QDialog::Accepted) return;
     }
+    statusBar()->showMessage(
+        tr("Starting OAuth flow — opening your browser…"), 0);
     auth_->authorize();
 }
 

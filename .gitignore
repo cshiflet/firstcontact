@@ -11,11 +11,12 @@ AppDir/
 *.user.*
 .DS_Store
 
-# CMake
+# CMake — note we keep the hand-written ./Makefile (top-level dev wrapper);
+# CMake-generated Makefiles only live inside build directories, which the
+# build/ build-*/ rules above already exclude.
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
-Makefile
 compile_commands.json
 
 # vcpkg

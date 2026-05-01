@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QUrl>
 
 class QOAuth2AuthorizationCodeFlow;
 class QOAuthHttpServerReplyHandler;
@@ -41,6 +42,12 @@ signals:
     void granted();
     void failed(const QString& reason);
     void signedOut();
+
+    // Emitted when the flow has prepared the authorization URL. Subscribers
+    // (MainWindow) can display a copy-the-URL fallback if the system browser
+    // failed to open automatically — covers AppImage / sandboxed environments
+    // where QDesktopServices::openUrl can silently no-op.
+    void browserAuthRequested(const QUrl& url, bool openedAutomatically);
 
 private:
     void hydrateFromStore();
