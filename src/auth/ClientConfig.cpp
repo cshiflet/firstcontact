@@ -7,30 +7,42 @@
 namespace fc::auth {
 
 namespace {
-constexpr char kKey[] = "oauth/client_id";
-}
+constexpr char kIdKey[]     = "oauth/client_id";
+constexpr char kSecretKey[] = "oauth/client_secret";
+}  // namespace
 
 QString ClientConfig::clientId() const {
     QSettings s;
-    return s.value(QLatin1String(kKey)).toString();
+    return s.value(QLatin1String(kIdKey)).toString();
 }
 
 void ClientConfig::setClientId(const QString& id) {
     QSettings s;
-    s.setValue(QLatin1String(kKey), id);
+    s.setValue(QLatin1String(kIdKey), id);
     s.sync();
-    // client_id is not a secret per OAuth Desktop-app spec, but defense in
-    // depth — keep this file out of other local users' reach.
+    fc::util::restrictPermissionsToOwner(s.fileName());
+}
+
+QString ClientConfig::clientSecret() const {
+    QSettings s;
+    return s.value(QLatin1String(kSecretKey)).toString();
+}
+
+void ClientConfig::setClientSecret(const QString& secret) {
+    QSettings s;
+    s.setValue(QLatin1String(kSecretKey), secret);
+    s.sync();
     fc::util::restrictPermissionsToOwner(s.fileName());
 }
 
 bool ClientConfig::isConfigured() const {
-    return !clientId().isEmpty();
+    return !clientId().isEmpty() && !clientSecret().isEmpty();
 }
 
 void ClientConfig::clear() {
     QSettings s;
-    s.remove(QLatin1String(kKey));
+    s.remove(QLatin1String(kIdKey));
+    s.remove(QLatin1String(kSecretKey));
 }
 
 }  // namespace fc::auth

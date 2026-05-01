@@ -45,8 +45,11 @@ SetupWizard::SetupWizard(fc::auth::ClientConfig* config, QWidget* parent)
         "<li>Enable the <b>Gmail API</b> for the project.</li>"
         "<li>Configure the OAuth consent screen (External, your email as a test user).</li>"
         "<li>Create credentials → <b>OAuth client ID</b> → application type "
-        "<b>Desktop app</b>. No client secret needed.</li>"
-        "<li>Paste the resulting <b>Client ID</b> below.</li>"
+        "<b>Desktop app</b>.</li>"
+        "<li>Paste both the <b>Client ID</b> and the <b>Client Secret</b> below. "
+        "(Google requires the secret on the token endpoint even for Desktop "
+        "apps; their docs note it isn't a real secret because it ships in the "
+        "binary.)</li>"
         "</ol>"));
     layout->addWidget(steps);
 
@@ -62,7 +65,13 @@ SetupWizard::SetupWizard(fc::auth::ClientConfig* config, QWidget* parent)
     idEdit_->setPlaceholderText(
         QStringLiteral("123456789012-abcdefg.apps.googleusercontent.com"));
     idEdit_->setText(config_->clientId());
-    form->addRow(tr("OAuth Client ID"), idEdit_);
+    form->addRow(tr("Client ID"), idEdit_);
+
+    secretEdit_ = new QLineEdit(this);
+    secretEdit_->setPlaceholderText(tr("paste the client secret from Google Cloud Console"));
+    secretEdit_->setText(config_->clientSecret());
+    secretEdit_->setEchoMode(QLineEdit::PasswordEchoOnEdit);
+    form->addRow(tr("Client Secret"), secretEdit_);
     layout->addLayout(form);
 
     statusLabel_ = new QLabel(this);
@@ -89,13 +98,12 @@ void SetupWizard::onOpenConsole() {
 }
 
 void SetupWizard::onSave() {
-    const QString id = idEdit_->text().trimmed();
+    const QString id     = idEdit_->text().trimmed();
+    const QString secret = secretEdit_->text().trimmed();
     // Real-world Google OAuth client IDs look like
     //   123456789012-1abc-2def-3ghi.apps.googleusercontent.com
-    // i.e. digits, then a hyphen, then a hash made of letters / digits /
-    // hyphens / underscores, then the fixed apps.googleusercontent.com suffix.
-    // The previous regex disallowed hyphens in the hash and silently rejected
-    // legitimate IDs.
+    // (digits, hyphen, hash of letters/digits/hyphens/underscores, then the
+    // fixed .apps.googleusercontent.com suffix).
     static const QRegularExpression re(
         QStringLiteral(R"(^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$)"));
     if (!re.match(id).hasMatch()) {
@@ -104,7 +112,14 @@ void SetupWizard::onSave() {
             "of the form <code>123456789012-abcdef…apps.googleusercontent.com</code>."));
         return;
     }
+    if (secret.isEmpty()) {
+        statusLabel_->setText(tr(
+            "Client secret is required. It's shown next to the Client ID in "
+            "Google Cloud Console after you create the OAuth client."));
+        return;
+    }
     config_->setClientId(id);
+    config_->setClientSecret(secret);
     accept();
 }
 

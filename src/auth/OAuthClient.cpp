@@ -179,9 +179,13 @@ struct OAuthClient::Impl {
 
     // Per-flow state — regenerated on every call to authorize(). The state
     // string is what Google echoes back in the redirect; we verify it matches
-    // to defeat CSRF.
+    // to defeat CSRF. callbackConsumed flips to true once we've successfully
+    // pulled the auth code out of a callback so subsequent stray requests to
+    // the loopback port (browsers love to follow up with /favicon.ico after
+    // a redirect) don't trigger a second state-mismatch failure.
     QByteArray codeVerifier;
     QString    state;
+    bool       callbackConsumed = false;
 
     mutable QMutex tokenMutex;
     TokenStore::Tokens tokens;
@@ -253,11 +257,8 @@ void OAuthClient::authorize() {
         return;
     }
 
-    d_->codeVerifier = makeCodeVerifier();
-    d_->state        = QString::fromLatin1(util::base64UrlEncode(
-                          QByteArray(16, Qt::Uninitialized).fill(
-                              char(QRandomGenerator::system()->generate()))));
-    // The fill above is a placeholder: re-fill with real random bytes.
+    d_->codeVerifier     = makeCodeVerifier();
+    d_->callbackConsumed = false;
     {
         QByteArray raw(16, Qt::Uninitialized);
         auto* gen = QRandomGenerator::system();
@@ -301,29 +302,54 @@ void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {
     qInfo("OAuth callback received with keys: [%s]",
           qUtf8Printable(params.keys().join(QChar(','))));
 
+    // Browsers commonly hit the loopback port a second time (favicon, prefetch,
+    // beacon) after the real OAuth redirect has been served. Those follow-up
+    // requests carry no `state` and no `code`, so they'd otherwise spuriously
+    // trip the state-mismatch path and emit a confusing `failed` after a
+    // successful sign-in. Drop them.
+    if (d_->callbackConsumed) {
+        qInfo("OAuth: ignoring stray loopback request after successful callback");
+        return;
+    }
+
     if (params.contains(QStringLiteral("error"))) {
         const QString err  = params.value(QStringLiteral("error")).toString();
         const QString desc = params.value(QStringLiteral("error_description")).toString();
         qWarning("OAuth callback error: %s — %s",
                  qUtf8Printable(err), qUtf8Printable(desc));
+        d_->callbackConsumed = true;
         emit failed(err + QStringLiteral(": ") + desc);
         return;
     }
 
     const QString receivedState = params.value(QStringLiteral("state")).toString();
+    const QString code          = params.value(QStringLiteral("code")).toString();
+
+    // A valid OAuth redirect always carries both state and code. If either is
+    // missing we're either looking at a stray browser request or a malformed
+    // redirect — either way, don't blow the flow up with a state-mismatch
+    // dialog; just log and keep waiting for the real one.
+    if (receivedState.isEmpty() && code.isEmpty()) {
+        qInfo("OAuth: empty loopback request — likely a browser favicon or "
+              "prefetch follow-up; continuing to wait for the real callback");
+        return;
+    }
+
     if (receivedState != d_->state) {
-        qWarning("OAuth state mismatch: got %s, expected %s",
+        qWarning("OAuth state mismatch: got '%s', expected '%s'",
                  qUtf8Printable(receivedState), qUtf8Printable(d_->state));
+        d_->callbackConsumed = true;
         emit failed(tr("OAuth state mismatch — sign-in aborted for safety."));
         return;
     }
 
-    const QString code = params.value(QStringLiteral("code")).toString();
     if (code.isEmpty()) {
+        d_->callbackConsumed = true;
         emit failed(tr("OAuth callback missing 'code' parameter."));
         return;
     }
 
+    d_->callbackConsumed = true;
     exchangeCodeForTokens(code);
 }
 
@@ -423,6 +449,7 @@ bool OAuthClient::refreshIfNeededLocked() {
     if (d_->tokens.expiresAtUnix - now > 60) return true;
 
     const QString clientId     = d_->config->clientId();
+    const QString clientSecret = d_->config->clientSecret();
     const QString refreshToken = d_->tokens.refreshToken;
 
     d_->tokenMutex.unlock();
@@ -436,6 +463,7 @@ bool OAuthClient::refreshIfNeededLocked() {
 
         QUrlQuery q;
         q.addQueryItem(QStringLiteral("client_id"),     clientId);
+        q.addQueryItem(QStringLiteral("client_secret"), clientSecret);
         q.addQueryItem(QStringLiteral("grant_type"),    QStringLiteral("refresh_token"));
         q.addQueryItem(QStringLiteral("refresh_token"), refreshToken);
 
