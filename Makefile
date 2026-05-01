@@ -71,6 +71,11 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    libsqlite3-dev sqlite3 \
 	    librsvg2-bin appstream xvfb \
 	    xdg-utils
+	@# wslu provides `wslview` (WSL → Windows browser bridge). Harmless on
+	@# non-WSL boxes — apt picks it up if available, ignored otherwise.
+	@if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then \
+	    sudo apt install -y wslu; \
+	fi
 
 setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	sudo dnf install -y \

@@ -60,6 +60,28 @@ QByteArray makeCodeChallenge(const QByteArray& verifier) {
     return util::base64UrlEncode(QCryptographicHash::hash(verifier, QCryptographicHash::Sha256));
 }
 
+// True if we're running inside WSL (Windows Subsystem for Linux). Cached.
+bool isWsl() {
+    static bool checked = false;
+    static bool result = false;
+    if (!checked) {
+        checked = true;
+        if (!QProcessEnvironment::systemEnvironment()
+                 .value(QStringLiteral("WSL_DISTRO_NAME")).isEmpty()) {
+            result = true;
+        } else {
+            QFile f(QStringLiteral("/proc/version"));
+            if (f.open(QIODevice::ReadOnly)) {
+                const QByteArray v = f.readAll();
+                result = v.contains("Microsoft") || v.contains("microsoft")
+                      || v.contains("WSL");
+            }
+        }
+        if (result) qInfo("OAuth: WSL environment detected");
+    }
+    return result;
+}
+
 // Try increasingly specific strategies to launch the system browser. Returns
 // true on the first one that successfully starts a child process. Logs the
 // strategy used (or all the failures) for diagnostics.
@@ -68,41 +90,61 @@ QByteArray makeCodeChallenge(const QByteArray& verifier) {
 // xdg-open / xdg-utils, which is missing from minimal images, and there have
 // been long-running issues (Qt bug 90984 et al.) where the call silently
 // returns false when xdg-open is present but can't reach a snap-confined
-// browser. We mirror Qt's lookup with a hand-rolled chain so users on
-// non-standard setups still get a working sign-in.
+// browser. WSL is its own can of worms — there's no Linux browser at all,
+// so we have to bridge to the Windows host via wslview / cmd.exe.
 bool launchBrowser(const QUrl& url) {
+    const QString u = url.toString();
+
+    auto tryRun = [&](const QString& label, const QString& exe,
+                      const QStringList& args) {
+        if (QStandardPaths::findExecutable(exe).isEmpty()) return false;
+        if (!QProcess::startDetached(exe, args)) return false;
+        qInfo("OAuth: launched browser via '%s'", qUtf8Printable(label));
+        return true;
+    };
+
+    // On WSL the Linux side typically has no browser at all — bridge to the
+    // Windows host before falling back to Linux launchers. The redirect
+    // back to http://127.0.0.1:<port>/ works because WSL2 forwards
+    // localhost between Windows and Linux automatically.
+    if (isWsl()) {
+        // wslview (from the wslu package) is the canonical WSL equivalent
+        // of xdg-open and quotes URLs correctly.
+        if (tryRun("wslview", "wslview", {u})) return true;
+        // cmd.exe is always available via /mnt/c. The empty-string title
+        // arg is needed so `start` doesn't interpret the URL as a title.
+        if (tryRun("cmd.exe",        "cmd.exe",
+                   {"/c", "start", "", u})) return true;
+        if (tryRun("powershell.exe", "powershell.exe",
+                   {"-NoProfile", "-Command",
+                    QStringLiteral("Start-Process '%1'").arg(u)})) return true;
+        // Fall through: someone might have installed a Linux browser even
+        // on WSL, and the user's PATH still has xdg-open etc.
+    }
+
     if (QDesktopServices::openUrl(url)) {
         qInfo("OAuth: launched browser via QDesktopServices");
         return true;
     }
 
-    const QString u = url.toString();
-    auto tryRun = [&](const QString& exe, const QStringList& args) {
-        if (QStandardPaths::findExecutable(exe).isEmpty()) return false;
-        if (!QProcess::startDetached(exe, args)) return false;
-        qInfo("OAuth: launched browser via '%s'", qUtf8Printable(exe));
-        return true;
-    };
-
     const QString browserEnv =
         QProcessEnvironment::systemEnvironment().value(QStringLiteral("BROWSER"));
-    if (!browserEnv.isEmpty() && tryRun(browserEnv, {u})) return true;
+    if (!browserEnv.isEmpty()
+        && tryRun("$BROWSER", browserEnv, {u})) return true;
 
-    if (tryRun(QStringLiteral("xdg-open"),         {u})) return true;
-    if (tryRun(QStringLiteral("sensible-browser"), {u})) return true;
-    if (tryRun(QStringLiteral("gio"),              {QStringLiteral("open"), u})) return true;
-    if (tryRun(QStringLiteral("kde-open5"),        {u})) return true;
-    if (tryRun(QStringLiteral("gnome-open"),       {u})) return true;
+    if (tryRun("xdg-open",         "xdg-open",         {u})) return true;
+    if (tryRun("sensible-browser", "sensible-browser", {u})) return true;
+    if (tryRun("gio open",         "gio",              {"open", u})) return true;
+    if (tryRun("kde-open5",        "kde-open5",        {u})) return true;
+    if (tryRun("gnome-open",       "gnome-open",       {u})) return true;
 
-    // Last resort — try known browsers by name (covers the case where xdg-open
-    // is missing but a browser is installed under a standard name).
     for (const QString& exe : {QStringLiteral("firefox"),
                                 QStringLiteral("google-chrome"),
                                 QStringLiteral("chromium"),
                                 QStringLiteral("chromium-browser"),
                                 QStringLiteral("brave-browser"),
                                 QStringLiteral("microsoft-edge")}) {
-        if (tryRun(exe, {u})) return true;
+        if (tryRun(exe, exe, {u})) return true;
     }
 
     qWarning("OAuth: every browser launch strategy failed — "
