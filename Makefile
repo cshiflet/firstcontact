@@ -67,6 +67,7 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
 	    qt6-networkauth-dev libqt6sql6-sqlite \
 	    qt6-l10n-tools qt6-declarative-dev qt6-webengine-dev \
+	    qt6-svg-dev libqt6svg6 \
 	    libsecret-1-dev qtkeychain-qt6-dev \
 	    libsqlite3-dev sqlite3 \
 	    librsvg2-bin appstream xvfb \
@@ -82,6 +83,7 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	    cmake ninja-build gcc-c++ git curl \
 	    qt6-qtbase-devel qt6-qttools-devel qt6-qtnetworkauth-devel \
 	    qt6-qtwebengine-devel qt6-qtdeclarative-devel qt6-qt5compat-devel \
+	    qt6-qtsvg-devel \
 	    qt6-qtkeychain-devel libsecret-devel sqlite-devel \
 	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb
 
@@ -89,6 +91,7 @@ setup-arch: ## Install build deps via pacman (Arch / Manjaro).
 	sudo pacman -S --needed --noconfirm \
 	    base-devel cmake ninja git curl \
 	    qt6-base qt6-tools qt6-networkauth qt6-webengine qt6-declarative \
+	    qt6-svg \
 	    qtkeychain-qt6 libsecret sqlite \
 	    librsvg appstream xorg-server-xvfb
 
