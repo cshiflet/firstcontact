@@ -174,11 +174,14 @@ struct OAuthClient::Impl {
     ClientConfig* config = nullptr;
     TokenStore*   store  = nullptr;
 
-    QOAuth2AuthorizationCodeFlow*   flow    = nullptr;
     QOAuthHttpServerReplyHandler*   handler = nullptr;
     QNetworkAccessManager*          nam     = nullptr;
 
+    // Per-flow state — regenerated on every call to authorize(). The state
+    // string is what Google echoes back in the redirect; we verify it matches
+    // to defeat CSRF.
     QByteArray codeVerifier;
+    QString    state;
 
     mutable QMutex tokenMutex;
     TokenStore::Tokens tokens;
@@ -216,68 +219,32 @@ QString OAuthClient::accountEmail() const {
     return d_->tokens.accountEmail;
 }
 
-void OAuthClient::wireFlow() {
-    if (d_->flow) return;
-
-    d_->codeVerifier = makeCodeVerifier();
-    const QByteArray challenge = makeCodeChallenge(d_->codeVerifier);
-
-    d_->flow    = new QOAuth2AuthorizationCodeFlow(d_->nam, this);
-    d_->handler = new QOAuthHttpServerReplyHandler(0, this);  // ephemeral port
+void OAuthClient::ensureHandler() {
+    // Recreate the loopback handler on every authorize() call so a previous
+    // flow that was abandoned (browser closed, network hiccup) doesn't leave
+    // a stale listener around.
+    if (d_->handler) {
+        d_->handler->close();
+        d_->handler->deleteLater();
+        d_->handler = nullptr;
+    }
+    d_->handler = new QOAuthHttpServerReplyHandler(0, this);
     if (!d_->handler->isListening()) {
         qWarning("OAuth loopback handler failed to bind a port — "
                  "the redirect after Google consent will time out");
-    } else {
-        qInfo("OAuth loopback handler listening on %s",
-              qUtf8Printable(d_->handler->callback()));
+        return;
     }
+    qInfo("OAuth loopback handler listening on %s",
+          qUtf8Printable(d_->handler->callback()));
 
-    d_->flow->setAuthorizationUrl(QUrl(QLatin1String(kAuthEndpoint)));
-    d_->flow->setAccessTokenUrl(QUrl(QLatin1String(kTokenEndpoint)));
-    d_->flow->setClientIdentifier(d_->config->clientId());
-    d_->flow->setScope(kScopeString());
-    d_->flow->setReplyHandler(d_->handler);
-
-    // Manual PKCE injection (Qt 6.6 added setPkceMethod; we target 6.4+).
-    d_->flow->setModifyParametersFunction(
-        [verifier = d_->codeVerifier, challenge](
-            QAbstractOAuth::Stage stage, QMultiMap<QString, QVariant>* params) {
-            switch (stage) {
-                case QAbstractOAuth::Stage::RequestingAuthorization:
-                    params->insert(QStringLiteral("code_challenge"),
-                                   QString::fromLatin1(challenge));
-                    params->insert(QStringLiteral("code_challenge_method"),
-                                   QStringLiteral("S256"));
-                    params->insert(QStringLiteral("access_type"),
-                                   QStringLiteral("offline"));
-                    params->insert(QStringLiteral("prompt"),
-                                   QStringLiteral("consent"));
-                    break;
-                case QAbstractOAuth::Stage::RequestingAccessToken:
-                    params->insert(QStringLiteral("code_verifier"),
-                                   QString::fromLatin1(verifier));
-                    break;
-                default:
-                    break;
-            }
-        });
-
-    connect(d_->flow, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser,
-            this, [this](const QUrl& url) {
-                qInfo("OAuth authorize URL: %s", qUtf8Printable(url.toString()));
-                const bool opened = launchBrowser(url);
-                emit browserAuthRequested(url, opened);
-            });
-
-    connect(d_->flow, &QOAuth2AuthorizationCodeFlow::granted, this, [this] {
-        persistFromFlow();
-        emit granted();
-    });
-
-    connect(d_->flow, &QOAuth2AuthorizationCodeFlow::error, this,
-            [this](const QString& err, const QString& desc, const QUrl&) {
-                emit failed(err + QStringLiteral(": ") + desc);
-            });
+    // Connect to the raw callback signal so we can run our own token
+    // exchange. We deliberately do NOT use QOAuth2AuthorizationCodeFlow for
+    // the code→token POST: Qt 6.4's flow has a habit of attaching a Basic
+    // auth header with empty client_secret, which Google rejects for
+    // Desktop OAuth clients with PKCE ("invalid_client") and surfaces only
+    // as the cryptic "Unexpected call" / "server replied:" warnings.
+    connect(d_->handler, &QOAuthHttpServerReplyHandler::callbackReceived,
+            this, &OAuthClient::onAuthCodeCallback);
 }
 
 void OAuthClient::authorize() {
@@ -285,24 +252,164 @@ void OAuthClient::authorize() {
         emit failed(tr("OAuth client_id is not configured. Run the setup wizard."));
         return;
     }
-    wireFlow();
-    d_->flow->grant();
+
+    d_->codeVerifier = makeCodeVerifier();
+    d_->state        = QString::fromLatin1(util::base64UrlEncode(
+                          QByteArray(16, Qt::Uninitialized).fill(
+                              char(QRandomGenerator::system()->generate()))));
+    // The fill above is a placeholder: re-fill with real random bytes.
+    {
+        QByteArray raw(16, Qt::Uninitialized);
+        auto* gen = QRandomGenerator::system();
+        for (int i = 0; i < raw.size(); i += 4) {
+            const quint32 r = gen->generate();
+            for (int j = 0; j < 4 && i + j < raw.size(); ++j) {
+                raw[i + j] = static_cast<char>((r >> (j * 8)) & 0xff);
+            }
+        }
+        d_->state = QString::fromLatin1(util::base64UrlEncode(raw));
+    }
+
+    const QByteArray challenge = makeCodeChallenge(d_->codeVerifier);
+
+    ensureHandler();
+    if (!d_->handler->isListening()) {
+        emit failed(tr("Could not bind a local port for the OAuth callback."));
+        return;
+    }
+    const QString redirectUri = d_->handler->callback();
+
+    QUrl authUrl{QLatin1String(kAuthEndpoint)};
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("client_id"),             d_->config->clientId());
+    q.addQueryItem(QStringLiteral("redirect_uri"),          redirectUri);
+    q.addQueryItem(QStringLiteral("response_type"),         QStringLiteral("code"));
+    q.addQueryItem(QStringLiteral("scope"),                 kScopeString());
+    q.addQueryItem(QStringLiteral("state"),                 d_->state);
+    q.addQueryItem(QStringLiteral("code_challenge"),        QString::fromLatin1(challenge));
+    q.addQueryItem(QStringLiteral("code_challenge_method"), QStringLiteral("S256"));
+    q.addQueryItem(QStringLiteral("access_type"),           QStringLiteral("offline"));
+    q.addQueryItem(QStringLiteral("prompt"),                QStringLiteral("consent"));
+    authUrl.setQuery(q);
+
+    qInfo("OAuth authorize URL: %s", qUtf8Printable(authUrl.toString()));
+    const bool opened = launchBrowser(authUrl);
+    emit browserAuthRequested(authUrl, opened);
 }
 
-void OAuthClient::persistFromFlow() {
-    TokenStore::Tokens t;
-    t.accessToken   = d_->flow->token();
-    t.refreshToken  = d_->flow->refreshToken();
-    t.expiresAtUnix = d_->flow->expirationAt().toSecsSinceEpoch();
-    // Email is filled in by api/GmailClient::getProfile() on first sync; keep
-    // whatever we already had until then.
-    {
-        QMutexLocker lock(&d_->tokenMutex);
-        if (t.accountEmail.isEmpty()) t.accountEmail = d_->tokens.accountEmail;
-        d_->tokens = t;
+void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {
+    qInfo("OAuth callback received with keys: [%s]",
+          qUtf8Printable(params.keys().join(QChar(','))));
+
+    if (params.contains(QStringLiteral("error"))) {
+        const QString err  = params.value(QStringLiteral("error")).toString();
+        const QString desc = params.value(QStringLiteral("error_description")).toString();
+        qWarning("OAuth callback error: %s — %s",
+                 qUtf8Printable(err), qUtf8Printable(desc));
+        emit failed(err + QStringLiteral(": ") + desc);
+        return;
     }
-    d_->store->save(t, [](bool ok, QString err) {
-        if (!ok) qWarning("TokenStore::save failed: %s", qUtf8Printable(err));
+
+    const QString receivedState = params.value(QStringLiteral("state")).toString();
+    if (receivedState != d_->state) {
+        qWarning("OAuth state mismatch: got %s, expected %s",
+                 qUtf8Printable(receivedState), qUtf8Printable(d_->state));
+        emit failed(tr("OAuth state mismatch — sign-in aborted for safety."));
+        return;
+    }
+
+    const QString code = params.value(QStringLiteral("code")).toString();
+    if (code.isEmpty()) {
+        emit failed(tr("OAuth callback missing 'code' parameter."));
+        return;
+    }
+
+    exchangeCodeForTokens(code);
+}
+
+void OAuthClient::exchangeCodeForTokens(const QString& code) {
+    QUrlQuery body;
+    body.addQueryItem(QStringLiteral("client_id"),    d_->config->clientId());
+    body.addQueryItem(QStringLiteral("code"),         code);
+    body.addQueryItem(QStringLiteral("code_verifier"),
+                      QString::fromLatin1(d_->codeVerifier));
+    body.addQueryItem(QStringLiteral("redirect_uri"), d_->handler->callback());
+    body.addQueryItem(QStringLiteral("grant_type"),   QStringLiteral("authorization_code"));
+
+    QNetworkRequest req{QUrl(QLatin1String(kTokenEndpoint))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader,
+                  QStringLiteral("application/x-www-form-urlencoded"));
+    req.setRawHeader("Accept", "application/json");
+
+    auto* reply = d_->nam->post(req, body.toString(QUrl::FullyEncoded).toUtf8());
+    // OAuthClient is Bootstrap-owned for the app's lifetime, so the receiver
+    // we attach to (`this`) cannot outlive the connect — capturing `this`
+    // directly is safe here.
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const QByteArray data   = reply->readAll();
+        const int status        = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QNetworkReply::NetworkError nerr = reply->error();
+        const QString errString = reply->errorString();
+        reply->deleteLater();
+
+        if (nerr != QNetworkReply::NoError) {
+            qWarning("Token exchange failed: HTTP %d, error %d (%s), body: %s",
+                     status, int(nerr), qUtf8Printable(errString),
+                     data.constData());
+            // Even on HTTP errors Google typically returns a JSON error body —
+            // surface it to the user verbatim so they can act on it.
+            QString message = errString;
+            const auto err = QJsonDocument::fromJson(data).object();
+            if (err.contains(QStringLiteral("error"))) {
+                message = err.value(QStringLiteral("error")).toString();
+                if (err.contains(QStringLiteral("error_description"))) {
+                    message += QStringLiteral(": ") +
+                               err.value(QStringLiteral("error_description")).toString();
+                }
+            }
+            emit failed(QStringLiteral("Token exchange failed: %1").arg(message));
+            return;
+        }
+
+        const auto o = QJsonDocument::fromJson(data).object();
+        if (o.contains(QStringLiteral("error"))) {
+            emit failed(o.value(QStringLiteral("error")).toString() +
+                        QStringLiteral(": ") +
+                        o.value(QStringLiteral("error_description")).toString());
+            return;
+        }
+
+        TokenStore::Tokens t;
+        t.accessToken   = o.value(QStringLiteral("access_token")).toString();
+        t.refreshToken  = o.value(QStringLiteral("refresh_token")).toString();
+        t.expiresAtUnix = QDateTime::currentSecsSinceEpoch()
+                        + static_cast<qint64>(o.value(QStringLiteral("expires_in")).toDouble());
+        if (t.accessToken.isEmpty() || t.refreshToken.isEmpty()) {
+            emit failed(QStringLiteral(
+                "Token exchange succeeded but response was missing tokens."));
+            return;
+        }
+
+        {
+            QMutexLocker lock(&d_->tokenMutex);
+            t.accountEmail = d_->tokens.accountEmail;  // preserve if any
+            d_->tokens = t;
+        }
+        d_->store->save(t, [](bool ok, QString err) {
+            if (!ok) qWarning("TokenStore::save failed: %s",
+                              qUtf8Printable(err));
+        });
+
+        // The handler isn't needed once tokens are in hand; closing it
+        // releases the loopback port.
+        if (d_->handler) {
+            d_->handler->close();
+            d_->handler->deleteLater();
+            d_->handler = nullptr;
+        }
+
+        emit granted();
     });
 }
 

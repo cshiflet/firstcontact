@@ -5,8 +5,8 @@
 #include <QObject>
 #include <QString>
 #include <QUrl>
+#include <QVariantMap>
 
-class QOAuth2AuthorizationCodeFlow;
 class QOAuthHttpServerReplyHandler;
 
 namespace fc::auth {
@@ -51,8 +51,9 @@ signals:
 
 private:
     void hydrateFromStore();
-    void wireFlow();
-    void persistFromFlow();
+    void ensureHandler();
+    void onAuthCodeCallback(const QVariantMap& params);
+    void exchangeCodeForTokens(const QString& code);
     bool refreshIfNeededLocked();
 
     struct Impl;
