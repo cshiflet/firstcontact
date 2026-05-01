@@ -120,18 +120,22 @@ bool launchBrowser(const QUrl& url) {
     // back to http://127.0.0.1:<port>/ works because WSL2 forwards
     // localhost between Windows and Linux automatically.
     if (isWsl()) {
-        // wslview (from the wslu package) is the canonical WSL equivalent
-        // of xdg-open and quotes URLs correctly.
-        if (tryRun("wslview", "wslview", {u})) return true;
-        // cmd.exe is always available via /mnt/c. The empty-string title
-        // arg is needed so `start` doesn't interpret the URL as a title.
-        if (tryRun("cmd.exe",        "cmd.exe",
-                   {"/c", "start", "", u})) return true;
-        if (tryRun("powershell.exe", "powershell.exe",
-                   {"-NoProfile", "-Command",
-                    QStringLiteral("Start-Process '%1'").arg(u)})) return true;
-        // Fall through: someone might have installed a Linux browser even
-        // on WSL, and the user's PATH still has xdg-open etc.
+        if (!wslHasWindowsInterop()) {
+            qInfo("OAuth: WSL has no Windows interop (/mnt/c not mounted?) "
+                  "- skipping wslview/cmd.exe/powershell.exe; user will use "
+                  "the URL dialog");
+        } else {
+            // wslview (from the wslu package) is the canonical WSL equivalent
+            // of xdg-open and quotes URLs correctly.
+            if (tryRun("wslview", "wslview", {u})) return true;
+            // cmd.exe - empty-string title arg keeps `start` from interpreting
+            // the URL as a window title.
+            if (tryRun("cmd.exe",        "cmd.exe",
+                       {"/c", "start", "", u})) return true;
+            if (tryRun("powershell.exe", "powershell.exe",
+                       {"-NoProfile", "-Command",
+                        QStringLiteral("Start-Process '%1'").arg(u)})) return true;
+        }
     }
 
     if (QDesktopServices::openUrl(url)) {
