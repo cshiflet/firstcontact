@@ -354,13 +354,19 @@ void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {
 }
 
 void OAuthClient::exchangeCodeForTokens(const QString& code) {
+    const QString clientSecret = d_->config->clientSecret();
+    qInfo("Token exchange: client_id=%s…, client_secret=%s",
+          d_->config->clientId().left(16).toUtf8().constData(),
+          clientSecret.isEmpty() ? "(MISSING — check Settings)" : "(present)");
+
     QUrlQuery body;
-    body.addQueryItem(QStringLiteral("client_id"),    d_->config->clientId());
-    body.addQueryItem(QStringLiteral("code"),         code);
+    body.addQueryItem(QStringLiteral("client_id"),     d_->config->clientId());
+    body.addQueryItem(QStringLiteral("client_secret"), clientSecret);
+    body.addQueryItem(QStringLiteral("code"),          code);
     body.addQueryItem(QStringLiteral("code_verifier"),
                       QString::fromLatin1(d_->codeVerifier));
-    body.addQueryItem(QStringLiteral("redirect_uri"), d_->handler->callback());
-    body.addQueryItem(QStringLiteral("grant_type"),   QStringLiteral("authorization_code"));
+    body.addQueryItem(QStringLiteral("redirect_uri"),  d_->handler->callback());
+    body.addQueryItem(QStringLiteral("grant_type"),    QStringLiteral("authorization_code"));
 
     QNetworkRequest req{QUrl(QLatin1String(kTokenEndpoint))};
     req.setHeader(QNetworkRequest::ContentTypeHeader,
