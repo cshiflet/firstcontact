@@ -82,6 +82,18 @@ bool isWsl() {
     return result;
 }
 
+// True if WSL has Windows interop reachable. False when the user has
+// `automount = false` in /etc/wsl.conf or otherwise lacks /mnt/c — in that
+// case wslview / cmd.exe / powershell.exe will all fail the moment they
+// shell out, even though startDetached returns success because the launcher
+// scripts fork before erroring out. Skipping them gives us cleaner logs and
+// quicker fall-through to the URL dialog the user will actually use.
+bool wslHasWindowsInterop() {
+    if (!QStandardPaths::findExecutable(QStringLiteral("cmd.exe")).isEmpty())
+        return true;
+    return QFileInfo::exists(QStringLiteral("/mnt/c/Windows/System32/cmd.exe"));
+}
+
 // Try increasingly specific strategies to launch the system browser. Returns
 // true on the first one that successfully starts a child process. Logs the
 // strategy used (or all the failures) for diagnostics.
