@@ -1,0 +1,271 @@
+/* FirstContact — Light theme.
+ *
+ * Token reference (Qt QSS doesn't support CSS variables, so hex literals
+ * appear inline below):
+ *
+ *   bg                 #fafafa   window background
+ *   surface            #ffffff   panels, cards, inputs
+ *   surface-hover      #f5f5f5
+ *   surface-selected   #e8f0fe
+ *   divider            #e0e0e0
+ *   divider-strong     #cfcfcf
+ *   text               #202124
+ *   text-secondary     #5f6368
+ *   text-disabled      #9aa0a6
+ *   accent             #1a73e8
+ *   accent-hover       #1765cc
+ *   accent-pressed     #185abc
+ *   unread-stripe      #1a73e8
+ *   star               #f4b400
+ *   danger             #d93025
+ */
+
+QWidget {
+    background-color: #fafafa;
+    color: #202124;
+    font-size: 10pt;
+    selection-background-color: #1a73e8;
+    selection-color: #ffffff;
+}
+
+QMainWindow,
+QDialog {
+    background-color: #fafafa;
+}
+
+QToolBar {
+    background-color: #ffffff;
+    border: none;
+    border-bottom: 1px solid #e0e0e0;
+    spacing: 6px;
+    padding: 6px;
+}
+QToolBar QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #202124;
+}
+QToolBar QToolButton:hover {
+    background-color: #f1f3f4;
+    border-color: #e0e0e0;
+}
+QToolBar QToolButton:pressed,
+QToolBar QToolButton:checked {
+    background-color: #e8f0fe;
+    color: #1a73e8;
+    border-color: #d2e3fc;
+}
+QToolBar::separator {
+    background: #e0e0e0;
+    width: 1px;
+    margin: 6px 4px;
+}
+
+QStatusBar {
+    background-color: #ffffff;
+    color: #5f6368;
+    border-top: 1px solid #e0e0e0;
+}
+
+QSplitter::handle {
+    background: #e0e0e0;
+}
+QSplitter::handle:horizontal { width: 1px; }
+QSplitter::handle:vertical   { height: 1px; }
+
+QLineEdit {
+    background-color: #ffffff;
+    color: #202124;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    selection-background-color: #1a73e8;
+    selection-color: #ffffff;
+}
+QLineEdit:focus {
+    border-color: #1a73e8;
+}
+QLineEdit:disabled {
+    color: #9aa0a6;
+    background-color: #f5f5f5;
+}
+/* The toolbar search edit is the wide one — give it a pill shape. */
+QToolBar QLineEdit {
+    border-radius: 16px;
+    padding: 6px 14px;
+    min-width: 280px;
+    background-color: #f1f3f4;
+    border-color: transparent;
+}
+QToolBar QLineEdit:focus {
+    background-color: #ffffff;
+    border-color: #1a73e8;
+}
+
+QTextEdit,
+QTextBrowser {
+    background-color: #ffffff;
+    color: #202124;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    selection-background-color: #1a73e8;
+    selection-color: #ffffff;
+}
+
+QPushButton {
+    background-color: #ffffff;
+    color: #202124;
+    border: 1px solid #cfcfcf;
+    border-radius: 6px;
+    padding: 6px 14px;
+    min-width: 64px;
+}
+QPushButton:hover {
+    background-color: #f5f5f5;
+}
+QPushButton:pressed {
+    background-color: #ebebeb;
+}
+QPushButton:disabled {
+    color: #9aa0a6;
+    background-color: #f5f5f5;
+    border-color: #e0e0e0;
+}
+/* objectName="primary" → solid accent, used for Send / Save / Sign In. */
+QPushButton#primary {
+    background-color: #1a73e8;
+    color: #ffffff;
+    border-color: #1a73e8;
+}
+QPushButton#primary:hover    { background-color: #1765cc; border-color: #1765cc; }
+QPushButton#primary:pressed  { background-color: #185abc; border-color: #185abc; }
+QPushButton#primary:disabled { background-color: #b8d6f8; border-color: #b8d6f8; color: #ffffff; }
+
+/* objectName="link" → flat text-only button. */
+QPushButton#link {
+    background: transparent;
+    color: #1a73e8;
+    border: none;
+    padding: 4px 6px;
+    min-width: 0;
+}
+QPushButton#link:hover { color: #1765cc; }
+
+QListView,
+QTreeView {
+    background-color: #ffffff;
+    color: #202124;
+    border: none;
+    outline: 0;
+    show-decoration-selected: 1;
+}
+QListView::item,
+QTreeView::item {
+    padding: 4px 8px;
+    border: none;
+}
+QListView::item:hover,
+QTreeView::item:hover {
+    background-color: #f5f5f5;
+}
+QListView::item:selected,
+QTreeView::item:selected,
+QListView::item:selected:active,
+QTreeView::item:selected:active {
+    background-color: #e8f0fe;
+    color: #1a73e8;
+}
+
+/* Sidebar (objectName="Sidebar"): tighter rows, clearer selection. */
+QTreeView#SidebarTree {
+    background-color: #fafafa;
+    border-right: 1px solid #e0e0e0;
+    padding: 6px 4px;
+}
+QTreeView#SidebarTree::item {
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+QTreeView#SidebarTree::item:selected {
+    background-color: #e8f0fe;
+    color: #1a73e8;
+    font-weight: 600;
+}
+QTreeView#SidebarTree::branch {
+    background: transparent;
+}
+
+/* Reader cards (objectName="MessageCard"): no thick border, soft shadow look. */
+QFrame#MessageCard {
+    background-color: #ffffff;
+    border: 1px solid #e8eaed;
+    border-radius: 8px;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #cfcfcf;
+    min-height: 24px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover { background: #b0b0b0; }
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: #cfcfcf;
+    min-width: 24px;
+    border-radius: 5px;
+}
+QScrollBar::handle:horizontal:hover { background: #b0b0b0; }
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal { width: 0; }
+
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 14px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: #e8f0fe;
+    color: #1a73e8;
+}
+QMenu::separator {
+    height: 1px;
+    background: #e0e0e0;
+    margin: 4px 0;
+}
+
+QHeaderView::section {
+    background-color: #f5f5f5;
+    color: #5f6368;
+    padding: 6px;
+    border: none;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+QLabel#SectionTitle {
+    color: #5f6368;
+    font-size: 9pt;
+    font-weight: 600;
+    padding: 12px 8px 4px;
+}
+
+QLabel#FormHint {
+    color: #5f6368;
+}

@@ -1,5 +1,5 @@
 find_package(Qt6 6.4 COMPONENTS
-    Core Gui Widgets Network NetworkAuth Sql Concurrent LinguistTools
+    Core Gui Widgets Network NetworkAuth Sql Svg Concurrent LinguistTools
     REQUIRED)
 
 if(FC_BUILD_TESTS)

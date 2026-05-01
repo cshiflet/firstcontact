@@ -8,6 +8,7 @@
 
 #include <QDateTime>
 #include <QFrame>
+#include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -34,20 +35,23 @@ QString fromDisplay(const fc::Message& m) {
 
 QString headerHtml(const fc::Message& m, bool full) {
     QString h = QStringLiteral(
-        "<div style='font-weight:bold; font-size:11pt;'>%1</div>"
-        "<div style='color:gray; font-size:9pt;'>%2 — %3</div>")
-        .arg(m.subject.toHtmlEscaped(),
+        "<div style='font-weight:600; font-size:13pt; line-height:1.3;'>%1</div>"
+        "<div style='color:#5f6368; font-size:10pt; margin-top:2px;'>"
+        "<span style='font-weight:500; color:#202124;'>%2</span> &nbsp;·&nbsp; %3</div>")
+        .arg(m.subject.isEmpty()
+                 ? QStringLiteral("<i>(no subject)</i>")
+                 : m.subject.toHtmlEscaped(),
              fromDisplay(m),
              formatDate(m.internalDate));
     if (full) {
         if (!m.toAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:gray; font-size:9pt;'>"
-                                "<b>To:</b> %1</div>")
+            h += QStringLiteral("<div style='color:#5f6368; font-size:9pt; margin-top:4px;'>"
+                                "<b>to</b> %1</div>")
                     .arg(m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
         if (!m.ccAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:gray; font-size:9pt;'>"
-                                "<b>Cc:</b> %1</div>")
+            h += QStringLiteral("<div style='color:#5f6368; font-size:9pt;'>"
+                                "<b>cc</b> %1</div>")
                     .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
     }
@@ -75,17 +79,20 @@ QString bodyHtml(const fc::Message& m) {
 }  // namespace
 
 ReaderPane::ReaderPane(QWidget* parent) : QWidget(parent) {
+    setObjectName(QStringLiteral("ReaderPane"));
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
 
     scroll_ = new QScrollArea(this);
+    scroll_->setObjectName(QStringLiteral("ReaderScroll"));
     scroll_->setWidgetResizable(true);
     scroll_->setFrameShape(QFrame::NoFrame);
 
     content_ = new QWidget(scroll_);
+    content_->setObjectName(QStringLiteral("ReaderContent"));
     contentLayout_ = new QVBoxLayout(content_);
-    contentLayout_->setContentsMargins(12, 8, 12, 12);
-    contentLayout_->setSpacing(8);
+    contentLayout_->setContentsMargins(28, 24, 28, 28);
+    contentLayout_->setSpacing(14);
     contentLayout_->addStretch(1);
 
     scroll_->setWidget(content_);
@@ -104,13 +111,24 @@ void ReaderPane::clearStack() {
 
 QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpanded) {
     auto* card = new QFrame(content_);
-    card->setFrameShape(QFrame::StyledPanel);
+    card->setObjectName(QStringLiteral("MessageCard"));
+    card->setFrameShape(QFrame::NoFrame);
     auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(10, 8, 10, 10);
+    cardLayout->setContentsMargins(20, 16, 20, 16);
+    cardLayout->setSpacing(10);
+
+    // Soft drop-shadow under the card. Cheaper than QSS box-shadow (which Qt
+    // doesn't support) and gives the modern Material/Gmail floating-card feel.
+    auto* shadow = new QGraphicsDropShadowEffect(card);
+    shadow->setBlurRadius(18);
+    shadow->setOffset(0, 2);
+    shadow->setColor(QColor(0, 0, 0, 28));
+    card->setGraphicsEffect(shadow);
 
     auto* header = new QLabel(card);
     header->setTextFormat(Qt::RichText);
     header->setWordWrap(true);
+    header->setTextInteractionFlags(Qt::TextSelectableByMouse);
     header->setText(headerHtml(m, /*full=*/initiallyExpanded));
     cardLayout->addWidget(header);
 
@@ -118,6 +136,7 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setOpenExternalLinks(true);
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
+    body->setStyleSheet(QStringLiteral("background: transparent;"));
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
     cardLayout->addWidget(body);

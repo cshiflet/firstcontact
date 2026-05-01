@@ -2,9 +2,12 @@
 
 #include "models/Message.h"
 
+#include <QList>
 #include <QMainWindow>
+#include <QPair>
 #include <QString>
 
+class QAction;
 class QSplitter;
 class QLineEdit;
 
@@ -52,6 +55,7 @@ private slots:
     void onCreateLabel(const QString& parentLabelId);
     void onRenameLabel(const QString& labelId);
     void onDeleteLabel(const QString& labelId);
+    void onOpenSettings();
     void onToggleStar();
     void onArchiveCurrent();
 
@@ -64,6 +68,7 @@ private:
     void buildLayout();
     void wireSignals();
     void refreshAccountIndicator();
+    void refreshToolbarIcons();   // re-bake icons from the active palette
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
 
     fc::auth::ClientConfig*    config_;
@@ -81,6 +86,8 @@ private:
     fc::MessageListModel*    listModel_;
 
     QLineEdit*               searchEdit_;
+    QAction*                 searchIconAction_ = nullptr;
+    QList<QPair<QAction*, QString>> iconActions_;
     TrayController*          tray_;
     Shortcuts*               shortcuts_;
 

@@ -9,7 +9,10 @@
 #include "cache/MessageRepository.h"
 #include "cache/OutboxRepository.h"
 #include "cache/PendingOpsRepository.h"
+#include "common/IconLoader.h"
+#include "common/SettingsDialog.h"
 #include "common/Shortcuts.h"
+#include "common/Theme.h"
 #include "compose/ComposeWindow.h"
 #include "messagelist/MessageListView.h"
 #include "models/LabelTreeModel.h"
@@ -31,6 +34,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -38,6 +42,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSize>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
@@ -76,6 +81,11 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
 
     statusBar()->showMessage(tr("Ready."));
     refreshAccountIndicator();
+
+    // Re-tint toolbar icons whenever the theme flips so a Settings → Theme
+    // change updates immediately instead of waiting for the next launch.
+    connect(Theme::instance(), &Theme::changed, this,
+            [this](Theme::Mode) { refreshToolbarIcons(); });
 
     // Hydrate UI from cache without waiting for a network round trip.
     reloadSidebar();
@@ -117,21 +127,37 @@ void MainWindow::buildLayout() {
 void MainWindow::buildToolBar() {
     auto* tb = addToolBar(tr("Main"));
     tb->setMovable(false);
+    tb->setIconSize(QSize(18, 18));
+    tb->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
-    auto* signIn      = tb->addAction(tr("Sign In"));
-    auto* refresh     = tb->addAction(tr("Refresh"));
-    auto* compose     = tb->addAction(tr("Compose"));
-    auto* reply       = tb->addAction(tr("Reply"));
-    auto* replyAll    = tb->addAction(tr("Reply All"));
-    auto* forwardAct  = tb->addAction(tr("Forward"));
+    auto withIcon = [this, tb](const QString& svgName, const QString& label) {
+        auto* a = tb->addAction(IconLoader::themed(svgName), label);
+        a->setToolTip(label);
+        iconActions_.append({a, svgName});
+        return a;
+    };
+
+    auto* signIn     = withIcon(QStringLiteral("login.svg"),     tr("Sign In"));
+    auto* refresh    = withIcon(QStringLiteral("refresh.svg"),   tr("Refresh"));
+    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"));
+    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"));
+    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"));
+    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"));
     tb->addSeparator();
+
     searchEdit_ = new QLineEdit(this);
-    searchEdit_->setPlaceholderText(tr("Search mail (operators: from: subject: has:attachment is:unread …)"));
+    searchEdit_->setPlaceholderText(
+        tr("Search mail — try from: subject: has:attachment is:unread"));
     searchEdit_->setClearButtonEnabled(true);
+    searchIconAction_ = searchEdit_->addAction(
+        IconLoader::themed(QStringLiteral("search.svg")),
+        QLineEdit::LeadingPosition);
     tb->addWidget(searchEdit_);
     tb->addSeparator();
-    auto* signOut  = tb->addAction(tr("Sign Out"));
-    auto* quit     = tb->addAction(tr("Quit"));
+
+    auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"));
+    auto* signOut  = withIcon(QStringLiteral("logout.svg"),   tr("Sign out"));
+    auto* quit     = withIcon(QStringLiteral("quit.svg"),     tr("Quit"));
 
     connect(signIn,     &QAction::triggered, this, &MainWindow::onSignIn);
     connect(refresh,    &QAction::triggered, this, &MainWindow::onRefresh);
@@ -139,11 +165,26 @@ void MainWindow::buildToolBar() {
     connect(reply,      &QAction::triggered, this, &MainWindow::onReplyCurrent);
     connect(replyAll,   &QAction::triggered, this, &MainWindow::onReplyAllCurrent);
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
+    connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
     connect(signOut,    &QAction::triggered, this, &MainWindow::onSignOut);
     connect(quit,       &QAction::triggered, qApp, &QApplication::quit);
 
     connect(searchEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearchSubmit);
     connect(searchEdit_, &QLineEdit::textChanged,   this, &MainWindow::onSearchChanged);
+}
+
+void MainWindow::onOpenSettings() {
+    SettingsDialog dlg(this);
+    dlg.exec();
+}
+
+void MainWindow::refreshToolbarIcons() {
+    for (const auto& [action, svg] : iconActions_) {
+        if (action) action->setIcon(IconLoader::themed(svg));
+    }
+    if (searchIconAction_) {
+        searchIconAction_->setIcon(IconLoader::themed(QStringLiteral("search.svg")));
+    }
 }
 
 void MainWindow::wireSignals() {

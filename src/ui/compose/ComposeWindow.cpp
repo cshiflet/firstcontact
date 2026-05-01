@@ -28,11 +28,15 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
                              QWidget* parent)
     : QWidget(parent, Qt::Window),
       fromAddr_(fromAddr), fromName_(fromName) {
-    setWindowTitle(tr("Compose"));
-    resize(680, 540);
+    setWindowTitle(tr("New message"));
+    resize(720, 580);
 
     auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(20, 16, 20, 16);
+    root->setSpacing(10);
     auto* form = new QFormLayout;
+    form->setSpacing(8);
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
     toEdit_      = new QLineEdit(this);
     ccEdit_      = new QLineEdit(this);
@@ -51,7 +55,8 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
     statusLabel_->setStyleSheet(QStringLiteral("color: gray;"));
 
     auto* sendBtn      = new QPushButton(tr("Send"),       this);
-    auto* saveDraftBtn = new QPushButton(tr("Save Draft"), this);
+    sendBtn->setObjectName(QStringLiteral("primary"));
+    auto* saveDraftBtn = new QPushButton(tr("Save draft"), this);
     auto* cancelBtn    = new QPushButton(tr("Discard"),    this);
     connect(sendBtn,      &QPushButton::clicked, this, &ComposeWindow::onSend);
     connect(saveDraftBtn, &QPushButton::clicked, this, &ComposeWindow::onSaveDraft);

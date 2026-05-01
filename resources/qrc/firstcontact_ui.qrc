@@ -1,0 +1,22 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/themes">
+        <file alias="light.qss">../themes/light.qss</file>
+        <file alias="dark.qss">../themes/dark.qss</file>
+    </qresource>
+    <qresource prefix="/icons/symbolic">
+        <file alias="compose.svg">../icons/symbolic/compose.svg</file>
+        <file alias="refresh.svg">../icons/symbolic/refresh.svg</file>
+        <file alias="reply.svg">../icons/symbolic/reply.svg</file>
+        <file alias="reply-all.svg">../icons/symbolic/reply-all.svg</file>
+        <file alias="forward.svg">../icons/symbolic/forward.svg</file>
+        <file alias="search.svg">../icons/symbolic/search.svg</file>
+        <file alias="settings.svg">../icons/symbolic/settings.svg</file>
+        <file alias="login.svg">../icons/symbolic/login.svg</file>
+        <file alias="logout.svg">../icons/symbolic/logout.svg</file>
+        <file alias="quit.svg">../icons/symbolic/quit.svg</file>
+        <file alias="star.svg">../icons/symbolic/star.svg</file>
+        <file alias="star-filled.svg">../icons/symbolic/star-filled.svg</file>
+        <file alias="paperclip.svg">../icons/symbolic/paperclip.svg</file>
+    </qresource>
+</RCC>

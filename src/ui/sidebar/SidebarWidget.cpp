@@ -4,6 +4,7 @@
 
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QTreeView>
@@ -14,17 +15,27 @@ namespace fc::ui {
 SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto* title = new QLabel(tr("MAILBOXES"), this);
+    title->setObjectName(QStringLiteral("SectionTitle"));
+    layout->addWidget(title);
 
     tree_  = new QTreeView(this);
+    tree_->setObjectName(QStringLiteral("SidebarTree"));
     model_ = new fc::LabelTreeModel(this);
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);
-    tree_->setRootIsDecorated(true);
+    tree_->setRootIsDecorated(false);
+    tree_->setIndentation(14);
     tree_->setUniformRowHeights(true);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
-    tree_->expandToDepth(0);
+    tree_->setMouseTracking(true);
+    tree_->setFrameShape(QFrame::NoFrame);
+    tree_->setExpandsOnDoubleClick(true);
+    tree_->expandToDepth(1);
 
     layout->addWidget(tree_);
 

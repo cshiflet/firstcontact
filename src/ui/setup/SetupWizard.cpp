@@ -16,23 +16,31 @@ namespace fc::ui {
 
 SetupWizard::SetupWizard(fc::auth::ClientConfig* config, QWidget* parent)
     : QDialog(parent), config_(config) {
-    setWindowTitle(tr("FirstContact — First-Run Setup"));
+    setWindowTitle(tr("Welcome to FirstContact"));
     setModal(true);
-    resize(560, 360);
+    resize(580, 460);
 
     auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(28, 24, 28, 24);
+    layout->setSpacing(14);
 
-    auto* title = new QLabel(tr("<h2>Sign in to your Gmail account</h2>"), this);
+    auto* title = new QLabel(tr("<h2 style='margin:0;'>Sign in to your Gmail account</h2>"), this);
+    title->setTextFormat(Qt::RichText);
     layout->addWidget(title);
 
-    auto* intro = new QLabel(this);
-    intro->setWordWrap(true);
-    intro->setOpenExternalLinks(true);
-    intro->setText(tr(
+    auto* subtitle = new QLabel(tr(
         "FirstContact talks to Gmail directly using your own Google Cloud "
-        "OAuth client — no third-party server is involved.<br><br>"
-        "<b>One-time setup (≈3 minutes):</b>"
-        "<ol>"
+        "OAuth client — no third-party server is involved."), this);
+    subtitle->setObjectName(QStringLiteral("FormHint"));
+    subtitle->setWordWrap(true);
+    layout->addWidget(subtitle);
+
+    auto* steps = new QLabel(this);
+    steps->setWordWrap(true);
+    steps->setOpenExternalLinks(true);
+    steps->setText(tr(
+        "<p style='margin:6px 0;'><b>One-time setup (≈3 minutes):</b></p>"
+        "<ol style='margin:0; padding-left:20px;'>"
         "<li>Open the Google Cloud Console and create a project (or pick one).</li>"
         "<li>Enable the <b>Gmail API</b> for the project.</li>"
         "<li>Configure the OAuth consent screen (External, your email as a test user).</li>"
@@ -40,25 +48,36 @@ SetupWizard::SetupWizard(fc::auth::ClientConfig* config, QWidget* parent)
         "<b>Desktop app</b>. No client secret needed.</li>"
         "<li>Paste the resulting <b>Client ID</b> below.</li>"
         "</ol>"));
-    layout->addWidget(intro);
+    layout->addWidget(steps);
 
     auto* openBtn = new QPushButton(tr("Open Google Cloud Console"), this);
+    openBtn->setObjectName(QStringLiteral("link"));
+    openBtn->setCursor(Qt::PointingHandCursor);
     connect(openBtn, &QPushButton::clicked, this, &SetupWizard::onOpenConsole);
-    layout->addWidget(openBtn);
+    layout->addWidget(openBtn, 0, Qt::AlignLeft);
 
     auto* form = new QFormLayout;
+    form->setSpacing(8);
     idEdit_ = new QLineEdit(this);
-    idEdit_->setPlaceholderText(QStringLiteral("123456789012-abcdefg.apps.googleusercontent.com"));
+    idEdit_->setPlaceholderText(
+        QStringLiteral("123456789012-abcdefg.apps.googleusercontent.com"));
     idEdit_->setText(config_->clientId());
-    form->addRow(tr("OAuth Client ID:"), idEdit_);
+    form->addRow(tr("OAuth Client ID"), idEdit_);
     layout->addLayout(form);
 
     statusLabel_ = new QLabel(this);
     statusLabel_->setStyleSheet(QStringLiteral("color: #c92a2a;"));
+    statusLabel_->setWordWrap(true);
     layout->addWidget(statusLabel_);
+
+    layout->addStretch(1);
 
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    if (auto* save = buttons->button(QDialogButtonBox::Save)) {
+        save->setObjectName(QStringLiteral("primary"));
+        save->setText(tr("Continue"));
+    }
     connect(buttons, &QDialogButtonBox::accepted, this, &SetupWizard::onSave);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);

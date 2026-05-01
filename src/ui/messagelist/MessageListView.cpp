@@ -12,6 +12,10 @@ MessageListView::MessageListView(QWidget* parent) : QListView(parent) {
     setUniformItemSizes(true);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setEditTriggers(QAbstractItemView::NoEditTriggers);
+    setMouseTracking(true);            // hover row highlight
+    setAlternatingRowColors(false);    // QSS row hover/selection looks better
+    setSpacing(0);
+    setFrameShape(QFrame::NoFrame);
 
     connect(this, &QAbstractItemView::clicked,   this, &MessageListView::onActivated);
     connect(this, &QAbstractItemView::activated, this, &MessageListView::onActivated);
