@@ -28,14 +28,20 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointer>
+#include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QVBoxLayout>
 
 namespace fc::ui {
 
@@ -174,23 +180,65 @@ void MainWindow::wireSignals() {
             [this](const QUrl& url, bool openedAutomatically) {
                 if (openedAutomatically) {
                     statusBar()->showMessage(
-                        tr("Browser opened — complete consent and we'll catch the redirect."),
-                        0);
+                        tr("Browser opened — complete consent and we'll catch "
+                           "the redirect automatically."), 0);
                     return;
                 }
-                // Fall back to a copy-paste dialog. AppImages, sandboxes, and
-                // headless boxes can all silently fail QDesktopServices.
+                // Auto-launch failed. Pop a non-modal dialog with a selectable,
+                // pre-copied URL and clear instructions: the loopback handler
+                // is still listening, so completing sign-in in any browser
+                // closes the loop.
                 QApplication::clipboard()->setText(url.toString());
-                QMessageBox box(this);
-                box.setWindowTitle(tr("Open this URL to sign in"));
-                box.setIcon(QMessageBox::Information);
-                box.setText(tr(
-                    "Couldn't launch your default browser automatically.\n\n"
-                    "The sign-in URL has been copied to your clipboard. "
-                    "Paste it into a browser to continue.\n\n"
-                    "URL: %1").arg(url.toString()));
-                box.setStandardButtons(QMessageBox::Ok);
-                box.exec();
+                statusBar()->showMessage(
+                    tr("Couldn't auto-launch a browser — see the dialog "
+                       "for the sign-in URL."), 0);
+
+                auto* dlg = new QDialog(this);
+                dlg->setAttribute(Qt::WA_DeleteOnClose);
+                dlg->setWindowTitle(tr("Open this URL to sign in"));
+                dlg->resize(600, 220);
+
+                auto* layout = new QVBoxLayout(dlg);
+                auto* msg = new QLabel(tr(
+                    "<p>Couldn't launch your default browser automatically. "
+                    "The sign-in URL has been copied to your clipboard.</p>"
+                    "<p><b>Paste it into any browser to continue.</b> "
+                    "FirstContact is still listening on a local port — once "
+                    "you complete consent, the redirect will land here and "
+                    "this dialog will close itself.</p>"), dlg);
+                msg->setWordWrap(true);
+                msg->setTextFormat(Qt::RichText);
+                layout->addWidget(msg);
+
+                auto* urlField = new QLineEdit(url.toString(), dlg);
+                urlField->setReadOnly(true);
+                urlField->selectAll();
+                layout->addWidget(urlField);
+
+                auto* btnRow = new QHBoxLayout;
+                auto* copyBtn  = new QPushButton(tr("Copy URL"),       dlg);
+                auto* retryBtn = new QPushButton(tr("Try Browser Again"), dlg);
+                auto* closeBtn = new QPushButton(tr("Close"),          dlg);
+                btnRow->addWidget(copyBtn);
+                btnRow->addWidget(retryBtn);
+                btnRow->addStretch(1);
+                btnRow->addWidget(closeBtn);
+                layout->addLayout(btnRow);
+
+                connect(copyBtn,  &QPushButton::clicked, [url] {
+                    QApplication::clipboard()->setText(url.toString());
+                });
+                connect(retryBtn, &QPushButton::clicked, [url] {
+                    QDesktopServices::openUrl(url);
+                });
+                connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+
+                // Auto-close when sign-in completes so the user doesn't have to
+                // click anything once Google's redirect comes back.
+                connect(auth_, &fc::auth::OAuthClient::granted, dlg, &QDialog::close);
+                connect(auth_, &fc::auth::OAuthClient::failed,  dlg, &QDialog::close);
+
+                dlg->show();
             });
 
     connect(sync_, &fc::sync::SyncService::labelsUpdated,

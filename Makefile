@@ -69,7 +69,8 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    qt6-l10n-tools qt6-declarative-dev qt6-webengine-dev \
 	    libsecret-1-dev qtkeychain-qt6-dev \
 	    libsqlite3-dev sqlite3 \
-	    librsvg2-bin appstream xvfb
+	    librsvg2-bin appstream xvfb \
+	    xdg-utils
 
 setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	sudo dnf install -y \

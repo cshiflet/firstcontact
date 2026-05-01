@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QEventLoop>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMutex>
@@ -16,7 +17,10 @@
 #include <QNetworkRequest>
 #include <QOAuth2AuthorizationCodeFlow>
 #include <QOAuthHttpServerReplyHandler>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -54,6 +58,56 @@ QByteArray makeCodeVerifier() {
 
 QByteArray makeCodeChallenge(const QByteArray& verifier) {
     return util::base64UrlEncode(QCryptographicHash::hash(verifier, QCryptographicHash::Sha256));
+}
+
+// Try increasingly specific strategies to launch the system browser. Returns
+// true on the first one that successfully starts a child process. Logs the
+// strategy used (or all the failures) for diagnostics.
+//
+// Why we don't trust QDesktopServices::openUrl alone: on Linux it relies on
+// xdg-open / xdg-utils, which is missing from minimal images, and there have
+// been long-running issues (Qt bug 90984 et al.) where the call silently
+// returns false when xdg-open is present but can't reach a snap-confined
+// browser. We mirror Qt's lookup with a hand-rolled chain so users on
+// non-standard setups still get a working sign-in.
+bool launchBrowser(const QUrl& url) {
+    if (QDesktopServices::openUrl(url)) {
+        qInfo("OAuth: launched browser via QDesktopServices");
+        return true;
+    }
+
+    const QString u = url.toString();
+    auto tryRun = [&](const QString& exe, const QStringList& args) {
+        if (QStandardPaths::findExecutable(exe).isEmpty()) return false;
+        if (!QProcess::startDetached(exe, args)) return false;
+        qInfo("OAuth: launched browser via '%s'", qUtf8Printable(exe));
+        return true;
+    };
+
+    const QString browserEnv =
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BROWSER"));
+    if (!browserEnv.isEmpty() && tryRun(browserEnv, {u})) return true;
+
+    if (tryRun(QStringLiteral("xdg-open"),         {u})) return true;
+    if (tryRun(QStringLiteral("sensible-browser"), {u})) return true;
+    if (tryRun(QStringLiteral("gio"),              {QStringLiteral("open"), u})) return true;
+    if (tryRun(QStringLiteral("kde-open5"),        {u})) return true;
+    if (tryRun(QStringLiteral("gnome-open"),       {u})) return true;
+
+    // Last resort — try known browsers by name (covers the case where xdg-open
+    // is missing but a browser is installed under a standard name).
+    for (const QString& exe : {QStringLiteral("firefox"),
+                                QStringLiteral("google-chrome"),
+                                QStringLiteral("chromium"),
+                                QStringLiteral("chromium-browser"),
+                                QStringLiteral("brave-browser"),
+                                QStringLiteral("microsoft-edge")}) {
+        if (tryRun(exe, {u})) return true;
+    }
+
+    qWarning("OAuth: every browser launch strategy failed — "
+             "the user will need to copy the URL manually");
+    return false;
 }
 
 }  // namespace
@@ -153,12 +207,7 @@ void OAuthClient::wireFlow() {
     connect(d_->flow, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser,
             this, [this](const QUrl& url) {
                 qInfo("OAuth authorize URL: %s", qUtf8Printable(url.toString()));
-                const bool opened = QDesktopServices::openUrl(url);
-                if (!opened) {
-                    qWarning("QDesktopServices::openUrl returned false — "
-                             "no system browser handler for %s",
-                             qUtf8Printable(url.toString()));
-                }
+                const bool opened = launchBrowser(url);
                 emit browserAuthRequested(url, opened);
             });
 
