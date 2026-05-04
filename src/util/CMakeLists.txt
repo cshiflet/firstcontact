@@ -7,6 +7,7 @@ add_library(fc_util STATIC
     HtmlSanitizer.h HtmlSanitizer.cpp
     MimeBuilder.h MimeBuilder.cpp
     Browser.h Browser.cpp
+    DryRun.h DryRun.cpp
 )
 target_include_directories(fc_util PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_util PUBLIC Qt6::Core Qt6::Gui)

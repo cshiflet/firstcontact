@@ -94,13 +94,13 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     const QString snippet = idx.data(fc::MessageListModel::SnippetRole).toString();
     const qint64  date    = idx.data(fc::MessageListModel::DateRole).toLongLong();
     const int  threadCount = idx.data(fc::MessageListModel::ThreadCountRole).toInt();
-    // In conversation mode (>1 message in the thread) suffix the sender
-    // column with the message count, mirroring Gmail web's "Alice, Bob (3)"
-    // / "Alice (5)" treatment. In single-message rows (threadCount <= 1)
-    // we just show the sender as-is.
-    const QString from = (threadCount > 1)
-        ? QStringLiteral("%1 (%2)").arg(fromRaw).arg(threadCount)
-        : fromRaw;
+    // Conversation rows (threadCount > 1): mirror Gmail web's "Alice (5)"
+    // treatment. We render the count separately from the sender below
+    // so the badge is preserved even when the sender name needs to be
+    // elided to fit the column.
+    const QString countSuffix = (threadCount > 1)
+        ? QStringLiteral(" (%1)").arg(threadCount)
+        : QString();
 
     const QColor accent  = accentColor(opt.palette);
     const QColor primary = opt.palette.color(QPalette::Text);
@@ -145,20 +145,48 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
         x = starRect.right() + 8;
     }
 
-    // From column — bold when unread.
+    // From column — bold when unread. In conversation rows (threadCount > 1)
+    // we render the sender elided into the budget that remains after the
+    // count badge, then draw the badge, then the importance marker —
+    // otherwise the elide chops "(5)" off and the user never sees the
+    // conversation indicator.
     QFont fromFont = opt.font;
     fromFont.setWeight(unread ? QFont::DemiBold : QFont::Normal);
     QFontMetrics fromFm(fromFont);
     p->setFont(fromFont);
     p->setPen(primary);
-    const QRect fromRect(x, inner.top(), kFromColWidth, inner.height() / 2);
-    p->drawText(fromRect, Qt::AlignVCenter | Qt::AlignLeft,
-                fromFm.elidedText(from, Qt::ElideRight, kFromColWidth));
 
-    // Importance marker tucks in next to the from name.
+    const int countWidth = countSuffix.isEmpty()
+        ? 0 : fromFm.horizontalAdvance(countSuffix);
+    const int senderBudget = qMax(0, kFromColWidth - countWidth);
+    const QString senderClipped =
+        fromFm.elidedText(fromRaw, Qt::ElideRight, senderBudget);
+
+    const QRect fromRect(x, inner.top(), kFromColWidth, inner.height() / 2);
+    p->drawText(fromRect, Qt::AlignVCenter | Qt::AlignLeft, senderClipped);
+
+    int afterFromX = x + fromFm.horizontalAdvance(senderClipped);
+    if (!countSuffix.isEmpty()) {
+        // Dimmer + non-bold so it reads as a meta badge, not part of
+        // the sender name itself.
+        p->save();
+        p->setPen(secondary);
+        QFont countFont = opt.font;
+        countFont.setWeight(QFont::Normal);
+        p->setFont(countFont);
+        p->drawText(QRect(afterFromX, fromRect.top(),
+                          countWidth + 4, fromRect.height()),
+                    Qt::AlignVCenter | Qt::AlignLeft, countSuffix);
+        afterFromX += countWidth;
+        p->restore();
+        p->setFont(fromFont);
+        p->setPen(primary);
+    }
+
+    // Importance marker tucks in next to the (already-rendered) sender +
+    // count badge, not at the column's edge.
     if (important) {
-        const int markerX = x + fromFm.horizontalAdvance(
-            fromFm.elidedText(from, Qt::ElideRight, kFromColWidth)) + 6;
+        const int markerX = afterFromX + 6;
         p->save();
         p->setPen(accent);
         QFont importantFont = fromFont;

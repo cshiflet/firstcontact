@@ -30,6 +30,7 @@
 #include "tray/Notifier.h"
 #include "tray/TrayController.h"
 #include "util/Browser.h"
+#include "util/DryRun.h"
 #include "util/MimeBuilder.h"
 
 #include <QAction>
@@ -53,6 +54,7 @@
 #include <QSize>
 #include <QMenu>
 #include <QResizeEvent>
+#include <QSet>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -94,7 +96,10 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
 
     wireSignals();
 
-    statusBar()->showMessage(tr("Ready."));
+    statusBar()->showMessage(fc::util::DryRun::enabled()
+        ? tr("Dry-run mode enabled (FC_DRY_RUN). "
+             "All destructive operations are blocked.")
+        : tr("Ready."));
     refreshAccountIndicator();
 
     // Re-tint toolbar icons whenever the theme flips so a Settings → Theme
@@ -222,16 +227,28 @@ void MainWindow::buildToolBar() {
     overflowAction_ = tb->addWidget(overflowButton_);
     overflowAction_->setVisible(false);
 
-    // Capture each managed action's "anchor" — the toolbar action that
-    // appears immediately AFTER it — so updateToolbarOverflow can restore
-    // the original order when the window grows back wide enough.
+    // Capture each managed action's "anchor" — the next NON-overflow
+    // action in the original toolbar layout. We deliberately skip over
+    // other overflow entries: when updateToolbarOverflow tears the
+    // managed actions out of the toolbar to recompute fit, the anchors
+    // we use to reinsert them MUST still be present, otherwise
+    // insertAction with a stale anchor falls back to appending at the
+    // end and the toolbar ends up scrambled. Only the non-overflow
+    // anchors (separators, the search bar, the hamburger button) are
+    // guaranteed to survive a removal pass.
     {
         const auto current = tb->actions();
+        QSet<QAction*> overflowSet;
+        for (auto& e : overflowEntries_) overflowSet.insert(e.action);
         for (auto& e : overflowEntries_) {
             const int idx = current.indexOf(e.action);
-            e.toolbarBefore = (idx >= 0 && idx + 1 < current.size())
-                ? current[idx + 1]
-                : nullptr;
+            e.toolbarBefore = nullptr;
+            for (int i = idx + 1; i < current.size(); ++i) {
+                if (!overflowSet.contains(current[i])) {
+                    e.toolbarBefore = current[i];
+                    break;
+                }
+            }
         }
     }
 
@@ -340,8 +357,10 @@ void MainWindow::wireSignals() {
     connect(list_, &MessageListView::starToggled,
             this,  &MainWindow::onToggleStarFor);
 
-    connect(reader_, &ReaderPane::downloadAttachmentRequested,
-            this,    &MainWindow::onDownloadAttachment);
+    connect(reader_, &ReaderPane::openAttachmentRequested,
+            this,    &MainWindow::onOpenAttachment);
+    connect(reader_, &ReaderPane::saveAsAttachmentRequested,
+            this,    &MainWindow::onSaveAsAttachment);
     connect(reader_, &ReaderPane::downloadAllRequested,
             this,    &MainWindow::onDownloadAllAttachments);
 
@@ -527,9 +546,11 @@ void MainWindow::wireSignals() {
 
 void MainWindow::refreshAccountIndicator() {
     const QString email = auth_->accountEmail();
-    setWindowTitle(email.isEmpty()
+    const QString dryPrefix = fc::util::DryRun::enabled()
+        ? QStringLiteral("[DRY RUN] ") : QString();
+    setWindowTitle(dryPrefix + (email.isEmpty()
         ? QStringLiteral("FirstContact")
-        : QStringLiteral("FirstContact — %1").arg(email));
+        : QStringLiteral("FirstContact — %1").arg(email)));
     statusBar()->showMessage(email.isEmpty()
         ? tr("Not signed in.")
         : tr("Signed in as %1").arg(email));
@@ -848,6 +869,11 @@ void MainWindow::onCreateLabel(const QString& parentLabelId) {
 }
 
 void MainWindow::onRenameLabel(const QString& labelId) {
+    if (fc::util::DryRun::block(QStringLiteral("rename-label"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: label rename blocked."), 4000);
+        return;
+    }
     const auto current = fc::cache::LabelRepository::byId(labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
 
@@ -872,6 +898,11 @@ void MainWindow::onRenameLabel(const QString& labelId) {
 }
 
 void MainWindow::onDeleteLabel(const QString& labelId) {
+    if (fc::util::DryRun::block(QStringLiteral("delete-label"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: label deletion blocked."), 4000);
+        return;
+    }
     const auto current = fc::cache::LabelRepository::byId(labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
     if (QMessageBox::question(this, tr("Delete label"),
@@ -898,6 +929,11 @@ void MainWindow::onToggleStar() {
 
 void MainWindow::onToggleStarFor(const QString& messageId) {
     if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("toggle-star"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: star toggle blocked."), 4000);
+        return;
+    }
 
     // Re-read from cache so we toggle relative to the row the user clicked,
     // not to whatever currentMessage_ happens to be (the click target may
@@ -963,10 +999,71 @@ bool writeBytesToPath(const QString& path, const QByteArray& bytes,
 
 }  // namespace
 
-void MainWindow::onDownloadAttachment(const QString& messageId,
-                                      const QString& attachmentId,
-                                      const QString& filename,
-                                      bool forceSaveAs) {
+namespace {
+
+// Per-process scratch directory for "Open" attachments. Lazily created the
+// first time the user clicks an attachment and reused for the rest of the
+// session so the OS keeps file→app associations stable. Cleaned up when
+// the QTemporaryDir destructor runs (process exit) — see
+// MainWindow::~MainWindow if we ever add explicit teardown.
+QString sessionTempDir() {
+    static QString cached;
+    if (!cached.isEmpty()) return cached;
+    QString base = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    if (base.isEmpty()) base = QDir::tempPath();
+    const QString dir = base + QStringLiteral("/firstcontact-")
+                      + QString::number(QCoreApplication::applicationPid());
+    QDir().mkpath(dir);
+    cached = dir;
+    return cached;
+}
+
+}  // namespace
+
+void MainWindow::onOpenAttachment(const QString& messageId,
+                                  const QString& attachmentId,
+                                  const QString& filename) {
+    if (messageId.isEmpty() || attachmentId.isEmpty()) {
+        statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
+        return;
+    }
+    if (!auth_->isAuthorized()) {
+        statusBar()->showMessage(
+            tr("Sign in to open attachments."), 5000);
+        return;
+    }
+
+    statusBar()->showMessage(tr("Opening %1…").arg(filename));
+    QPointer<MainWindow> self(this);
+    gmail_->getAttachment(messageId, attachmentId,
+        [self, filename](QByteArray bytes, fc::api::ApiError err) {
+            if (!self) return;
+            if (err) {
+                self->statusBar()->showMessage(
+                    tr("Open failed: %1").arg(err.message), 8000);
+                return;
+            }
+            // Drop into a per-session temp dir so multiple "Open" clicks
+            // for the same filename don't collide and the OS can hold
+            // the file open as long as the viewer wants to.
+            const QString target = uniqueTargetPath(sessionTempDir(), filename);
+            QString writeErr;
+            if (!writeBytesToPath(target, bytes, &writeErr)) {
+                self->statusBar()->showMessage(
+                    tr("Couldn't write temp file: %1").arg(writeErr), 8000);
+                return;
+            }
+            // Intentionally NOT calling AttachmentRepository::markDownloaded —
+            // these temp files aren't a permanent download.
+            self->statusBar()->showMessage(
+                tr("Opened %1").arg(QFileInfo(target).fileName()), 5000);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(target));
+        });
+}
+
+void MainWindow::onSaveAsAttachment(const QString& messageId,
+                                    const QString& attachmentId,
+                                    const QString& filename) {
     if (messageId.isEmpty() || attachmentId.isEmpty()) {
         statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
         return;
@@ -977,27 +1074,18 @@ void MainWindow::onDownloadAttachment(const QString& messageId,
         return;
     }
 
-    // Resolve the destination NOW (synchronously, before the network call)
-    // so the file picker is a direct response to the user's gesture.
-    // Showing it inside the gmail_->getAttachment callback would feel
-    // disconnected — by the time bytes arrive, the user has moved on.
-    const bool ask = forceSaveAs || Preferences::alwaysAskAttachmentLocation();
-    QString target;
-    if (ask) {
-        const QString suggested = Preferences::attachmentDir()
-            + QLatin1Char('/')
-            + (filename.isEmpty() ? QStringLiteral("attachment.bin")
-                                  : QFileInfo(filename).fileName());
-        target = QFileDialog::getSaveFileName(
-            this, tr("Save attachment"), suggested);
-        if (target.isEmpty()) {
-            statusBar()->showMessage(tr("Download cancelled."), 3000);
-            return;
-        }
-    } else {
-        const QString dir = Preferences::attachmentDir();
-        QDir().mkpath(dir);
-        target = uniqueTargetPath(dir, filename);
+    // Resolve the destination synchronously so the picker is a direct
+    // response to the user's gesture; showing it from inside the
+    // network callback would feel disconnected.
+    const QString suggested = Preferences::attachmentDir()
+        + QLatin1Char('/')
+        + (filename.isEmpty() ? QStringLiteral("attachment.bin")
+                              : QFileInfo(filename).fileName());
+    const QString target = QFileDialog::getSaveFileName(
+        this, tr("Save attachment as"), suggested);
+    if (target.isEmpty()) {
+        statusBar()->showMessage(tr("Save cancelled."), 3000);
+        return;
     }
 
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
@@ -1017,8 +1105,9 @@ void MainWindow::onDownloadAttachment(const QString& messageId,
                 return;
             }
             fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
+            // No auto-open here — the user explicitly chose Save as…, so
+            // we respect that and don't pop a viewer afterwards.
             self->statusBar()->showMessage(tr("Saved to %1").arg(target), 8000);
-            QDesktopServices::openUrl(QUrl::fromLocalFile(target));
         });
 }
 
@@ -1036,21 +1125,16 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
         return;
     }
 
-    // For "Download all" the natural unit is a folder, not a per-file picker
-    // (asking N times in a row is hostile UX). When always-ask is on, ask
-    // once for a folder; otherwise use the configured default. Each file
-    // gets uniqueTargetPath collision handling within that folder.
-    QString dir;
-    if (Preferences::alwaysAskAttachmentLocation()) {
-        dir = QFileDialog::getExistingDirectory(
-            this, tr("Save all attachments to folder"),
-            Preferences::attachmentDir());
-        if (dir.isEmpty()) {
-            statusBar()->showMessage(tr("Download cancelled."), 3000);
-            return;
-        }
-    } else {
-        dir = Preferences::attachmentDir();
+    // For "Download all" the natural unit is a folder, not a per-file
+    // picker (asking N times in a row is hostile UX). The picker starts
+    // in the user's configured default folder. Each file gets
+    // uniqueTargetPath collision handling within that folder.
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, tr("Save all attachments to folder"),
+        Preferences::attachmentDir());
+    if (dir.isEmpty()) {
+        statusBar()->showMessage(tr("Download cancelled."), 3000);
+        return;
     }
     QDir().mkpath(dir);
 
@@ -1095,6 +1179,11 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
 
 void MainWindow::onDeleteCurrent() {
     if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("delete-message"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: move-to-Trash blocked."), 4000);
+        return;
+    }
     if (QMessageBox::question(this, tr("Move to Trash"),
             tr("Move this message to Trash?"),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
@@ -1117,6 +1206,11 @@ void MainWindow::onDeleteCurrent() {
 
 void MainWindow::onArchiveCurrent() {
     if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("archive-message"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: archive blocked."), 4000);
+        return;
+    }
     const QStringList rem{QStringLiteral("INBOX")};
     fc::cache::MessageRepository::applyLabelDiff(currentMessage_.id, {}, rem);
     fc::cache::PendingOpsRepository::enqueueModify(currentMessage_.id, {}, rem);

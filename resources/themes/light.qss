@@ -28,9 +28,40 @@ QWidget {
     selection-color: #ffffff;
 }
 
-QMainWindow,
+QMainWindow {
+    background-color: #fafafa;
+}
+
 QDialog {
     background-color: #fafafa;
+    border: 1px solid #cfcfcf;
+}
+
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #5f6368;
+    border-radius: 3px;
+    background-color: #ffffff;
+}
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover {
+    border-color: #1a73e8;
+}
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background-color: #1a73e8;
+    border-color: #1a73e8;
+    image: none;
+}
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    border-color: #cfcfcf;
+    background-color: #f5f5f5;
 }
 
 QToolBar {

@@ -35,25 +35,25 @@ public:
     void showEmpty(const QString& reason = {});
 
 signals:
-    // Fired when the user activates one of the attachment chips. The slot
-    // owner (MainWindow) bridges to GmailClient::getAttachment + writes
-    // the bytes to disk; ReaderPane stays UI-only and ignorant of the
-    // network layer.
-    //
-    // forceSaveAs=true means the user picked "Save as…" from the right-
-    // click menu — the slot must show a file picker regardless of the
-    // global "always ask" preference. forceSaveAs=false leaves the
-    // path-resolution policy up to the slot owner (which checks the pref).
-    void downloadAttachmentRequested(const QString& messageId,
-                                      const QString& attachmentId,
-                                      const QString& filename,
-                                      bool forceSaveAs);
+    // Fired on left-click of an attachment chip. Slot owner writes the
+    // bytes to a per-session temp directory and hands the path to
+    // QDesktopServices::openUrl — the file is NOT recorded as a permanent
+    // download. The temp directory is wiped on app exit.
+    void openAttachmentRequested(const QString& messageId,
+                                  const QString& attachmentId,
+                                  const QString& filename);
+
+    // Fired on right-click → "Save as…". Slot owner shows a file picker
+    // (initial directory = Preferences::attachmentDir()) and writes the
+    // bytes to whatever path the user confirms.
+    void saveAsAttachmentRequested(const QString& messageId,
+                                    const QString& attachmentId,
+                                    const QString& filename);
 
     // Fired when the user activates the "Download all" button on a card
-    // with two or more attachments. Slot owner iterates the message's
-    // attachments and dispatches a save chain — picking a target folder
-    // once if the always-ask pref is on, then writing every file under
-    // that folder with collision-safe naming.
+    // with two or more attachments. Slot owner picks a target folder
+    // (a one-shot QFileDialog seeded with attachmentDir()) and writes
+    // every file there with collision-safe naming.
     void downloadAllRequested(const QString& messageId);
 
 private:

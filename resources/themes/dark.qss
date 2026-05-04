@@ -24,8 +24,46 @@ QWidget {
     selection-color: #1a1a1a;
 }
 
-QMainWindow,
+QMainWindow {
+    background-color: #1a1a1a;
+}
+
+/* QDialog gets a 1-pixel divider so its edge is visible against the
+ * main window when the two overlap (the OS frame alone can be hard to
+ * pick out against our dark surfaces). */
 QDialog {
+    background-color: #1a1a1a;
+    border: 1px solid #404040;
+}
+
+/* Checkboxes & radio buttons — Fusion's default unchecked indicator is
+ * almost invisible on the dark surface (low contrast against #232323).
+ * Give the indicator an explicit size, accent border, and surface fill
+ * so the empty state reads clearly. */
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #9aa0a6;
+    border-radius: 3px;
+    background-color: #2a2a2a;
+}
+QRadioButton::indicator {
+    border-radius: 8px;          /* circular */
+}
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover {
+    border-color: #c2d5fc;
+}
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background-color: #8ab4f8;
+    border-color: #8ab4f8;
+    image: none;                 /* Fusion's checkmark image conflicts */
+}
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    border-color: #5f6368;
     background-color: #1a1a1a;
 }
 

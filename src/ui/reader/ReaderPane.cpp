@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -162,7 +163,7 @@ ReaderPane::ReaderPane(QWidget* parent) : QWidget(parent) {
     content_ = new QWidget(scroll_);
     content_->setObjectName(QStringLiteral("ReaderContent"));
     contentLayout_ = new QVBoxLayout(content_);
-    contentLayout_->setContentsMargins(28, 24, 28, 28);
+    contentLayout_->setContentsMargins(14, 12, 14, 14);
     contentLayout_->setSpacing(14);
     contentLayout_->addStretch(1);
 
@@ -185,7 +186,7 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     card->setObjectName(QStringLiteral("MessageCard"));
     card->setFrameShape(QFrame::NoFrame);
     auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(20, 16, 20, 16);
+    cardLayout->setContentsMargins(12, 10, 12, 10);
     cardLayout->setSpacing(10);
 
     // Soft drop-shadow under the card. Cheaper than QSS box-shadow (which Qt
@@ -215,6 +216,10 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     cardLayout->addWidget(header);
 
     auto* body = new QTextBrowser(card);
+    // Trim the QTextDocument's default 4-pt margin: combined with the
+    // card padding it added enough whitespace around the message body
+    // that emails felt floaty rather than dense.
+    body->document()->setDocumentMargin(2);
     // Route external-link clicks through util::launchBrowser instead of
     // Qt's default QDesktopServices::openUrl. The default path on Linux
     // ends up calling xdg-open, which on WSL ends up calling wslview,
@@ -283,8 +288,8 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                 label, card);
             chip->setObjectName(QStringLiteral("attachmentChip"));
             chip->setCursor(Qt::PointingHandCursor);
-            chip->setToolTip(QObject::tr("Download %1 (%2) — right-click for "
-                                          "Save as").arg(a.filename, a.mimeType));
+            chip->setToolTip(QObject::tr("Open %1 (%2) — right-click to save")
+                                .arg(a.filename, a.mimeType));
             // Right-click context menu: Save as… (forces a picker even when
             // "always ask" is off).
             chip->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -296,12 +301,14 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
             const QString messageId    = m.id;
             const QString attachmentId = a.id;
             const QString filename     = a.filename;
+            // Left-click: open in a temp file (no permanent save).
             QObject::connect(chip, &QPushButton::clicked, this,
                 [this, messageId, attachmentId, filename]() {
-                    emit downloadAttachmentRequested(
-                        messageId, attachmentId, filename,
-                        /*forceSaveAs=*/false);
+                    emit openAttachmentRequested(
+                        messageId, attachmentId, filename);
                 });
+            // Right-click: Save as… (file picker, default initial dir is
+            // Preferences::attachmentDir()).
             QObject::connect(chip, &QWidget::customContextMenuRequested, this,
                 [this, chip, messageId, attachmentId, filename](const QPoint& pos) {
                     if (attachmentId.isEmpty()) return;
@@ -309,9 +316,8 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                     auto* saveAs = menu.addAction(QObject::tr("Save as…"));
                     QObject::connect(saveAs, &QAction::triggered, this,
                         [this, messageId, attachmentId, filename]() {
-                            emit downloadAttachmentRequested(
-                                messageId, attachmentId, filename,
-                                /*forceSaveAs=*/true);
+                            emit saveAsAttachmentRequested(
+                                messageId, attachmentId, filename);
                         });
                     menu.exec(chip->mapToGlobal(pos));
                 });

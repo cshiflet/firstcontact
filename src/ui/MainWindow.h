@@ -65,10 +65,16 @@ private slots:
     void onToggleStarFor(const QString& messageId);
     void onArchiveCurrent();
     void onDeleteCurrent();
-    void onDownloadAttachment(const QString& messageId,
-                              const QString& attachmentId,
-                              const QString& filename,
-                              bool forceSaveAs);
+    // Left-click: write to a per-session temp dir and hand off to the
+    // OS viewer; no permanent save, no AttachmentRepository update.
+    void onOpenAttachment(const QString& messageId,
+                          const QString& attachmentId,
+                          const QString& filename);
+    // Right-click → Save as…: always shows a file picker seeded with
+    // Preferences::attachmentDir().
+    void onSaveAsAttachment(const QString& messageId,
+                            const QString& attachmentId,
+                            const QString& filename);
     void onDownloadAllAttachments(const QString& messageId);
 
     void reloadCurrentLabel();

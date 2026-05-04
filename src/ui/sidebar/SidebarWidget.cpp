@@ -16,23 +16,22 @@ namespace fc::ui {
 namespace {
 
 // Sidebar delegate that paints a "Labels" section header above the FIRST
-// root-level user label. Mirrors the original styled banner between system
-// folders (Inbox / Starred / Sent / …) and the user-defined label list,
-// but without a fixed top-of-pane title. The model already tags each node
-// with TypeRole; we check neighbouring siblings to decide whether this
-// row is the system → user boundary.
+// root-level user label. Replaces the old top-of-pane MAILBOXES banner
+// with an inline divider at the system → user boundary. Filled rectangle
+// + centered caption so it reads as a section header rather than a
+// floating piece of text.
 class SidebarDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
-    static constexpr int kHeaderHeight = 26;   // matches the old SectionTitle padding
-    static constexpr int kHeaderTopPad = 10;
-    static constexpr int kHeaderInsetX = 8;
+    // Slim banner: full row width, dimmer text on a subtle band that
+    // contrasts with the row background in both themes.
+    static constexpr int kBannerHeight = 22;
 
     QSize sizeHint(const QStyleOptionViewItem& opt,
                    const QModelIndex& idx) const override {
         QSize s = QStyledItemDelegate::sizeHint(opt, idx);
-        if (isFirstUserLabelAtRoot(idx)) s.rheight() += kHeaderTopPad + kHeaderHeight;
+        if (isFirstUserLabelAtRoot(idx)) s.rheight() += kBannerHeight;
         return s;
     }
 
@@ -41,26 +40,31 @@ public:
                const QModelIndex& idx) const override {
         QStyleOptionViewItem o = opt;
         if (isFirstUserLabelAtRoot(idx)) {
-            const QRect headerRect(
-                opt.rect.left(),
-                opt.rect.top() + kHeaderTopPad,
-                opt.rect.width(),
-                kHeaderHeight);
+            const QRect bannerRect(opt.rect.left(),
+                                    opt.rect.top(),
+                                    opt.rect.width(),
+                                    kBannerHeight);
 
             painter->save();
+            // Theme-aware fill. Light: pale grey band. Dark: a touch
+            // brighter than the surrounding sidebar so the band reads.
+            const bool dark = opt.palette.color(QPalette::Window).lightness() < 128;
+            const QColor bg = dark ? QColor(0x2a, 0x2a, 0x2a)
+                                   : QColor(0xee, 0xef, 0xf1);
+            painter->fillRect(bannerRect, bg);
+
             QFont f = opt.font;
-            f.setPointSizeF(f.pointSizeF() * 0.85);   // ~9pt against ~10.5pt body
+            f.setPointSizeF(f.pointSizeF() * 0.85);
             f.setWeight(QFont::DemiBold);
             painter->setFont(f);
             painter->setPen(opt.palette.color(QPalette::Disabled,
                                               QPalette::WindowText));
-            painter->drawText(
-                headerRect.adjusted(kHeaderInsetX, 0, -kHeaderInsetX, 0),
-                Qt::AlignBottom | Qt::AlignLeft,
-                QObject::tr("Labels"));
+            painter->drawText(bannerRect.adjusted(10, 0, -10, 0),
+                              Qt::AlignVCenter | Qt::AlignLeft,
+                              QObject::tr("Labels"));
             painter->restore();
 
-            o.rect.adjust(0, kHeaderTopPad + kHeaderHeight, 0, 0);
+            o.rect.adjust(0, kBannerHeight, 0, 0);
         }
         QStyledItemDelegate::paint(painter, o, idx);
     }

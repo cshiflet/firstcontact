@@ -2,6 +2,7 @@
 
 #include "api/GmailClient.h"
 #include "cache/PendingOpsRepository.h"
+#include "util/DryRun.h"
 
 #include <QPointer>
 #include <QTimer>
@@ -35,6 +36,11 @@ void PendingOpsWorker::stop() { if (d_->timer) d_->timer->stop(); }
 
 void PendingOpsWorker::flush() {
     if (d_->busy) return;
+    // Hard stop in dry-run: leave the queue in place so it drains
+    // automatically the next time the user runs without FC_DRY_RUN.
+    // Without this gate, an op enqueued before the flag was set could
+    // still hit Gmail on the next scheduler tick.
+    if (fc::util::DryRun::block(QStringLiteral("pending-ops-flush"))) return;
     auto ops = fc::cache::PendingOpsRepository::due();
     if (ops.empty()) return;
     d_->busy = true;

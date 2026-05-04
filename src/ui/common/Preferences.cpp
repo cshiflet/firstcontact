@@ -9,7 +9,6 @@ namespace fc::ui {
 namespace {
 constexpr char kKey[] = "html/preview";
 constexpr char kAttachmentDirKey[] = "attachments/dir";
-constexpr char kAttachmentAskKey[] = "attachments/alwaysAsk";
 constexpr char kConversationKey[]  = "ui/conversationView";
 }
 
@@ -56,17 +55,6 @@ QString Preferences::attachmentDir() {
 void Preferences::setAttachmentDir(const QString& dir) {
     QSettings s;
     s.setValue(QLatin1String(kAttachmentDirKey), dir);
-    s.sync();
-}
-
-bool Preferences::alwaysAskAttachmentLocation() {
-    QSettings s;
-    return s.value(QLatin1String(kAttachmentAskKey), false).toBool();
-}
-
-void Preferences::setAlwaysAskAttachmentLocation(bool ask) {
-    QSettings s;
-    s.setValue(QLatin1String(kAttachmentAskKey), ask);
     s.sync();
 }
 

@@ -148,20 +148,11 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         dirEdit->setText(picked);
     });
 
-    auto* askBox = new QCheckBox(
-        tr("Ask me where to save every time (overrides the folder above)"),
-        content);
-    askBox->setChecked(Preferences::alwaysAskAttachmentLocation());
-    connect(askBox, &QCheckBox::toggled, this, [](bool on) {
-        Preferences::setAlwaysAskAttachmentLocation(on);
-    });
-    attachForm->addRow(QString(), askBox);
-
     auto* attachHint = new QLabel(tr(
-        "Left-click an attachment chip to download to the folder above. "
-        "Right-click for <b>Save as…</b> at any time. With <i>ask every "
-        "time</i> turned on, every download (including <b>Download all</b>) "
-        "asks for the destination first."), content);
+        "Left-click an attachment to <b>open</b> it from a per-session "
+        "temp folder (no permanent save). Right-click for <b>Save as…</b> "
+        "— the picker starts in the folder above. <b>Download all</b> "
+        "writes every attachment to a folder you choose."), content);
     attachHint->setObjectName(QStringLiteral("FormHint"));
     attachHint->setWordWrap(true);
     attachHint->setTextFormat(Qt::RichText);

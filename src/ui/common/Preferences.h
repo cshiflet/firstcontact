@@ -33,20 +33,13 @@ public:
 
     // Attachment download settings ---------------------------------------
 
-    // Folder where attachments land when the user takes the default action
-    // (left-click on an attachment chip with "always ask" off, or "Download
-    // all"). Empty string means "use the platform default Downloads folder
-    // resolved via QStandardPaths". Returned value is always non-empty —
-    // unset / blank stored values are resolved to the platform default.
+    // Initial directory the "Save as…" file picker (and "Download all"
+    // folder picker) opens against. Empty string means "use the platform
+    // default Downloads folder resolved via QStandardPaths". Returned
+    // value is always non-empty — unset / blank stored values are
+    // resolved to the platform default.
     static QString attachmentDir();
     static void    setAttachmentDir(const QString& dir);
-
-    // When true, every save action — including left-clicks and "Download
-    // all" — pops a file picker so the user can confirm the destination
-    // and rename the file. When false, left-click goes straight to
-    // attachmentDir() with collision-safe naming.
-    static bool alwaysAskAttachmentLocation();
-    static void setAlwaysAskAttachmentLocation(bool ask);
 
     // Conversation view: when true, the message list groups messages by
     // thread and shows one row per thread (Gmail-web default). When false,
