@@ -105,6 +105,21 @@ void Theme::apply(Mode mode) {
     QApplication::setFont(f);
 
     const Mode resolved = resolveMode(mode);
+
+    // Theme the standard palette roles QSS doesn't reach. QPalette::Link is
+    // what QTextBrowser / QLabel use for <a href> anchor color when no
+    // inline `color:` style is set; Fusion's default is a dark blue that's
+    // unreadable against our dark surfaces.
+    QPalette pal = QApplication::palette();
+    if (resolved == Mode::Dark) {
+        pal.setColor(QPalette::Link,        QColor(QStringLiteral("#8ab4f8")));
+        pal.setColor(QPalette::LinkVisited, QColor(QStringLiteral("#c58af9")));
+    } else {
+        pal.setColor(QPalette::Link,        QColor(QStringLiteral("#1a73e8")));
+        pal.setColor(QPalette::LinkVisited, QColor(QStringLiteral("#7c4dff")));
+    }
+    QApplication::setPalette(pal);
+
     loadStylesheet(resolved);
 
     emit instance()->changed(resolved);

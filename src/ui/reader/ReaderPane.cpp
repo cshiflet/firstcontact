@@ -197,6 +197,21 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setStyleSheet(QStringLiteral("background: transparent;"));
     body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     body->setMinimumHeight(360);   // floor so the card has a useful default
+    // Defensive: explicitly pin link color on the body's palette so dark mode
+    // doesn't render <a href> anchors in the unreadable Fusion-default blue.
+    // This matches what Theme::apply pins on the application palette.
+    {
+        const bool dark = Theme::resolveMode(Theme::currentMode())
+                           == Theme::Mode::Dark;
+        QPalette pal = body->palette();
+        pal.setColor(QPalette::Link,
+                     QColor(dark ? QStringLiteral("#8ab4f8")
+                                 : QStringLiteral("#1a73e8")));
+        pal.setColor(QPalette::LinkVisited,
+                     QColor(dark ? QStringLiteral("#c58af9")
+                                 : QStringLiteral("#7c4dff")));
+        body->setPalette(pal);
+    }
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
     cardLayout->addWidget(body, /*stretch=*/1);
