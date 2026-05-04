@@ -94,28 +94,13 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     const QString snippet = idx.data(fc::MessageListModel::SnippetRole).toString();
     const qint64  date    = idx.data(fc::MessageListModel::DateRole).toLongLong();
     const int  threadCount = idx.data(fc::MessageListModel::ThreadCountRole).toInt();
-    // Conversation rows (threadCount > 1): mirror Gmail web's "Alice (5)"
-    // treatment. We render the count separately from the sender below
-    // so the badge is preserved even when the sender name needs to be
-    // elided to fit the column.
+    // Conversation rows (threadCount > 1): a small accent-coloured pill
+    // before the sender, painted further down. Setting countSuffix
+    // here keeps the importance-marker math below symmetric with the
+    // single-message path.
     const QString countSuffix = (threadCount > 1)
         ? QStringLiteral(" (%1)").arg(threadCount)
         : QString();
-    if (threadCount > 1) {
-        // Diagnostic — multi-message threads should be visually distinct
-        // (count pill at the left of the sender). If you see this in the
-        // log but no pill on screen, that's a paint bug. If you don't
-        // see it, the model isn't reporting threadCount > 1.
-        static int painted = 0;
-        if (painted < 5) {
-            qInfo("MessageItemDelegate: painting thread badge n=%d for '%s' "
-                  "(row=%d)",
-                  threadCount, qUtf8Printable(idx.data(
-                      fc::MessageListModel::FromRole).toString()),
-                  idx.row());
-            ++painted;
-        }
-    }
 
     const QColor accent  = accentColor(opt.palette);
     const QColor primary = opt.palette.color(QPalette::Text);
