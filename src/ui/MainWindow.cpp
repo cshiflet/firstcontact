@@ -442,7 +442,17 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
         fc::cache::MessageRepository::markAccessed(selected.id);
     };
 
-    if (!cached.id.isEmpty() && !cached.bodyText.isEmpty()) {
+    // Cache shortcut: only skip the network round-trip when the cached row
+    // looks complete. A row that has body_text but is missing body_html
+    // despite advertising body_html_present is incomplete — typically a
+    // pre-migration-v3 row from before we persisted the HTML body. Re-fetch
+    // so "Open in browser" / inline preview works the next click.
+    const bool cacheLooksComplete =
+        !cached.id.isEmpty()
+        && !cached.bodyText.isEmpty()
+        && (!cached.bodyHtmlPresent || !cached.bodyHtml.isEmpty());
+
+    if (cacheLooksComplete) {
         renderThread(cached);
         return;
     }
