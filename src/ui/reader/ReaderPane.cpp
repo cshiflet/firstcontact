@@ -15,10 +15,13 @@
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QTextBrowser>
 #include <QVBoxLayout>
+
+#include <memory>
 
 namespace fc::ui {
 
@@ -310,29 +313,46 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
             ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
             : m.bodyHtml;
 
+        // Holder for the LocalHtmlServer that survives across button clicks.
+        // shared_ptr<QPointer<...>> so the lambda captures by value but
+        // assignments are visible across invocations; QPointer auto-clears
+        // when the QObject is destroyed (deleteLater on expiry).
+        auto srvHolder = std::make_shared<QPointer<LocalHtmlServer>>();
+
         QObject::connect(webBtn, &QPushButton::clicked, card,
-            [card, cardLayout, body, webBtn, html]() {
+            [card, cardLayout, body, webBtn, html, srvHolder]() {
                 const auto mode = Preferences::htmlPreview();
 
                 if (mode == Preferences::HtmlPreview::ExternalBrowser) {
-                    // Spin up a one-shot loopback HTTP server, hand the URL
-                    // (with random token) to the system browser. No Chromium
-                    // ever loaded into our process. The server self-destructs
-                    // after the browser fetches the page or after 60 s.
-                    auto* srv = new LocalHtmlServer(html.toUtf8(), card);
-                    if (!srv->start()) {
-                        webBtn->setText(QObject::tr("Couldn't start local server"));
-                        srv->deleteLater();
-                        return;
+                    // Reuse the prior server if it's still listening — same
+                    // URL/token still serves the same HTML — so the user can
+                    // close the browser and click again to re-open without
+                    // waiting for the lifetime timer to recycle it. If it's
+                    // null (never created or already expired), spin a new
+                    // one. Either way we leave the button enabled so the
+                    // user can re-launch on demand.
+                    LocalHtmlServer* srv = srvHolder->data();
+                    if (!srv) {
+                        srv = new LocalHtmlServer(html.toUtf8(), card);
+                        if (!srv->start()) {
+                            webBtn->setText(QObject::tr("Couldn't start local server"));
+                            srv->deleteLater();
+                            return;
+                        }
+                        *srvHolder = srv;
+                        // expired → null out the holder so the next click
+                        // creates a fresh server. The button text doesn't
+                        // need to change because it never moved off
+                        // "Open in browser".
+                        QObject::connect(srv, &LocalHtmlServer::expired,
+                                         card, [srvHolder] {
+                            srvHolder->clear();
+                        });
                     }
                     const QUrl u = srv->url();
                     qInfo("LocalHtmlServer: serving HTML at %s",
                           qUtf8Printable(u.toString()));
                     fc::util::launchBrowser(u);
-                    webBtn->setEnabled(false);
-                    webBtn->setText(QObject::tr("Opened in browser"));
-                    QObject::connect(srv, &LocalHtmlServer::expired, webBtn,
-                        [webBtn] { webBtn->setText(QObject::tr("Open in browser")); webBtn->setEnabled(true); });
                     return;
                 }
 
