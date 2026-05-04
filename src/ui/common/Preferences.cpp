@@ -21,14 +21,16 @@ QString Preferences::htmlPreviewToString(HtmlPreview m) {
     switch (m) {
         case HtmlPreview::Disabled:        return QStringLiteral("disabled");
         case HtmlPreview::ExternalBrowser: return QStringLiteral("external");
-        case HtmlPreview::InlineWebEngine: return QStringLiteral("inline");
     }
     return QStringLiteral("external");
 }
 
 Preferences::HtmlPreview Preferences::htmlPreviewFromString(const QString& s) {
     if (s == QLatin1String("disabled")) return HtmlPreview::Disabled;
-    if (s == QLatin1String("inline"))   return HtmlPreview::InlineWebEngine;
+    // Stored value of "inline" silently migrates to External Browser —
+    // the inline WebEngine path was removed (see the "Drop inline
+    // WebEngine HTML preview" commit). Users who had it selected get
+    // the next-closest equivalent without a popup.
     return HtmlPreview::ExternalBrowser;   // safe default
 }
 

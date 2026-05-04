@@ -10,8 +10,8 @@ namespace fc::util {
 //   - feed the FTS5 body column from HTML-only messages,
 //   - render an HTML message body when the user has not opted into rich view.
 //
-// This is intentionally lossy. For rich rendering use HtmlSanitizer (rich tier)
-// or HtmlRenderHost (webview tier).
+// This is intentionally lossy. For rich rendering use HtmlSanitizer (rich
+// tier); the system browser handles full-fidelity HTML via LocalHtmlServer.
 QString html2text(const QString& html);
 
 // Replaces numeric (&#39;, &#x27;) and a small set of named (&amp;, &lt;,

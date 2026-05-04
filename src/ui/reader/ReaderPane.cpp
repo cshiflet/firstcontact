@@ -1,7 +1,5 @@
 #include "ReaderPane.h"
 
-#include "HtmlRenderHostLoader.h"
-#include "IHtmlRenderHost.h"
 #include "LocalHtmlServer.h"
 #include "ui/common/IconLoader.h"
 #include "ui/common/Preferences.h"
@@ -392,19 +390,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         cardLayout->addLayout(attachRow);
     }
 
-    // Offer "Show full HTML" only when the message actually has HTML and the
-    // user hasn't disabled the feature in Preferences. The button does
-    // different things depending on the chosen mode.
+    // Offer "Open in browser" when the message has HTML and the user
+    // hasn't disabled the feature. The inline WebEngine path was
+    // dropped — see commit message — leaving a single, simpler
+    // external-browser handoff via LocalHtmlServer.
     const auto previewMode = Preferences::htmlPreview();
     if (initiallyExpanded
         && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
         && previewMode != Preferences::HtmlPreview::Disabled) {
         auto* row = new QHBoxLayout;
         row->addStretch(1);
-        auto* webBtn = new QPushButton(
-            previewMode == Preferences::HtmlPreview::ExternalBrowser
-                ? tr("Open in browser")
-                : tr("Show full HTML"), card);
+        auto* webBtn = new QPushButton(tr("Open in browser"), card);
         webBtn->setObjectName(QStringLiteral("link"));
         webBtn->setCursor(Qt::PointingHandCursor);
         row->addWidget(webBtn);
@@ -421,62 +417,29 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         auto srvHolder = std::make_shared<QPointer<LocalHtmlServer>>();
 
         QObject::connect(webBtn, &QPushButton::clicked, card,
-            [card, cardLayout, body, webBtn, html, srvHolder]() {
-                const auto mode = Preferences::htmlPreview();
-
-                if (mode == Preferences::HtmlPreview::ExternalBrowser) {
-                    // Reuse the prior server if it's still listening — same
-                    // URL/token still serves the same HTML — so the user can
-                    // close the browser and click again to re-open without
-                    // waiting for the lifetime timer to recycle it. If it's
-                    // null (never created or already expired), spin a new
-                    // one. Either way we leave the button enabled so the
-                    // user can re-launch on demand.
-                    LocalHtmlServer* srv = srvHolder->data();
-                    if (!srv) {
-                        srv = new LocalHtmlServer(html.toUtf8(), card);
-                        if (!srv->start()) {
-                            webBtn->setText(QObject::tr("Couldn't start local server"));
-                            srv->deleteLater();
-                            return;
-                        }
-                        *srvHolder = srv;
-                        // expired → null out the holder so the next click
-                        // creates a fresh server. The button text doesn't
-                        // need to change because it never moved off
-                        // "Open in browser".
-                        QObject::connect(srv, &LocalHtmlServer::expired,
-                                         card, [srvHolder] {
-                            srvHolder->clear();
-                        });
-                    }
-                    const QUrl u = srv->url();
-                    qInfo("LocalHtmlServer: serving HTML at %s",
-                          qUtf8Printable(u.toString()));
-                    fc::util::launchBrowser(u);
-                    return;
-                }
-
-                if (mode == Preferences::HtmlPreview::InlineWebEngine
-                    && HtmlRenderHostLoader::available()) {
-                    auto* host = HtmlRenderHostLoader::create(card);
-                    if (!host) {
-                        webBtn->setText(QObject::tr("WebEngine plugin not available"));
+            [card, webBtn, html, srvHolder]() {
+                // Reuse the prior server if it's still listening — same
+                // URL/token still serves the same HTML — so the user
+                // can close the browser and click again to re-open
+                // without waiting for the lifetime timer to recycle it.
+                LocalHtmlServer* srv = srvHolder->data();
+                if (!srv) {
+                    srv = new LocalHtmlServer(html.toUtf8(), card);
+                    if (!srv->start()) {
+                        webBtn->setText(QObject::tr("Couldn't start local server"));
+                        srv->deleteLater();
                         return;
                     }
-                    body->hide();
-                    webBtn->setEnabled(false);
-                    webBtn->setText(QObject::tr("Loading full HTML…"));
-                    QWidget* w = host->widget();
-                    w->setMinimumHeight(400);
-                    cardLayout->addWidget(w);
-                    host->render(html, /*allowRemote=*/false);
-                    QObject::connect(w, &QWidget::destroyed,
-                                     [host] { delete host; });
-                    return;
+                    *srvHolder = srv;
+                    QObject::connect(srv, &LocalHtmlServer::expired,
+                                     card, [srvHolder] {
+                        srvHolder->clear();
+                    });
                 }
-
-                webBtn->setText(QObject::tr("HTML preview unavailable — see Settings"));
+                const QUrl u = srv->url();
+                qInfo("LocalHtmlServer: serving HTML at %s",
+                      qUtf8Printable(u.toString()));
+                fc::util::launchBrowser(u);
             });
     }
 

@@ -12,11 +12,9 @@ public:
         ExternalBrowser,  // serve sanitized HTML on a loopback socket and
                           // hand the URL to the user's system browser. No
                           // Qt WebEngine dependency, no Chromium in process.
-        InlineWebEngine,  // embed the HTML inline via the WebEngine plugin.
-                          // Highest fidelity, costs ~50–80 MB extra resident
-                          // even when no message is opened. Requires a
-                          // restart to take effect because Qt6WebEngineCore
-                          // has to be pre-loaded before QApplication.
+        // (InlineWebEngine was removed — see the "Drop inline WebEngine
+        // HTML preview" commit. The plugin / loader / interface are
+        // gone too. To resurrect, revert that commit.)
     };
 
     static HtmlPreview htmlPreview();

@@ -23,7 +23,8 @@ namespace fc::ui {
 // Body rendering tiers:
 //   - text/plain              -> linkified plain text in QTextBrowser
 //   - text/html (sanitized)   -> HtmlSanitizer rich tier into QTextBrowser
-//   - text/html (full WebEngine) -> Phase-3 plugin via HtmlRenderHost
+//   - text/html (full)        -> served via LocalHtmlServer + the system
+//                                browser ("Open in browser" button)
 class ReaderPane : public QWidget {
     Q_OBJECT
 public:

@@ -101,8 +101,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
                      int(Preferences::HtmlPreview::Disabled));
     htmlBox->addItem(tr("Open in external browser (recommended)"),
                      int(Preferences::HtmlPreview::ExternalBrowser));
-    htmlBox->addItem(tr("Inline rich preview (Qt WebEngine, +~80 MB RAM, restart required)"),
-                     int(Preferences::HtmlPreview::InlineWebEngine));
     htmlBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     htmlBox->setMinimumWidth(420);
     const int htmlIdx = htmlBox->findData(int(Preferences::htmlPreview()));
@@ -116,10 +114,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         "subset only — fastest, lowest memory, lowest fidelity.<br>"
         "<b>External browser</b> serves the original HTML over a one-shot "
         "loopback URL and hands it to your system browser. No Chromium ever "
-        "loaded into FirstContact.<br>"
-        "<b>Inline rich preview</b> renders the HTML in-place using Qt "
-        "WebEngine. Highest fidelity but pre-loads Chromium at startup; "
-        "requires restarting the app to take effect."), content);
+        "loaded into FirstContact."), content);
     htmlHint->setObjectName(QStringLiteral("FormHint"));
     htmlHint->setWordWrap(true);
     htmlHint->setTextFormat(Qt::RichText);

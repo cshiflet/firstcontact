@@ -6,13 +6,10 @@ if(FC_BUILD_TESTS)
     find_package(Qt6 6.4 COMPONENTS Test REQUIRED)
 endif()
 
-if(FC_ENABLE_WEBENGINE)
-    find_package(Qt6 6.4 COMPONENTS WebEngineWidgets QUIET)
-    if(NOT Qt6WebEngineWidgets_FOUND)
-        message(WARNING "QtWebEngineWidgets not found; HTML-on-demand renderer will be disabled at runtime.")
-        set(FC_ENABLE_WEBENGINE OFF CACHE BOOL "" FORCE)
-    endif()
-endif()
+# Qt6::WebEngineWidgets used to be looked up here for the inline HTML
+# preview path (FC_ENABLE_WEBENGINE option + src/ui/reader/webengine_plugin
+# subdirectory). That path was dropped — see the "Drop inline WebEngine
+# HTML preview" commit. To resurrect, revert that commit.
 
 find_package(Qt6Keychain QUIET)
 if(NOT Qt6Keychain_FOUND)

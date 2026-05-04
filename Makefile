@@ -10,7 +10,6 @@
 
 # ---- Configurable knobs (override on the command line) --------------------
 #   make build BUILD_TYPE=Release SANITIZERS=ON
-#   make appimage WEBENGINE=OFF
 BUILD_DIR        ?= build
 RELEASE_DIR      ?= build-release
 BUILD_TYPE       ?= Debug
@@ -20,12 +19,10 @@ APP_VERSION      ?= 0.1.0
 ARCH             := $(shell uname -m)
 APPIMAGE         := $(APP_NAME)-$(APP_VERSION)-$(ARCH).AppImage
 LINUXDEPLOY_DIR  ?= $(HOME)/.local/bin
-WEBENGINE        ?= ON
 SANITIZERS       ?= OFF
 LOCK_FILE        := $(HOME)/.local/share/FirstContact/firstcontact.lock
 
 CMAKE_FLAGS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-              -DFC_ENABLE_WEBENGINE=$(WEBENGINE) \
               -DFC_ENABLE_SANITIZERS=$(SANITIZERS)
 
 # Treat every target as PHONY by default — none of them produce a single file
@@ -44,9 +41,9 @@ help:  ## Show this help.
 	      { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
 	@echo "Knobs (override on command line):"
-	@echo "  BUILD_TYPE=$(BUILD_TYPE)        WEBENGINE=$(WEBENGINE)"
-	@echo "  SANITIZERS=$(SANITIZERS)       BUILD_DIR=$(BUILD_DIR)"
-	@echo "  RELEASE_DIR=$(RELEASE_DIR)     APP_VERSION=$(APP_VERSION)"
+	@echo "  BUILD_TYPE=$(BUILD_TYPE)        SANITIZERS=$(SANITIZERS)"
+	@echo "  BUILD_DIR=$(BUILD_DIR)          RELEASE_DIR=$(RELEASE_DIR)"
+	@echo "  APP_VERSION=$(APP_VERSION)"
 
 # ---- Dependency installation ----------------------------------------------
 
@@ -56,7 +53,7 @@ setup: tools ## Install distro build deps + fetch linuxdeploy. Auto-detects dist
 	elif  [ -f /etc/arch-release   ]; then $(MAKE) --no-print-directory setup-arch;   \
 	else \
 	    echo "Unknown distro. Install: Qt6 (Core/Gui/Widgets/Network/NetworkAuth/Sql/"; \
-	    echo "  WebEngineWidgets/Concurrent), qtkeychain-qt6, libsecret, sqlite,"; \
+	    echo "  Concurrent), qtkeychain-qt6, libsecret, sqlite,"; \
 	    echo "  cmake>=3.24, ninja, g++ with C++20, librsvg2 (icon), appstream (validation)."; \
 	    exit 1; \
 	fi
@@ -66,7 +63,7 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    build-essential cmake ninja-build pkg-config git curl \
 	    qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
 	    qt6-networkauth-dev libqt6sql6-sqlite \
-	    qt6-l10n-tools qt6-declarative-dev qt6-webengine-dev \
+	    qt6-l10n-tools qt6-declarative-dev \
 	    qt6-svg-dev libqt6svg6 \
 	    libsecret-1-dev qtkeychain-qt6-dev \
 	    libsqlite3-dev sqlite3 \
@@ -83,7 +80,7 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	sudo dnf install -y \
 	    cmake ninja-build gcc-c++ git curl \
 	    qt6-qtbase-devel qt6-qttools-devel qt6-qtnetworkauth-devel \
-	    qt6-qtwebengine-devel qt6-qtdeclarative-devel qt6-qt5compat-devel \
+	    qt6-qtdeclarative-devel qt6-qt5compat-devel \
 	    qt6-qtsvg-devel \
 	    qt6-qtkeychain-devel libsecret-devel sqlite-devel \
 	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb
@@ -91,7 +88,7 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 setup-arch: ## Install build deps via pacman (Arch / Manjaro).
 	sudo pacman -S --needed --noconfirm \
 	    base-devel cmake ninja git curl \
-	    qt6-base qt6-tools qt6-networkauth qt6-webengine qt6-declarative \
+	    qt6-base qt6-tools qt6-networkauth qt6-declarative \
 	    qt6-svg \
 	    qtkeychain-qt6 libsecret sqlite \
 	    librsvg appstream xorg-server-xvfb
@@ -114,7 +111,7 @@ $(LINUXDEPLOY_DIR)/linuxdeploy-plugin-qt:
 
 # ---- Build / test ---------------------------------------------------------
 
-configure: ## Configure CMake into $(BUILD_DIR). Uses BUILD_TYPE / WEBENGINE / SANITIZERS.
+configure: ## Configure CMake into $(BUILD_DIR). Uses BUILD_TYPE / SANITIZERS.
 	cmake -S . -B $(BUILD_DIR) -G $(GENERATOR) $(CMAKE_FLAGS)
 
 build: configure ## Compile (defaults to Debug; override with BUILD_TYPE=Release).
@@ -146,8 +143,7 @@ release-config:
 	cmake -S . -B $(RELEASE_DIR) -G $(GENERATOR) \
 	    -DCMAKE_BUILD_TYPE=Release \
 	    -DCMAKE_INSTALL_PREFIX=/usr \
-	    -DFC_BUILD_TESTS=OFF \
-	    -DFC_ENABLE_WEBENGINE=$(WEBENGINE)
+	    -DFC_BUILD_TESTS=OFF
 
 release: release-config ## Configure + build Release into $(RELEASE_DIR).
 	cmake --build $(RELEASE_DIR)
