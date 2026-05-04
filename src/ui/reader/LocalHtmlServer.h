@@ -24,10 +24,12 @@ namespace fc::ui {
 //   - The URL contains a 24-byte random token; only requests whose path
 //     matches /<token> are served. Anyone else gets a 404. Defends against
 //     other local processes scanning loopback ports.
-//   - Serves at most one successful response, then closes the listening
-//     socket and self-deletes after a brief flush delay.
-//   - Idle lifetime cap (60 s by default): the server self-deletes if no
-//     valid request ever arrives.
+//   - Idempotent: every request to /<token> serves the same HTML. Browsers
+//     routinely fire 4-5 parallel connections per page (sub-resource pre-
+//     connects, favicon, IPv4-vs-IPv6 races) and we don't want any of them
+//     stranded on a closed socket — that's what makes the page hang in
+//     "Loading…". The lifetime timer (5 minutes by default) handles
+//     teardown so we don't leak the listening port forever.
 //   - Response carries a strict Content-Security-Policy that blocks every
 //     remote load; only inline styles, data: images, and data: fonts are
 //     allowed. Combined with HtmlSanitizer's tag/attribute whitelist this
@@ -53,10 +55,11 @@ private slots:
     void onNewConnection();
 
 private:
-    QTcpServer* server_   = nullptr;
+    QTcpServer* server_      = nullptr;
     QByteArray  html_;
     QString     token_;
-    QTimer*     lifetime_ = nullptr;
+    QTimer*     lifetime_    = nullptr;
+    bool        firstServed_ = false;
 };
 
 }  // namespace fc::ui

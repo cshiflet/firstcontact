@@ -12,8 +12,8 @@ namespace fc::ui {
 
 namespace {
 
-constexpr int kIdleTimeoutMs    = 60'000;
-constexpr int kPerSocketReadMs  = 5'000;   // socket-level timeout
+constexpr int kIdleTimeoutMs    = 5 * 60 * 1000;   // 5 min: snap chromium can take 30+s to register
+constexpr int kPerSocketReadMs  = 5'000;
 constexpr int kMaxRequestBytes  = 32 * 1024;
 
 QString makeToken() {
@@ -184,12 +184,18 @@ void LocalHtmlServer::onNewConnection() {
                               "text/html; charset=utf-8", extra),
                 200, "OK");
 
-            // One-shot: stop accepting further connections, self-delete
-            // a tick later so the socket has time to flush and close.
-            server_->close();
-            lifetime_->stop();
-            emit served();
-            QTimer::singleShot(3000, this, &QObject::deleteLater);
+            // Don't close the listening socket after the first 200 — Chromium
+            // opens 4-5 parallel connections per page (favicon, sub-resource
+            // pre-connects, IPv4-vs-IPv6 races) and any of them landing on a
+            // closed server triggers an ERR_CONNECTION_REFUSED that keeps the
+            // page in "Loading…" forever. Just emit the served() signal and
+            // let lifetime_ tick down naturally — every subsequent request
+            // for the same /<token> path serves the same HTML idempotently;
+            // anything else (favicon, etc.) gets a clean 404.
+            if (!firstServed_) {
+                firstServed_ = true;
+                emit served();
+            }
         });
     }
 }
