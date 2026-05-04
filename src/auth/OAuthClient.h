@@ -47,6 +47,12 @@ signals:
     void granted();
     void failed(const QString& reason);
     void signedOut();
+    // Fires the first time tokens land (or fail to land) from the
+    // keychain after construction. The hydrate is async — without this
+    // signal, MainWindow's initial refreshAccountMenu runs before
+    // isAuthorized() is meaningful and shows "Sign in" even when
+    // the user actually has cached credentials.
+    void tokensLoaded();
 
     // Emitted when the flow has prepared the authorization URL. Subscribers
     // (MainWindow) can display a copy-the-URL fallback if the system browser

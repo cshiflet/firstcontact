@@ -63,17 +63,25 @@ private slots:
                                                 QStringLiteral("Personal")));
     }
 
-    void buildsSystemLabelsAtRootInOrder() {
+    void buildsSystemLabelsUnderFoldersSectionInOrder() {
         fc::LabelTreeModel m;
+        // Top level is now exactly the two synthetic section parents,
+        // "Folders" and "Labels", each with TypeRole == "section".
+        QCOMPARE(m.rowCount(), 2);
+        const auto folders = m.index(0, 0);
+        QCOMPARE(folders.data(fc::LabelTreeModel::TypeRole).toString(),
+                 QStringLiteral("section"));
+        QCOMPARE(folders.data(fc::LabelTreeModel::NameRole).toString(),
+                 QStringLiteral("__folders"));
 
-        // Find INBOX, STARRED, SENT among root rows (some may not exist).
-        QStringList rootIds;
-        for (int i = 0; i < m.rowCount(); ++i) {
-            rootIds << m.index(i, 0).data(fc::LabelTreeModel::IdRole).toString();
+        QStringList sysIds;
+        for (int i = 0; i < m.rowCount(folders); ++i) {
+            sysIds << m.index(i, 0, folders)
+                       .data(fc::LabelTreeModel::IdRole).toString();
         }
-        const int inboxIdx   = rootIds.indexOf(QStringLiteral("INBOX"));
-        const int starredIdx = rootIds.indexOf(QStringLiteral("STARRED"));
-        const int sentIdx    = rootIds.indexOf(QStringLiteral("SENT"));
+        const int inboxIdx   = sysIds.indexOf(QStringLiteral("INBOX"));
+        const int starredIdx = sysIds.indexOf(QStringLiteral("STARRED"));
+        const int sentIdx    = sysIds.indexOf(QStringLiteral("SENT"));
         QVERIFY(inboxIdx   >= 0);
         QVERIFY(starredIdx >= 0);
         QVERIFY(sentIdx    >= 0);
@@ -93,10 +101,15 @@ private slots:
         QCOMPARE(booking.data(fc::LabelTreeModel::IdRole).toString(),
                  QStringLiteral("Label_1"));
 
-        // Personal sits at the root, not under Travel.
+        // Personal sits one level under the "Labels" section (not at the
+        // root, not under Travel).
         const auto personal = findByName(m, QStringLiteral("Personal"));
         QVERIFY(personal.isValid());
-        QVERIFY(!personal.parent().isValid());
+        const auto labelsSection = personal.parent();
+        QVERIFY(labelsSection.isValid());
+        QCOMPARE(labelsSection.data(fc::LabelTreeModel::TypeRole).toString(),
+                 QStringLiteral("section"));
+        QVERIFY(!labelsSection.parent().isValid());
     }
 };
 

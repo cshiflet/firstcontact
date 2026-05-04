@@ -15,69 +15,60 @@ namespace fc::ui {
 
 namespace {
 
-// Sidebar delegate that paints a "Labels" section header above the FIRST
-// root-level user label. Replaces the old top-of-pane MAILBOXES banner
-// with an inline divider at the system → user boundary. Filled rectangle
-// + centered caption so it reads as a section header rather than a
-// floating piece of text.
+// Sidebar delegate that styles the synthetic "Folders" / "Labels"
+// section parents distinctly from the real label rows below them: a
+// theme-aware band fill + a slightly smaller, demi-bold, dimmer caption.
+// The model emits these rows with TypeRole == "section"; we just add
+// chrome here. Click-to-collapse is wired in SidebarWidget::onClicked.
 class SidebarDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
-    // Slim banner: full row width, dimmer text on a subtle band that
-    // contrasts with the row background in both themes.
-    static constexpr int kBannerHeight = 22;
-
-    QSize sizeHint(const QStyleOptionViewItem& opt,
-                   const QModelIndex& idx) const override {
-        QSize s = QStyledItemDelegate::sizeHint(opt, idx);
-        if (isFirstUserLabelAtRoot(idx)) s.rheight() += kBannerHeight;
-        return s;
-    }
-
     void paint(QPainter* painter,
                const QStyleOptionViewItem& opt,
                const QModelIndex& idx) const override {
-        QStyleOptionViewItem o = opt;
-        if (isFirstUserLabelAtRoot(idx)) {
-            const QRect bannerRect(opt.rect.left(),
-                                    opt.rect.top(),
-                                    opt.rect.width(),
-                                    kBannerHeight);
-
-            painter->save();
-            // Theme-aware fill. Light: pale grey band. Dark: a touch
-            // brighter than the surrounding sidebar so the band reads.
-            const bool dark = opt.palette.color(QPalette::Window).lightness() < 128;
-            const QColor bg = dark ? QColor(0x2a, 0x2a, 0x2a)
-                                   : QColor(0xee, 0xef, 0xf1);
-            painter->fillRect(bannerRect, bg);
-
-            QFont f = opt.font;
-            f.setPointSizeF(f.pointSizeF() * 0.85);
-            f.setWeight(QFont::DemiBold);
-            painter->setFont(f);
-            painter->setPen(opt.palette.color(QPalette::Disabled,
-                                              QPalette::WindowText));
-            painter->drawText(bannerRect.adjusted(10, 0, -10, 0),
-                              Qt::AlignVCenter | Qt::AlignLeft,
-                              QObject::tr("Labels"));
-            painter->restore();
-
-            o.rect.adjust(0, kBannerHeight, 0, 0);
+        if (idx.data(fc::LabelTreeModel::TypeRole).toString()
+                == QLatin1String("section")) {
+            paintSection(painter, opt, idx);
+            return;
         }
-        QStyledItemDelegate::paint(painter, o, idx);
+        QStyledItemDelegate::paint(painter, opt, idx);
     }
 
 private:
-    static bool isFirstUserLabelAtRoot(const QModelIndex& idx) {
-        if (!idx.isValid() || idx.parent().isValid()) return false;
-        const auto type = idx.data(fc::LabelTreeModel::TypeRole).toString();
-        if (type != QLatin1String("user")) return false;
-        if (idx.row() == 0) return true;
-        const auto prev = idx.sibling(idx.row() - 1, idx.column());
-        return prev.data(fc::LabelTreeModel::TypeRole).toString()
-                 != QLatin1String("user");
+    void paintSection(QPainter* painter,
+                      const QStyleOptionViewItem& opt,
+                      const QModelIndex& idx) const {
+        painter->save();
+        const bool dark = opt.palette.color(QPalette::Window).lightness() < 128;
+        const QColor bg = dark ? QColor(0x2a, 0x2a, 0x2a)
+                               : QColor(0xee, 0xef, 0xf1);
+        painter->fillRect(opt.rect, bg);
+
+        // Hover / selection highlight on top of the band, low-alpha so
+        // the user sees the cursor is over a clickable region but the
+        // section caption stays readable.
+        if (opt.state & QStyle::State_MouseOver) {
+            QColor hov = opt.palette.color(QPalette::Highlight);
+            hov.setAlpha(48);
+            painter->fillRect(opt.rect, hov);
+        }
+
+        QFont f = opt.font;
+        f.setPointSizeF(f.pointSizeF() * 0.85);
+        f.setWeight(QFont::DemiBold);
+        painter->setFont(f);
+        painter->setPen(opt.palette.color(QPalette::Disabled,
+                                          QPalette::WindowText));
+
+        // QTreeView paints the expand triangle into its own branch
+        // gutter on the left of opt.rect; pad the caption so it doesn't
+        // collide with the arrow.
+        const QRect textRect = opt.rect.adjusted(4, 0, -8, 0);
+        painter->drawText(textRect,
+                          Qt::AlignVCenter | Qt::AlignLeft,
+                          idx.data(Qt::DisplayRole).toString());
+        painter->restore();
     }
 };
 
@@ -99,12 +90,7 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     // the tree was technically there, just unreachable when collapsed.
     tree_->setRootIsDecorated(true);
     tree_->setIndentation(18);
-    // setUniformRowHeights MUST stay false: the SidebarDelegate's
-    // sizeHint grows the first user-label row to make room for the
-    // "Labels" banner above it. Uniform row heights would sample only
-    // the first row's hint and reuse it for every other row, painting
-    // the banner over the label below it instead of pushing it down.
-    tree_->setUniformRowHeights(false);
+    tree_->setUniformRowHeights(true);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -155,6 +141,14 @@ void SidebarWidget::selectLabel(const QString& id) {
 }
 
 void SidebarWidget::onClicked(const QModelIndex& idx) {
+    // Section banners ("Folders" / "Labels") collapse / expand on click,
+    // anywhere in the row — not just on the small disclosure triangle.
+    // Their TypeRole is "section" and they have no real label id.
+    if (idx.data(fc::LabelTreeModel::TypeRole).toString()
+            == QLatin1String("section")) {
+        tree_->setExpanded(idx, !tree_->isExpanded(idx));
+        return;
+    }
     const QString id = idx.data(fc::LabelTreeModel::IdRole).toString();
     if (!id.isEmpty()) emit labelSelected(id);
 }

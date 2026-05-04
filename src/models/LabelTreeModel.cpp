@@ -49,7 +49,26 @@ void LabelTreeModel::reload() {
 
     auto rows = fc::cache::LabelRepository::all();
 
-    // System labels first, in canonical order.
+    // Two synthetic section nodes at the top — "Folders" wraps the
+    // canonical Gmail system labels, "Labels" wraps everything the user
+    // created. Modeling them as real tree nodes (instead of painting
+    // banner rows) means QTreeView's built-in expand / collapse plus
+    // the click handler in SidebarWidget can toggle entire sections,
+    // and the aggregateCounts pass naturally rolls each section's
+    // unread / total counts up to the synthetic parent.
+    auto folders = std::make_unique<Node>();
+    folders->name     = QStringLiteral("Folders");
+    folders->fullName = QStringLiteral("__folders");
+    folders->type     = QStringLiteral("section");
+    folders->parent   = root_;
+
+    auto labels = std::make_unique<Node>();
+    labels->name      = QStringLiteral("Labels");
+    labels->fullName  = QStringLiteral("__labels");
+    labels->type      = QStringLiteral("section");
+    labels->parent    = root_;
+
+    // System labels first, in canonical order, parented under "Folders".
     QHash<QString, fc::cache::LabelRow*> byId;
     for (auto& r : rows) byId.insert(r.id, &r);
 
@@ -63,18 +82,18 @@ void LabelTreeModel::reload() {
             n->type        = QStringLiteral("system");
             n->unreadCount = (*it)->unreadCount;
             n->totalCount  = (*it)->totalCount;
-            n->parent      = root_;
-            root_->children.push_back(std::move(n));
+            n->parent      = folders.get();
+            folders->children.push_back(std::move(n));
         }
     }
 
-    // User labels: build tree by splitting on '/'.
+    // User labels: build tree by splitting on '/', parented under "Labels".
     QHash<QString, Node*> pathIndex;  // fullName -> Node
     for (auto& r : rows) {
         if (r.type != QLatin1String("user")) continue;
         QStringList parts = r.name.split('/', Qt::SkipEmptyParts);
         QString accum;
-        Node* parentNode = root_;
+        Node* parentNode = labels.get();
         for (int i = 0; i < parts.size(); ++i) {
             if (!accum.isEmpty()) accum += QLatin1Char('/');
             accum += parts[i];
@@ -100,6 +119,9 @@ void LabelTreeModel::reload() {
             parentNode = raw;
         }
     }
+
+    root_->children.push_back(std::move(folders));
+    root_->children.push_back(std::move(labels));
 
     // DFS that rolls each leaf's count up to its ancestors. Mirrors Gmail
     // web: a parent label like "Travel" shows self + every descendant's
@@ -152,6 +174,9 @@ QVariant LabelTreeModel::data(const QModelIndex& idx, int role) const {
     Node* n = static_cast<Node*>(idx.internalPointer());
     switch (role) {
         case Qt::DisplayRole: {
+            // Synthetic section rows ("Folders" / "Labels") render plain
+            // — adding "(123)" on a banner-style header looks cluttered.
+            if (n->type == QLatin1String("section")) return n->name;
             // Show the rolled-up unread count for parent rows and for
             // synthetic intermediate rows that have no real label id of
             // their own. Leaves keep their own count (which equals the

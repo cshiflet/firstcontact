@@ -434,6 +434,11 @@ void MainWindow::wireSignals() {
         pending_->start();
         drafts_->start();
     });
+    // Tokens load asynchronously from the keychain — refresh once they
+    // arrive so the "Sign in" affordance flips to the signed-in account
+    // menu without waiting for another refresh trigger.
+    connect(auth_, &fc::auth::OAuthClient::tokensLoaded, this,
+            &MainWindow::refreshAccountIndicator);
     connect(auth_, &fc::auth::OAuthClient::failed, this,
             [this](const QString& reason) {
                 QMessageBox::warning(this, tr("Sign-in failed"), reason);
@@ -629,10 +634,12 @@ void MainWindow::refreshAccountMenu() {
 
     if (signedIn) {
         // Header row: non-clickable info line showing the signed-in
-        // identity. Empty-email fallback keeps the menu useful while we
-        // wait for the first profile fetch to complete.
+        // identity. If the email is genuinely missing — typical for
+        // users who signed in BEFORE we started persisting it — show
+        // "Unknown" so the user can still recognise that there's an
+        // active session and reach Sign out without confusion.
         const QString headerText = email.isEmpty()
-            ? tr("Signed in (email pending sync)")
+            ? tr("Unknown account")
             : email;
         auto* header = accountMenu_->addAction(headerText);
         header->setEnabled(false);

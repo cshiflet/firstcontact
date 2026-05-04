@@ -94,10 +94,14 @@ void OAuthClient::hydrateFromStore() {
     d_->store->load([this](bool ok, TokenStore::Tokens t, QString err) {
         if (!ok) {
             qWarning("TokenStore::load failed: %s", qUtf8Printable(err));
+            emit tokensLoaded();   // tell the UI to stop assuming pending
             return;
         }
-        QMutexLocker lock(&d_->tokenMutex);
-        d_->tokens = std::move(t);
+        {
+            QMutexLocker lock(&d_->tokenMutex);
+            d_->tokens = std::move(t);
+        }
+        emit tokensLoaded();
     });
 }
 
