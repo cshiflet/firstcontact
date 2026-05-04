@@ -98,22 +98,18 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     tray_      = new TrayController(this, this);
     shortcuts_ = new Shortcuts(this);
 
-    // Permanent sync indicator on the right of the status bar. The
-    // transient showMessage() slot on the left still fires for one-off
-    // notifications ("Saved to /home/…", "Move to Trash") — both
-    // coexist because addPermanentWidget docks to the right side.
-    syncStatusLabel_ = new QLabel(tr("Not synced"), this);
-    syncStatusLabel_->setObjectName(QStringLiteral("FormHint"));
-    syncStatusLabel_->setContentsMargins(0, 0, 8, 0);
-    statusBar()->addPermanentWidget(syncStatusLabel_);
-
     wireSignals();
 
-    statusBar()->showMessage(fc::util::DryRun::enabled()
-        ? tr("Dry-run mode enabled (FC_DRY_RUN). "
-             "All destructive operations are blocked.")
-        : tr("Ready."));
+    // Initial baseline. The sync handler installed in wireSignals
+    // overrides via showMessage when a sync starts, and the
+    // messageChanged restorer below brings this baseline back when
+    // any transient (sync done, archived, saved, etc.) clears.
     refreshAccountIndicator();
+    if (fc::util::DryRun::enabled()) {
+        statusBar()->showMessage(
+            tr("Dry-run mode enabled (FC_DRY_RUN). "
+               "All destructive operations are blocked."), 8000);
+    }
 
     // Re-tint toolbar icons whenever the theme flips so a Settings → Theme
     // change updates immediately instead of waiting for the next launch.
@@ -558,44 +554,66 @@ void MainWindow::wireSignals() {
             this,  &MainWindow::reloadCurrentLabel);
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
-                statusBar()->showMessage(tr("Sync error: %1").arg(reason), 5000);
                 lastSyncFailed_ = true;
-                if (syncStatusLabel_) syncStatusLabel_->setText(tr("Sync failed"));
+                statusBar()->showMessage(
+                    tr("Sync failed: %1").arg(reason), 30000);
             });
     connect(sync_, &fc::sync::SyncService::newMessages,
             this,  &MainWindow::onNewMessages);
 
-    // Permanent sync indicator. SyncService emits stateChanged(Idle)
-    // BEFORE emit failed (synchronously), so on a failed sync the
-    // Idle handler would race ahead and overwrite "Sync failed" with
-    // a fresh timestamp. Defer the success-text update via QTimer
-    // ::singleShot(0); by the time it runs, any pending failed signal
-    // has fired and set lastSyncFailed_, so we know to skip.
+    // Sync indicator on the main status-bar slot. SyncService emits
+    // stateChanged(Idle) BEFORE emit failed (synchronously), so we
+    // defer the success message via QTimer::singleShot(0); by the
+    // time it runs the failed handler (if any) has set
+    // lastSyncFailed_ and we skip the success path so the failure
+    // message wins.
     connect(sync_, &fc::sync::SyncService::stateChanged, this,
             [this](fc::sync::SyncService::State s) {
-                if (!syncStatusLabel_) return;
                 switch (s) {
-                    case fc::sync::SyncService::State::Idle:
+                    case fc::sync::SyncService::State::InitialSync:
+                        isSyncing_ = true;
+                        statusBar()->showMessage(tr("Initial sync…"));
+                        break;
+                    case fc::sync::SyncService::State::IncrementalSync:
+                        isSyncing_ = true;
+                        statusBar()->showMessage(tr("Syncing…"));
+                        break;
+                    case fc::sync::SyncService::State::Idle: {
+                        const bool wasSyncing = isSyncing_;
+                        isSyncing_ = false;
+                        if (!wasSyncing) break;   // no transition to mark
                         QTimer::singleShot(0, this, [this] {
                             if (lastSyncFailed_) {
                                 lastSyncFailed_ = false;
-                                return;       // failed handler already updated
+                                return;          // failed handler wins
                             }
-                            lastSyncTime_ = QDateTime::currentDateTime()
-                                .toString(QStringLiteral("h:mm AP"));
-                            if (syncStatusLabel_) {
-                                syncStatusLabel_->setText(
-                                    tr("Synced %1").arg(lastSyncTime_));
-                            }
+                            // Lingering "Done" so the user actually sees
+                            // that sync completed; clears after 30 s and
+                            // the messageChanged restorer below brings
+                            // back the "Signed in as …" baseline.
+                            statusBar()->showMessage(
+                                tr("Syncing… Done"), 30000);
                         });
                         break;
-                    case fc::sync::SyncService::State::InitialSync:
-                        syncStatusLabel_->setText(tr("Initial sync…"));
-                        break;
-                    case fc::sync::SyncService::State::IncrementalSync:
-                        syncStatusLabel_->setText(tr("Syncing…"));
-                        break;
+                    }
                 }
+            });
+
+    // Restore the baseline ("Signed in as …" or "Syncing…" if a sync
+    // is mid-flight) every time a temporary message expires. Without
+    // this, a quick "Archived." toast clearing during sync would
+    // leave the bar empty until the next state change.
+    connect(statusBar(), &QStatusBar::messageChanged, this,
+            [this](const QString& text) {
+                if (!text.isEmpty()) return;
+                if (isSyncing_) {
+                    statusBar()->showMessage(tr("Syncing…"));
+                    return;
+                }
+                const QString email = auth_->accountEmail();
+                statusBar()->showMessage(email.isEmpty()
+                    ? tr("Not signed in.")
+                    : tr("Signed in as %1").arg(email));
             });
 
     connect(outbox_, &fc::sync::OutboxWorker::itemSent, this,
@@ -675,9 +693,15 @@ void MainWindow::refreshAccountIndicator() {
     setWindowTitle(dryPrefix + (email.isEmpty()
         ? QStringLiteral("FirstContact")
         : QStringLiteral("FirstContact — %1").arg(email)));
-    statusBar()->showMessage(email.isEmpty()
-        ? tr("Not signed in.")
-        : tr("Signed in as %1").arg(email));
+    // Don't stomp on a sync indicator that's currently in the slot —
+    // the messageChanged restorer below picks up the new email next
+    // time the slot frees up. Outside of an active sync, refresh the
+    // baseline so the new email appears immediately.
+    if (!isSyncing_) {
+        statusBar()->showMessage(email.isEmpty()
+            ? tr("Not signed in.")
+            : tr("Signed in as %1").arg(email));
+    }
     refreshAccountMenu();
 }
 

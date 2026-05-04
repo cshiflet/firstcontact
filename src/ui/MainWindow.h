@@ -130,15 +130,15 @@ private:
     QToolButton*             accountButton_ = nullptr;
     QMenu*                   accountMenu_   = nullptr;
 
-    // Permanent right-side widget on the status bar — shows persistent
-    // sync state ("Syncing…", "Synced 4:03 PM", "Sync failed") instead
-    // of being transient. The transient showMessage()-driven slot on
-    // the status bar is still used for one-off notifications
-    // ("Saved to /home/…", "Move to Trash"), and they coexist without
-    // overlapping because addPermanentWidget docks to the right.
-    QLabel*                  syncStatusLabel_ = nullptr;
-    QString                  lastSyncTime_;
-    bool                     lastSyncFailed_  = false;
+    // Sync indicator state. We drive the main status-bar message
+    // slot directly: "Syncing…" while running, "Syncing… Done"
+    // for 30 seconds after success, "Sync failed" for 5 seconds
+    // after a failure, and "Signed in as <email>" the rest of the
+    // time. messageChanged() is hooked so transient messages from
+    // other surfaces (Archived, Saved to …, etc.) auto-revert to
+    // the appropriate baseline once they expire.
+    bool                     isSyncing_      = false;
+    bool                     lastSyncFailed_ = false;
 
     // Overflow plumbing — hamburger button + menu plus the ordered list of
     // toolbar entries that may collapse into the menu when the window is
