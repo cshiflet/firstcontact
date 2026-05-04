@@ -6,6 +6,9 @@
 #include <QMainWindow>
 #include <QPair>
 #include <QString>
+#include <QStringList>
+
+#include <vector>
 
 class QAction;
 class QSplitter;
@@ -72,6 +75,9 @@ private slots:
     void reloadSidebar();
     void onNewMessages(int count);
 
+protected:
+    void resizeEvent(QResizeEvent* e) override;
+
 private:
     void buildToolBar();
     void buildLayout();
@@ -79,6 +85,7 @@ private:
     void refreshAccountIndicator();
     void refreshAccountMenu();    // (re)builds the Account toolbar dropdown
     void refreshToolbarIcons();   // re-bake icons from the active palette
+    void updateToolbarOverflow(); // hide/show toolbar items into hamburger
     void onSwitchAccount();       // sign out + immediately re-authorize
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
 
@@ -101,6 +108,22 @@ private:
     QList<QPair<QAction*, QString>> iconActions_;
     QToolButton*             accountButton_ = nullptr;
     QMenu*                   accountMenu_   = nullptr;
+
+    // Overflow plumbing — hamburger button + menu plus the ordered list of
+    // toolbar entries that may collapse into the menu when the window is
+    // too narrow. updateToolbarOverflow() walks the list and decides
+    // (per resize) which entries stay on the toolbar vs. live in the menu.
+    QToolBar*                toolBar_           = nullptr;
+    QToolButton*             overflowButton_    = nullptr;
+    QAction*                 overflowAction_    = nullptr;
+    QMenu*                   overflowMenu_      = nullptr;
+    struct OverflowEntry {
+        QAction* action;     // the toolbar action being managed
+        QAction* toolbarBefore = nullptr;  // anchor for re-insertion
+        QString  text;       // menu label when collapsed
+        int      priority;   // lower = collapse sooner
+    };
+    std::vector<OverflowEntry> overflowEntries_;
     TrayController*          tray_;
     Shortcuts*               shortcuts_;
 

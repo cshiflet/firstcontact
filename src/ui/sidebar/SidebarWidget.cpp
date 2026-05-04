@@ -15,19 +15,24 @@ namespace fc::ui {
 
 namespace {
 
-// Sidebar delegate that paints a 1-pixel separator above the FIRST root-
-// level user label. Mirrors the visual break Gmail web puts between
-// system folders (Inbox / Starred / Sent / …) and the user-defined label
-// list. The model already tags each node with TypeRole; we just check
-// neighbouring siblings to decide whether this row is the boundary.
+// Sidebar delegate that paints a "Labels" section header above the FIRST
+// root-level user label. Mirrors the original styled banner between system
+// folders (Inbox / Starred / Sent / …) and the user-defined label list,
+// but without a fixed top-of-pane title. The model already tags each node
+// with TypeRole; we check neighbouring siblings to decide whether this
+// row is the system → user boundary.
 class SidebarDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
+    static constexpr int kHeaderHeight = 26;   // matches the old SectionTitle padding
+    static constexpr int kHeaderTopPad = 10;
+    static constexpr int kHeaderInsetX = 8;
+
     QSize sizeHint(const QStyleOptionViewItem& opt,
                    const QModelIndex& idx) const override {
         QSize s = QStyledItemDelegate::sizeHint(opt, idx);
-        if (isFirstUserLabelAtRoot(idx)) s.rheight() += 10;  // top padding
+        if (isFirstUserLabelAtRoot(idx)) s.rheight() += kHeaderTopPad + kHeaderHeight;
         return s;
     }
 
@@ -36,19 +41,26 @@ public:
                const QModelIndex& idx) const override {
         QStyleOptionViewItem o = opt;
         if (isFirstUserLabelAtRoot(idx)) {
-            // Draw a faint divider just above where the row would normally
-            // start, then shrink the option rect so the row contents land
-            // below it.
-            const int y = opt.rect.top() + 5;
+            const QRect headerRect(
+                opt.rect.left(),
+                opt.rect.top() + kHeaderTopPad,
+                opt.rect.width(),
+                kHeaderHeight);
+
             painter->save();
-            QColor line = opt.palette.color(QPalette::Disabled,
-                                            QPalette::WindowText);
-            line.setAlpha(80);
-            painter->setPen(QPen(line, 1));
-            painter->drawLine(opt.rect.left() + 6, y,
-                              opt.rect.right() - 6, y);
+            QFont f = opt.font;
+            f.setPointSizeF(f.pointSizeF() * 0.85);   // ~9pt against ~10.5pt body
+            f.setWeight(QFont::DemiBold);
+            painter->setFont(f);
+            painter->setPen(opt.palette.color(QPalette::Disabled,
+                                              QPalette::WindowText));
+            painter->drawText(
+                headerRect.adjusted(kHeaderInsetX, 0, -kHeaderInsetX, 0),
+                Qt::AlignBottom | Qt::AlignLeft,
+                QObject::tr("Labels"));
             painter->restore();
-            o.rect.adjust(0, 10, 0, 0);
+
+            o.rect.adjust(0, kHeaderTopPad + kHeaderHeight, 0, 0);
         }
         QStyledItemDelegate::paint(painter, o, idx);
     }

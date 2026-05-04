@@ -51,6 +51,7 @@
 #include <QPushButton>
 #include <QSize>
 #include <QMenu>
+#include <QResizeEvent>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -58,6 +59,8 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace fc::ui {
 
@@ -137,36 +140,49 @@ void MainWindow::buildLayout() {
 
 void MainWindow::buildToolBar() {
     auto* tb = addToolBar(tr("Main"));
+    toolBar_ = tb;
     tb->setMovable(false);
     tb->setIconSize(QSize(18, 18));
     tb->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
-    auto withIcon = [this, tb](const QString& svgName, const QString& label) {
+    // Priorities: lower = collapses into the hamburger sooner. The user-
+    // requested order is "right-of-search first, then left-of-search":
+    // Quit / Account / Settings sit at 1-3, then Delete back through
+    // Refresh at 4-9. Search itself is exempt — it shrinks in place.
+    auto withIcon = [this, tb](const QString& svgName, const QString& label,
+                                int priority) {
         auto* a = tb->addAction(IconLoader::themed(svgName), label);
         a->setToolTip(label);
         iconActions_.append({a, svgName});
+        if (priority > 0) {
+            overflowEntries_.push_back({a, /*before=*/nullptr, label, priority});
+        }
         return a;
     };
 
-    auto* refresh    = withIcon(QStringLiteral("refresh.svg"),   tr("Refresh"));
-    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"));
-    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"));
-    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"));
-    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"));
-    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"));
+    auto* refresh    = withIcon(QStringLiteral("refresh.svg"),   tr("Refresh"),    9);
+    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    8);
+    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      7);
+    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  6);
+    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    5);
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     4);
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
     searchEdit_->setPlaceholderText(
         tr("Search mail — try from: subject: has:attachment is:unread"));
     searchEdit_->setClearButtonEnabled(true);
+    // Let the search bar shrink to ~120 px before any other element gives
+    // up its space; below that, overflow logic will decide.
+    searchEdit_->setMinimumWidth(120);
+    searchEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     searchIconAction_ = searchEdit_->addAction(
         IconLoader::themed(QStringLiteral("search.svg")),
         QLineEdit::LeadingPosition);
     tb->addWidget(searchEdit_);
     tb->addSeparator();
 
-    auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"));
+    auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 3);
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
@@ -185,10 +201,38 @@ void MainWindow::buildToolBar() {
     accountButton_->setMenu(accountMenu_);
     iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
     auto* accountAction = tb->addWidget(accountButton_);
-    Q_UNUSED(accountAction);
+    overflowEntries_.push_back({accountAction, nullptr, tr("Account"), 2});
     refreshAccountMenu();
 
-    auto* quit     = withIcon(QStringLiteral("quit.svg"),     tr("Quit"));
+    auto* quit     = withIcon(QStringLiteral("quit.svg"),     tr("Quit"),       1);
+
+    // Hamburger: hidden until updateToolbarOverflow finds something that
+    // doesn't fit. Lives at the very end of the toolbar so it always has
+    // a stable anchor; the menu is rebuilt per-resize.
+    overflowButton_ = new QToolButton(tb);
+    overflowButton_->setIcon(IconLoader::themed(QStringLiteral("menu.svg")));
+    overflowButton_->setPopupMode(QToolButton::InstantPopup);
+    overflowButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    overflowButton_->setAutoRaise(true);
+    overflowButton_->setCursor(Qt::PointingHandCursor);
+    overflowButton_->setToolTip(tr("More actions"));
+    overflowMenu_ = new QMenu(overflowButton_);
+    overflowButton_->setMenu(overflowMenu_);
+    overflowAction_ = tb->addWidget(overflowButton_);
+    overflowAction_->setVisible(false);
+
+    // Capture each managed action's "anchor" — the toolbar action that
+    // appears immediately AFTER it — so updateToolbarOverflow can restore
+    // the original order when the window grows back wide enough.
+    {
+        const auto current = tb->actions();
+        for (auto& e : overflowEntries_) {
+            const int idx = current.indexOf(e.action);
+            e.toolbarBefore = (idx >= 0 && idx + 1 < current.size())
+                ? current[idx + 1]
+                : nullptr;
+        }
+    }
 
     connect(refresh,    &QAction::triggered, this, &MainWindow::onRefresh);
     connect(compose,    &QAction::triggered, this, &MainWindow::onComposeNew);
@@ -206,6 +250,79 @@ void MainWindow::buildToolBar() {
 void MainWindow::onOpenSettings() {
     SettingsDialog dlg(this);
     dlg.exec();
+    // Settings can flip Preferences::conversationView() (changes the
+    // grouping in the message list) and the attachment defaults; the
+    // theme listener already lives on Theme::changed. Reload now so
+    // changes take effect without needing the user to also click a
+    // sidebar entry or refresh.
+    reloadCurrentLabel();
+}
+
+void MainWindow::resizeEvent(QResizeEvent* e) {
+    QMainWindow::resizeEvent(e);
+    updateToolbarOverflow();
+}
+
+void MainWindow::updateToolbarOverflow() {
+    if (!toolBar_ || !overflowAction_) return;
+
+    // 1. Restore everything onto the toolbar in original order.
+    for (auto& e : overflowEntries_) {
+        toolBar_->removeAction(e.action);
+    }
+    for (auto& e : overflowEntries_) {
+        toolBar_->insertAction(e.toolbarBefore, e.action);
+    }
+    overflowMenu_->clear();
+    overflowAction_->setVisible(false);
+
+    // 2. Force a synchronous layout pass so widgetForAction() and the
+    //    toolbar's sizeHint reflect the current set of visible actions.
+    if (auto* l = toolBar_->layout()) l->activate();
+
+    auto barFits = [this]() {
+        return toolBar_->sizeHint().width() <= toolBar_->width();
+    };
+    if (barFits()) return;
+
+    // 3. Sort entries by priority ascending — lowest priority collapses
+    //    first. Priorities encode the user's desired collapse order:
+    //    right-of-search items (Quit=1, Account=2, Settings=3) before any
+    //    left-of-search item (Delete=4 → Refresh=9).
+    std::vector<OverflowEntry*> order;
+    order.reserve(overflowEntries_.size());
+    for (auto& e : overflowEntries_) order.push_back(&e);
+    std::sort(order.begin(), order.end(),
+              [](OverflowEntry* a, OverflowEntry* b) {
+                  return a->priority < b->priority;
+              });
+
+    // 4. Move actions from the toolbar into the hamburger menu until the
+    //    bar fits. We add a *proxy* QAction to the menu (rather than the
+    //    real one) because the real action's owner is the toolbar; a
+    //    proxy lets the menu show even after we've removed the real
+    //    action from the toolbar.
+    for (auto* e : order) {
+        if (barFits()) break;
+        toolBar_->removeAction(e->action);
+        if (auto* l = toolBar_->layout()) l->activate();
+
+        QIcon icon;
+        if (auto* w = qobject_cast<QToolButton*>(
+                toolBar_->widgetForAction(e->action))) {
+            icon = w->icon();
+        } else {
+            icon = e->action->icon();
+        }
+        auto* proxy = overflowMenu_->addAction(icon, e->text);
+        // Forward both Account (a popup-mode QToolButton) and the regular
+        // actions: clicking the menu entry triggers the original.
+        QPointer<QAction> realAction(e->action);
+        connect(proxy, &QAction::triggered, this, [realAction] {
+            if (realAction) realAction->trigger();
+        });
+        overflowAction_->setVisible(true);
+    }
 }
 
 void MainWindow::refreshToolbarIcons() {
