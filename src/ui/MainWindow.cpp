@@ -149,7 +149,9 @@ void MainWindow::buildToolBar() {
     toolBar_ = tb;
     tb->setMovable(false);
     tb->setIconSize(QSize(18, 18));
-    tb->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    tb->setToolButtonStyle(Preferences::toolbarShowText()
+        ? Qt::ToolButtonTextBesideIcon
+        : Qt::ToolButtonIconOnly);
 
     // Toolbar order, left → right:
     //   Compose, Reply, Reply all, Forward, Delete | Search | Refresh,
@@ -165,7 +167,7 @@ void MainWindow::buildToolBar() {
         a->setToolTip(label);
         iconActions_.append({a, svgName});
         if (priority > 0) {
-            overflowEntries_.push_back({a, /*before=*/nullptr, label, priority});
+            overflowEntries_.push_back({a, /*before=*/nullptr, label, priority, {}, {}});
         }
         return a;
     };
@@ -188,7 +190,27 @@ void MainWindow::buildToolBar() {
     searchIconAction_ = searchEdit_->addAction(
         IconLoader::themed(QStringLiteral("search.svg")),
         QLineEdit::LeadingPosition);
-    tb->addWidget(searchEdit_);
+    QAction* searchAction = tb->addWidget(searchEdit_);
+    // Search collapses LAST — only after every icon button has already
+    // moved into the hamburger. Custom menuTrigger because the toolbar
+    // representation is a QLineEdit widget (not a triggerable QAction):
+    // the menu entry pops a small input dialog seeded with the current
+    // query, then submits via onSearchSubmit.
+    overflowEntries_.push_back({
+        searchAction, nullptr, tr("Search…"), 9,
+        [this]() {
+            bool ok = false;
+            const QString q = QInputDialog::getText(this, tr("Search mail"),
+                tr("Query (Gmail syntax — try from: subject: has:attachment "
+                   "is:unread):"),
+                QLineEdit::Normal, searchEdit_->text(), &ok);
+            if (!ok) return;
+            searchEdit_->setText(q);
+            if (q.trimmed().isEmpty()) onSearchChanged();
+            else                       onSearchSubmit();
+        },
+        QStringLiteral("search.svg"),
+    });
     tb->addSeparator();
 
     auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
@@ -202,14 +224,16 @@ void MainWindow::buildToolBar() {
     accountButton_ = new QToolButton(tb);
     accountButton_->setIcon(IconLoader::themed(QStringLiteral("user.svg")));
     accountButton_->setPopupMode(QToolButton::InstantPopup);
-    accountButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    accountButton_->setToolButtonStyle(Preferences::toolbarShowText()
+        ? Qt::ToolButtonTextBesideIcon
+        : Qt::ToolButtonIconOnly);
     accountButton_->setAutoRaise(true);
     accountButton_->setCursor(Qt::PointingHandCursor);
     accountMenu_ = new QMenu(accountButton_);
     accountButton_->setMenu(accountMenu_);
     iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
     auto* accountAction = tb->addWidget(accountButton_);
-    overflowEntries_.push_back({accountAction, nullptr, tr("Accounts"), 8});
+    overflowEntries_.push_back({accountAction, nullptr, tr("Accounts"), 8, {}, {}});
     refreshAccountMenu();
 
     // Hamburger: hidden until updateToolbarOverflow finds something that
@@ -268,10 +292,11 @@ void MainWindow::onOpenSettings() {
     SettingsDialog dlg(this);
     dlg.exec();
     // Settings can flip Preferences::conversationView() (changes the
-    // grouping in the message list) and the attachment defaults; the
-    // theme listener already lives on Theme::changed. Reload now so
-    // changes take effect without needing the user to also click a
-    // sidebar entry or refresh.
+    // grouping in the message list), the toolbar layout, and attachment
+    // defaults; the theme listener already lives on Theme::changed.
+    // Reload now so changes take effect without needing the user to
+    // click a sidebar entry or restart.
+    refreshToolbarStyle();
     reloadCurrentLabel();
 }
 
@@ -324,20 +349,33 @@ void MainWindow::updateToolbarOverflow() {
         toolBar_->removeAction(e->action);
         if (auto* l = toolBar_->layout()) l->activate();
 
+        // Pick the icon for the menu entry. menuIconName wins (so the
+        // search entry can supply its own glyph; its toolbar widget is a
+        // QLineEdit and has no icon to inherit from). Otherwise fall back
+        // to the toolbar widget's own icon, then the action's icon.
         QIcon icon;
-        if (auto* w = qobject_cast<QToolButton*>(
-                toolBar_->widgetForAction(e->action))) {
+        if (!e->menuIconName.isEmpty()) {
+            icon = IconLoader::themed(e->menuIconName);
+        } else if (auto* w = qobject_cast<QToolButton*>(
+                       toolBar_->widgetForAction(e->action))) {
             icon = w->icon();
         } else {
             icon = e->action->icon();
         }
         auto* proxy = overflowMenu_->addAction(icon, e->text);
-        // Forward both Account (a popup-mode QToolButton) and the regular
-        // actions: clicking the menu entry triggers the original.
-        QPointer<QAction> realAction(e->action);
-        connect(proxy, &QAction::triggered, this, [realAction] {
-            if (realAction) realAction->trigger();
-        });
+        if (e->menuTrigger) {
+            // Custom hamburger behaviour — used by the search overflow
+            // entry to pop a small input dialog instead of doing nothing.
+            auto cb = e->menuTrigger;
+            connect(proxy, &QAction::triggered, this, [cb] { cb(); });
+        } else {
+            // Default: forward to the real action so the user gets the
+            // same behaviour they'd get from clicking the toolbar button.
+            QPointer<QAction> realAction(e->action);
+            connect(proxy, &QAction::triggered, this, [realAction] {
+                if (realAction) realAction->trigger();
+            });
+        }
         overflowAction_->setVisible(true);
     }
 }
@@ -349,6 +387,21 @@ void MainWindow::refreshToolbarIcons() {
     if (searchIconAction_) {
         searchIconAction_->setIcon(IconLoader::themed(QStringLiteral("search.svg")));
     }
+}
+
+void MainWindow::refreshToolbarStyle() {
+    if (!toolBar_) return;
+    const auto style = Preferences::toolbarShowText()
+        ? Qt::ToolButtonTextBesideIcon
+        : Qt::ToolButtonIconOnly;
+    toolBar_->setToolButtonStyle(style);
+    // QToolBar::setToolButtonStyle propagates to QToolButtons it owns,
+    // but our two custom QToolButtons (Account, hamburger) live as
+    // widgets — set them explicitly so the icon-only mode actually
+    // hides their text.
+    if (accountButton_)  accountButton_->setToolButtonStyle(style);
+    // The hamburger button itself stays icon-only either way; nothing to do.
+    updateToolbarOverflow();
 }
 
 void MainWindow::wireSignals() {

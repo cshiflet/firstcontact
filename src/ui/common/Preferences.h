@@ -46,6 +46,15 @@ public:
     // each message is its own row regardless of thread membership.
     static bool conversationView();
     static void setConversationView(bool on);
+
+    // Toolbar layout: when true, every action in the main toolbar shows
+    // its label next to the icon (the original / discoverability
+    // default). When false, only the icons are drawn — useful on narrow
+    // windows or for users who recognise the glyphs and want a denser
+    // bar. Tooltips stay populated either way so the labels are still
+    // reachable.
+    static bool toolbarShowText();
+    static void setToolbarShowText(bool on);
 };
 
 }  // namespace fc::ui

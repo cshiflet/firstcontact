@@ -8,8 +8,9 @@ namespace fc::ui {
 
 namespace {
 constexpr char kKey[] = "html/preview";
-constexpr char kAttachmentDirKey[] = "attachments/dir";
-constexpr char kConversationKey[]  = "ui/conversationView";
+constexpr char kAttachmentDirKey[]  = "attachments/dir";
+constexpr char kConversationKey[]   = "ui/conversationView";
+constexpr char kToolbarShowTextKey[] = "ui/toolbarShowText";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -68,6 +69,17 @@ bool Preferences::conversationView() {
 void Preferences::setConversationView(bool on) {
     QSettings s;
     s.setValue(QLatin1String(kConversationKey), on);
+    s.sync();
+}
+
+bool Preferences::toolbarShowText() {
+    QSettings s;
+    return s.value(QLatin1String(kToolbarShowTextKey), true).toBool();
+}
+
+void Preferences::setToolbarShowText(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kToolbarShowTextKey), on);
     s.sync();
 }
 

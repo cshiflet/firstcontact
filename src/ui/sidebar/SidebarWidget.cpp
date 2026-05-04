@@ -99,7 +99,12 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     // the tree was technically there, just unreachable when collapsed.
     tree_->setRootIsDecorated(true);
     tree_->setIndentation(18);
-    tree_->setUniformRowHeights(true);
+    // setUniformRowHeights MUST stay false: the SidebarDelegate's
+    // sizeHint grows the first user-label row to make room for the
+    // "Labels" banner above it. Uniform row heights would sample only
+    // the first row's hint and reuse it for every other row, painting
+    // the banner over the label below it instead of pushing it down.
+    tree_->setUniformRowHeights(false);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);

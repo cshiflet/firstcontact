@@ -8,6 +8,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
 #include <vector>
 
 class QAction;
@@ -91,6 +92,7 @@ private:
     void refreshAccountIndicator();
     void refreshAccountMenu();    // (re)builds the Account toolbar dropdown
     void refreshToolbarIcons();   // re-bake icons from the active palette
+    void refreshToolbarStyle();   // toggle text-beside-icon / icon-only
     void updateToolbarOverflow(); // hide/show toolbar items into hamburger
     void onSwitchAccount();       // sign out + immediately re-authorize
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
@@ -128,6 +130,13 @@ private:
         QAction* toolbarBefore = nullptr;  // anchor for re-insertion
         QString  text;       // menu label when collapsed
         int      priority;   // lower = collapse sooner
+        // Optional custom invocation when this entry is exposed via the
+        // hamburger menu. Used for the search bar — its toolbar
+        // representation is a QLineEdit widget (not a triggerable QAction)
+        // so the menu proxy needs to do something app-specific (open a
+        // small input dialog) instead of a generic action->trigger().
+        std::function<void()> menuTrigger;
+        QString  menuIconName;   // resource name for the menu icon (optional)
     };
     std::vector<OverflowEntry> overflowEntries_;
     TrayController*          tray_;

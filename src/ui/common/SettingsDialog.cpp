@@ -182,6 +182,17 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     convHint->setObjectName(QStringLiteral("FormHint"));
     convHint->setWordWrap(true);
     convForm->addRow(QString(), convHint);
+
+    // Toolbar layout: text-beside-icon vs. icon-only. Tooltips stay
+    // populated either way, so the labels are still discoverable in
+    // icon-only mode.
+    auto* toolbarBox = new QCheckBox(
+        tr("Show text labels next to toolbar icons"), content);
+    toolbarBox->setChecked(Preferences::toolbarShowText());
+    connect(toolbarBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setToolbarShowText(on);
+    });
+    convForm->addRow(QString(), toolbarBox);
     contentLayout->addLayout(convForm);
 
     contentLayout->addStretch(1);
