@@ -28,6 +28,12 @@ public:
     // rect. The view uses this in mousePressEvent to detect star clicks
     // and emit starToggled instead of selecting / opening the row.
     static QRect starRect(const QRect& itemRect);
+
+    // Geometry of the clickable chevron — only meaningful for parent
+    // thread rows in conversation view. The view checks the hit there
+    // and routes the click into the model's toggleThreadExpand instead
+    // of activating the row.
+    static QRect chevronRect(const QRect& itemRect);
 };
 
 }  // namespace fc::ui

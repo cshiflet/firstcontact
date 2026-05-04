@@ -757,8 +757,15 @@ void MainWindow::reloadCurrentLabel() {
     listModel_->replaceAll(std::move(rows));
     currentRow_ = -1;
     reader_->showEmpty();
+    // Resolve the label's pretty name from the cache so the status bar
+    // shows "Bills" instead of "Label_37". Falls back to the raw id
+    // for system labels that haven't synced yet (rare) or any other
+    // case where the lookup misses.
+    const auto row = fc::cache::LabelRepository::byId(currentLabelId_);
+    const QString labelDisplay = row.name.isEmpty() ? currentLabelId_ : row.name;
     statusBar()->showMessage(currentSearchQuery_.isEmpty()
-        ? tr("Showing %1 messages in %2").arg(listModel_->rowCount()).arg(currentLabelId_)
+        ? tr("Showing %1 messages in %2").arg(listModel_->rowCount())
+                                          .arg(labelDisplay)
         : tr("Search results: %1").arg(listModel_->rowCount()));
 }
 

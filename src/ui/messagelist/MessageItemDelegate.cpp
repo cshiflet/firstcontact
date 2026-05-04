@@ -24,6 +24,9 @@ constexpr int kStarSize     = 18;
 constexpr int kFromColWidth = 200;
 constexpr int kDateColWidth = 80;
 constexpr int kAttachmentIconSize = 14;
+constexpr int kChevronSize  = 12;   // thread expand / collapse glyph
+constexpr int kChevronGap   = 6;    // chevron → star spacing
+constexpr int kChildIndent  = 18;   // child rows nest under parents
 
 QString formatDate(qint64 msEpoch) {
     if (msEpoch <= 0) return {};
@@ -59,14 +62,29 @@ QSize MessageItemDelegate::sizeHint(const QStyleOptionViewItem&,
     return {0, kRowHeight};
 }
 
-QRect MessageItemDelegate::starRect(const QRect& itemRect) {
-    // Mirrors the painter's geometry exactly: itemRect → inner-padded rect
-    // → kStarSize square at the inner-left, vertically centered. We also
-    // grow the hit target by a few pixels on each side so the click feels
-    // forgiving without overlapping the sender column.
+QRect MessageItemDelegate::chevronRect(const QRect& itemRect) {
+    // The chevron lives in a fixed slot at the inner-left. Reserved
+    // even on rows that don't paint one, so the star + sender columns
+    // line up uniformly across thread / non-thread / child rows.
     const QRect inner = itemRect.adjusted(kPaddingX, kPaddingY,
                                           -kPaddingX, -kPaddingY);
     const QRect drawn(inner.left(),
+                      inner.top() + (inner.height() - kChevronSize) / 2,
+                      kChevronSize, kChevronSize);
+    // Forgiving hit target — slightly larger than the painted glyph so
+    // the click feels reliable without overlapping the star.
+    return drawn.adjusted(-3, -4, 3, 4);
+}
+
+QRect MessageItemDelegate::starRect(const QRect& itemRect) {
+    // Star sits to the right of the (always-reserved) chevron slot so
+    // a row without a chevron still aligns with rows that have one.
+    // Hit target is grown a few pixels on each side for the same
+    // reason as chevronRect.
+    const QRect inner = itemRect.adjusted(kPaddingX, kPaddingY,
+                                          -kPaddingX, -kPaddingY);
+    const int xLeft = inner.left() + kChevronSize + kChevronGap;
+    const QRect drawn(xLeft,
                       inner.top() + (inner.height() - kStarSize) / 2,
                       kStarSize, kStarSize);
     return drawn.adjusted(-4, -4, 4, 4);
@@ -96,6 +114,8 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     const QString snippet = idx.data(fc::MessageListModel::SnippetRole).toString();
     const qint64  date    = idx.data(fc::MessageListModel::DateRole).toLongLong();
     const int  threadCount = idx.data(fc::MessageListModel::ThreadCountRole).toInt();
+    const bool isChild     = idx.data(fc::MessageListModel::IsChildRole).toBool();
+    const bool isExpanded  = idx.data(fc::MessageListModel::IsExpandedRole).toBool();
     // Conversation rows (threadCount > 1): a small accent-coloured pill
     // before the sender, painted further down. Setting countSuffix
     // here keeps the importance-marker math below symmetric with the
@@ -116,6 +136,40 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     }
 
     int x = inner.left();
+
+    // Chevron slot — drawn only on parent rows of multi-message
+    // threads, but the slot's width is always reserved so star + sender
+    // columns line up across thread / non-thread / child rows. Child
+    // rows shift the slot in by kChildIndent so the row visually nests
+    // under its parent.
+    if (isChild) x += kChildIndent;
+
+    if (!isChild && threadCount > 1) {
+        const QRect chev(x,
+                         inner.top() + (inner.height() - kChevronSize) / 2,
+                         kChevronSize, kChevronSize);
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing);
+        p->setPen(QPen(secondary, 1.6));
+        p->setBrush(Qt::NoBrush);
+        QPainterPath path;
+        // Right-pointing ▶ when collapsed, down-pointing ▼ when
+        // expanded. Geometry centred on the slot rect.
+        const qreal cx = chev.center().x();
+        const qreal cy = chev.center().y();
+        if (isExpanded) {
+            path.moveTo(cx - 4, cy - 2);
+            path.lineTo(cx,     cy + 3);
+            path.lineTo(cx + 4, cy - 2);
+        } else {
+            path.moveTo(cx - 2, cy - 4);
+            path.lineTo(cx + 3, cy);
+            path.lineTo(cx - 2, cy + 4);
+        }
+        p->drawPath(path);
+        p->restore();
+    }
+    x += kChevronSize + kChevronGap;
 
     // Star — clickable visual cue on the row. Filled = starred, outlined = not.
     {

@@ -3,6 +3,8 @@
 #include "Message.h"
 
 #include <QAbstractListModel>
+#include <QSet>
+#include <QString>
 
 #include <vector>
 
@@ -31,6 +33,14 @@ public:
         // delegate filters down to user labels with assigned colours
         // before rendering.
         LabelIdsRole,
+        // Bool — true if this row was injected as a child of an
+        // expanded conversation thread (the delegate paints those
+        // indented + dimmer; chevron + count pill are suppressed).
+        IsChildRole,
+        // Bool — true for parent thread rows whose children are
+        // currently shown inline. Drives the chevron direction
+        // (right-pointing collapsed, down-pointing expanded).
+        IsExpandedRole,
     };
 
     explicit MessageListModel(QObject* parent = nullptr);
@@ -42,8 +52,19 @@ public:
     void replaceAll(std::vector<Message> messages);
     const Message* messageAt(int row) const;
 
+    // Toggle inline expansion of the thread at `row`. No-op if the row
+    // is already a child or represents a single-message thread. On
+    // expand, the thread's older messages (latest-first) are loaded
+    // from cache and inserted right after the parent row as children.
+    // On collapse, those children are removed in place.
+    void toggleThreadExpand(int row);
+
 private:
     std::vector<Message> rows_;
+    // Thread ids whose children are currently shown inline. Cleared on
+    // every replaceAll — switching label / refresh resets expansion,
+    // matching what most desktop mail clients do.
+    QSet<QString> expandedThreads_;
 };
 
 }  // namespace fc

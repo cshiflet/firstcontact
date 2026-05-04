@@ -53,6 +53,13 @@ struct Message {
     bool threadHasUnread     = false;
     bool threadHasStarred    = false;
     bool threadHasAttachment = false;
+
+    // UI-side flag set by MessageListModel when a thread is expanded
+    // inline. The model injects child rows after the parent thread
+    // row; the delegate uses this to draw indented / dimmer chrome
+    // and hide the count badge / chevron on those rows. NEVER comes
+    // back from the cache repos — purely a transient view-state bit.
+    bool isThreadChild = false;
 };
 
 }  // namespace fc
