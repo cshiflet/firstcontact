@@ -132,9 +132,9 @@ bool launchBrowser(const QUrl& url) {
         if (!wslHasWindowsInterop()) {
             qInfo("util::launchBrowser: WSL Windows interop unavailable "
                   "(/mnt/c not mounted, or reg.exe / powershell.exe missing) "
-                  "- skipping wslview and the xdg-open chain (which also "
-                  "delegates to wslview on WSL); will try $BROWSER + known "
-                  "Linux browser names directly");
+                  "- skipping wslview/cmd.exe/powershell.exe; xdg-open and "
+                  "friends will be tried synchronously below, then $BROWSER "
+                  "and direct browser names");
         } else {
             if (tryRun("wslview", "wslview", {u})) return true;
             if (tryRun("cmd.exe",        "cmd.exe",

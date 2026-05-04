@@ -12,7 +12,9 @@ namespace fc::ui {
 
 namespace {
 
-constexpr int kIdleTimeoutMs = 60'000;
+constexpr int kIdleTimeoutMs    = 60'000;
+constexpr int kPerSocketReadMs  = 5'000;   // socket-level timeout
+constexpr int kMaxRequestBytes  = 32 * 1024;
 
 QString makeToken() {
     QByteArray raw(24, Qt::Uninitialized);
@@ -26,10 +28,14 @@ QString makeToken() {
     return QString::fromLatin1(fc::util::base64UrlEncode(raw));
 }
 
-void writeAndClose(QTcpSocket* sock, int status, const char* phrase,
-                   const QByteArray& body, const QByteArray& contentType,
-                   const QByteArray& extraHeaders = {}) {
+// Build a full HTTP/1.1 response. Headers + body assembled in one buffer
+// so we hand it to the socket as a single chunk (avoids partial-flush
+// confusion if the kernel send buffer is small).
+QByteArray buildResponse(int status, const char* phrase,
+                         const QByteArray& body, const QByteArray& contentType,
+                         const QByteArray& extraHeaders = {}) {
     QByteArray out;
+    out.reserve(body.size() + 512);
     out.append("HTTP/1.1 ");
     out.append(QByteArray::number(status));
     out.append(' ');
@@ -47,8 +53,21 @@ void writeAndClose(QTcpSocket* sock, int status, const char* phrase,
     out.append(extraHeaders);
     out.append("\r\n");
     out.append(body);
-    sock->write(out);
+    return out;
+}
+
+// Synchronously push the full response onto the socket and start a clean
+// close. We waitForBytesWritten so the kernel has a chance to ship the
+// payload before we disconnectFromHost — without it, a quick
+// disconnectFromHost + later object teardown can truncate the response.
+void sendAndClose(QTcpSocket* sock, const QByteArray& response,
+                  int status, const char* phrase) {
+    const qint64 toWrite = response.size();
+    const qint64 wrote = sock->write(response);
     sock->flush();
+    sock->waitForBytesWritten(2000);
+    qInfo("LocalHtmlServer: -> %d %s (%lld of %lld bytes flushed)",
+          status, phrase, wrote, toWrite);
     sock->disconnectFromHost();
 }
 
@@ -64,6 +83,8 @@ LocalHtmlServer::LocalHtmlServer(const QByteArray& html, QObject* parent)
     lifetime_->setSingleShot(true);
     lifetime_->setInterval(kIdleTimeoutMs);
     connect(lifetime_, &QTimer::timeout, this, [this] {
+        qInfo("LocalHtmlServer: idle timeout (%d ms) — self-deleting",
+              kIdleTimeoutMs);
         emit expired();
         deleteLater();
     });
@@ -76,6 +97,8 @@ bool LocalHtmlServer::start() {
         return false;
     }
     lifetime_->start();
+    qInfo("LocalHtmlServer: listening on %s, %lld-byte body",
+          qUtf8Printable(url().toString()), qint64(html_.size()));
     return true;
 }
 
@@ -86,52 +109,89 @@ QUrl LocalHtmlServer::url() const {
 }
 
 void LocalHtmlServer::onNewConnection() {
-    auto* sock = server_->nextPendingConnection();
-    if (!sock) return;
-    connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+    while (auto* sock = server_->nextPendingConnection()) {
+        qInfo("LocalHtmlServer: connection from %s:%d",
+              qUtf8Printable(sock->peerAddress().toString()),
+              sock->peerPort());
 
-    // Read the request line + headers. Browsers issue the GET in a single
-    // small packet; 2 s is plenty.
-    if (!sock->waitForReadyRead(2000)) {
-        sock->close();
-        return;
+        // Per-socket buffer + state. We can't use waitForReadyRead in an
+        // event-loop slot without stalling the UI; instead we accumulate on
+        // readyRead and dispatch as soon as the request line + blank line
+        // delimiter is in the buffer.
+        auto buffer = std::make_shared<QByteArray>();
+
+        connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+
+        // Hard cap on read size + a per-socket watchdog. If the client
+        // never sends a complete request, drop after kPerSocketReadMs.
+        auto* watchdog = new QTimer(sock);
+        watchdog->setSingleShot(true);
+        watchdog->setInterval(kPerSocketReadMs);
+        connect(watchdog, &QTimer::timeout, sock, [sock] {
+            qWarning("LocalHtmlServer: socket read timed out — closing");
+            sock->disconnectFromHost();
+        });
+        watchdog->start();
+
+        connect(sock, &QTcpSocket::readyRead, sock, [this, sock, buffer, watchdog] {
+            buffer->append(sock->readAll());
+            if (buffer->size() > kMaxRequestBytes) {
+                qWarning("LocalHtmlServer: request exceeded %d bytes — closing",
+                         kMaxRequestBytes);
+                sock->disconnectFromHost();
+                return;
+            }
+            // Wait until we've seen the request-line + blank line delimiter.
+            const int hdrEnd = buffer->indexOf("\r\n\r\n");
+            if (hdrEnd < 0) return;   // need more bytes
+
+            watchdog->stop();
+            const int lineEnd = buffer->indexOf("\r\n");
+            const QByteArray firstLine = buffer->left(lineEnd);
+            qInfo("LocalHtmlServer: <- %s",
+                  qUtf8Printable(QString::fromLatin1(firstLine)));
+
+            if (!firstLine.startsWith("GET ")) {
+                sendAndClose(sock,
+                    buildResponse(405, "Method Not Allowed",
+                                  "Method not allowed.\n",
+                                  "text/plain; charset=utf-8"),
+                    405, "Method Not Allowed");
+                return;
+            }
+
+            const QByteArray expected = "GET /" + token_.toLatin1();
+            if (!firstLine.startsWith(expected)) {
+                sendAndClose(sock,
+                    buildResponse(404, "Not Found",
+                                  "Not found.\n",
+                                  "text/plain; charset=utf-8"),
+                    404, "Not Found");
+                return;
+            }
+
+            QByteArray extra;
+            extra.append("Content-Security-Policy: default-src 'none'; "
+                         "img-src data: blob:; "
+                         "style-src 'unsafe-inline'; "
+                         "font-src data:; "
+                         "base-uri 'none'; "
+                         "form-action 'none'; "
+                         "frame-ancestors 'none'\r\n");
+            extra.append("Referrer-Policy: no-referrer\r\n");
+            sendAndClose(sock,
+                buildResponse(200, "OK", html_,
+                              "text/html; charset=utf-8", extra),
+                200, "OK");
+
+            // One-shot: stop accepting further connections, self-delete
+            // a tick later so the socket has time to flush and close.
+            server_->close();
+            lifetime_->stop();
+            emit served();
+            QTimer::singleShot(3000, this, &QObject::deleteLater);
+        });
     }
-
-    const QByteArray req = sock->readAll();
-    const int lineEnd = req.indexOf("\r\n");
-    const QByteArray firstLine = (lineEnd > 0) ? req.left(lineEnd) : req;
-
-    if (!firstLine.startsWith("GET ")) {
-        writeAndClose(sock, 405, "Method Not Allowed",
-                      "Method not allowed.\n", "text/plain; charset=utf-8");
-        return;
-    }
-
-    // GET /<token>... HTTP/1.1
-    const QByteArray expected = "GET /" + token_.toLatin1();
-    if (!firstLine.startsWith(expected)) {
-        writeAndClose(sock, 404, "Not Found",
-                      "Not found.\n", "text/plain; charset=utf-8");
-        return;
-    }
-
-    QByteArray headers;
-    headers.append("Content-Security-Policy: default-src 'none'; "
-                   "img-src data: blob:; "
-                   "style-src 'unsafe-inline'; "
-                   "font-src data:; "
-                   "base-uri 'none'; "
-                   "form-action 'none'; "
-                   "frame-ancestors 'none'\r\n");
-    headers.append("Referrer-Policy: no-referrer\r\n");
-    writeAndClose(sock, 200, "OK", html_, "text/html; charset=utf-8", headers);
-
-    // One-shot: stop accepting further connections, self-delete shortly so
-    // the socket has time to flush and close cleanly.
-    server_->close();
-    lifetime_->stop();
-    emit served();
-    QTimer::singleShot(2000, this, &QObject::deleteLater);
 }
 
 }  // namespace fc::ui
