@@ -39,6 +39,8 @@ qt_add_resources(fc_ui "fc_ui_assets"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/trash.svg"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/user.svg"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/menu.svg"
+        "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/check.svg"
+        "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/radio-dot.svg"
 )
 target_include_directories(fc_ui PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_ui

@@ -52,11 +52,15 @@ QCheckBox::indicator:hover,
 QRadioButton::indicator:hover {
     border-color: #1a73e8;
 }
-QCheckBox::indicator:checked,
+QCheckBox::indicator:checked {
+    background-color: #1a73e8;
+    border-color: #1a73e8;
+    image: url(:/icons/symbolic/check.svg);
+}
 QRadioButton::indicator:checked {
     background-color: #1a73e8;
     border-color: #1a73e8;
-    image: none;
+    image: url(:/icons/symbolic/radio-dot.svg);
 }
 QCheckBox::indicator:disabled,
 QRadioButton::indicator:disabled {
