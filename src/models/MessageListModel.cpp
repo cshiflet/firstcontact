@@ -1,5 +1,7 @@
 #include "MessageListModel.h"
 
+#include "util/Html2Text.h"
+
 namespace fc {
 
 MessageListModel::MessageListModel(QObject* parent) : QAbstractListModel(parent) {}
@@ -13,12 +15,18 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
         idx.row() >= static_cast<int>(rows_.size())) return {};
     const Message& m = rows_[idx.row()];
 
+    // Belt-and-braces decode for rows that were cached before MessageParser
+    // started decoding entities at ingest. The decoder is idempotent and
+    // skips strings without an '&' so the cost is negligible.
+    auto decode = [](const QString& s) { return fc::util::decodeHtmlEntities(s); };
+
     switch (role) {
         case IdRole:            return m.id;
         case ThreadIdRole:      return m.threadId;
-        case FromRole:          return m.fromName.isEmpty() ? m.fromAddr : m.fromName;
-        case SubjectRole:       return m.subject;
-        case SnippetRole:       return m.snippet;
+        case FromRole:          return decode(
+                                     m.fromName.isEmpty() ? m.fromAddr : m.fromName);
+        case SubjectRole:       return decode(m.subject);
+        case SnippetRole:       return decode(m.snippet);
         case DateRole:          return m.internalDate;
         case UnreadRole:        return m.isUnread;
         case StarredRole:       return m.isStarred;
@@ -26,7 +34,8 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
         case HasAttachmentRole: return m.hasAttachment;
         case Qt::DisplayRole:
             return QStringLiteral("%1 — %2").arg(
-                m.fromName.isEmpty() ? m.fromAddr : m.fromName, m.subject);
+                decode(m.fromName.isEmpty() ? m.fromAddr : m.fromName),
+                decode(m.subject));
         default:                return {};
     }
 }

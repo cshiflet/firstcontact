@@ -31,10 +31,16 @@ QString formatDate(qint64 ms) {
 }
 
 QString fromDisplay(const fc::Message& m) {
-    if (!m.fromName.isEmpty() && !m.fromAddr.isEmpty())
+    // Decode pre-encoded entities from the cached header before HTML-escaping
+    // for rich-text rendering. Without this step a stale cached fromName
+    // like "Bob &amp; Co" would round-trip through toHtmlEscaped as
+    // "Bob &amp;amp; Co" and render literally.
+    const QString name = util::decodeHtmlEntities(m.fromName);
+    const QString addr = util::decodeHtmlEntities(m.fromAddr);
+    if (!name.isEmpty() && !addr.isEmpty())
         return QStringLiteral("%1 &lt;%2&gt;")
-            .arg(m.fromName.toHtmlEscaped(), m.fromAddr.toHtmlEscaped());
-    return m.fromAddr.toHtmlEscaped();
+            .arg(name.toHtmlEscaped(), addr.toHtmlEscaped());
+    return addr.toHtmlEscaped();
 }
 
 // Active-theme color tokens. We mirror the values in resources/themes/*.qss
@@ -75,14 +81,15 @@ ThemeColors themeColors() {
 
 QString headerHtml(const fc::Message& m, bool full) {
     const ThemeColors c = themeColors();
+    const QString subject = util::decodeHtmlEntities(m.subject);
     QString h = QStringLiteral(
         "<div style='font-weight:600; font-size:13pt; line-height:1.3; color:%1;'>%2</div>"
         "<div style='color:%3; font-size:10pt; margin-top:2px;'>"
         "<span style='font-weight:500; color:%1;'>%4</span> &nbsp;·&nbsp; %5</div>")
         .arg(c.primary,
-             m.subject.isEmpty()
+             subject.isEmpty()
                  ? QStringLiteral("<i>(no subject)</i>")
-                 : m.subject.toHtmlEscaped(),
+                 : subject.toHtmlEscaped(),
              c.secondary,
              fromDisplay(m),
              formatDate(m.internalDate));
@@ -101,6 +108,17 @@ QString headerHtml(const fc::Message& m, bool full) {
         }
     }
     return h;
+}
+
+QString humanSize(qint64 bytes) {
+    if (bytes <= 0) return {};
+    constexpr double KB = 1024.0;
+    constexpr double MB = KB * 1024.0;
+    constexpr double GB = MB * 1024.0;
+    if (bytes < KB)        return QStringLiteral("%1 B").arg(bytes);
+    if (bytes < MB)        return QStringLiteral("%1 KB").arg(bytes / KB, 0, 'f', 1);
+    if (bytes < GB)        return QStringLiteral("%1 MB").arg(bytes / MB, 0, 'f', 1);
+    return QStringLiteral("%1 GB").arg(bytes / GB, 0, 'f', 2);
 }
 
 QString bodyHtml(const fc::Message& m) {
@@ -227,6 +245,48 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
     cardLayout->addWidget(body, /*stretch=*/1);
+
+    // Attachment chips. One QPushButton per attachment, click → emit a
+    // download request that MainWindow bridges to GmailClient::getAttachment.
+    // Hidden when collapsed (matches body visibility) so the chip strip
+    // doesn't dangle under a header-only card. The Gmail attachmentId can be
+    // empty for inline parts that we synthesised a row id for; in that case
+    // the chip is informational only — not downloadable on its own — and
+    // is rendered disabled.
+    if (initiallyExpanded && !m.attachments.empty()) {
+        auto* attachRow = new QHBoxLayout;
+        attachRow->setSpacing(6);
+        for (const auto& a : m.attachments) {
+            const QString sizeStr = humanSize(a.size);
+            QString label = a.filename.isEmpty()
+                ? QObject::tr("(unnamed)")
+                : a.filename;
+            if (!sizeStr.isEmpty()) label += QStringLiteral("  ·  ") + sizeStr;
+
+            auto* chip = new QPushButton(
+                QIcon(QStringLiteral(":/icons/symbolic/paperclip.svg")),
+                label, card);
+            chip->setObjectName(QStringLiteral("attachmentChip"));
+            chip->setCursor(Qt::PointingHandCursor);
+            chip->setToolTip(QObject::tr("Download %1 (%2)")
+                                .arg(a.filename, a.mimeType));
+            // Inline parts (signature images, embedded chains) come back from
+            // Gmail with body.attachmentId blank — only the message-level
+            // attachmentId is downloadable. Disable the chip in that case
+            // rather than firing a no-op request.
+            if (a.id.isEmpty()) chip->setEnabled(false);
+            const QString messageId    = m.id;
+            const QString attachmentId = a.id;
+            const QString filename     = a.filename;
+            QObject::connect(chip, &QPushButton::clicked, this,
+                [this, messageId, attachmentId, filename]() {
+                    emit downloadAttachmentRequested(messageId, attachmentId, filename);
+                });
+            attachRow->addWidget(chip);
+        }
+        attachRow->addStretch(1);
+        cardLayout->addLayout(attachRow);
+    }
 
     // Offer "Show full HTML" only when the message actually has HTML and the
     // user hasn't disabled the feature in Preferences. The button does

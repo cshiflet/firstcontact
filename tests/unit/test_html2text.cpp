@@ -29,6 +29,21 @@ private slots:
         QVERIFY(out.contains(QStringLiteral("two")));
         QVERIFY(out.contains(QChar('\n')));
     }
+
+    void decodeHtmlEntitiesNumericAndNamed() {
+        // Real-world subject from a marketing tool that pre-encoded the
+        // header along with the body.
+        QCOMPARE(fc::util::decodeHtmlEntities(
+                     QStringLiteral("It&#39;s here &amp; ready")),
+                 QStringLiteral("It's here & ready"));
+        // Hex numeric entity.
+        QCOMPARE(fc::util::decodeHtmlEntities(QStringLiteral("&#x27;")),
+                 QStringLiteral("'"));
+        // Empty / no ampersand → unchanged (idempotent on already-clean text).
+        QCOMPARE(fc::util::decodeHtmlEntities(QStringLiteral("plain")),
+                 QStringLiteral("plain"));
+        QCOMPARE(fc::util::decodeHtmlEntities(QString()), QString());
+    }
 };
 
 QTEST_APPLESS_MAIN(TestHtml2Text)

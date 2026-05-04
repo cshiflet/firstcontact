@@ -13,6 +13,13 @@ public:
 
 signals:
     void messageActivated(const QString& messageId, int row);
+    // Fired when the user clicks the star area of a row. We DON'T also
+    // emit messageActivated for that click — toggling a star on a
+    // non-selected row shouldn't open the message.
+    void starToggled(const QString& messageId);
+
+protected:
+    void mousePressEvent(QMouseEvent* e) override;
 
 private slots:
     void onActivated(const QModelIndex& idx);

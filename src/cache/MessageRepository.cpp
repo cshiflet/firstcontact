@@ -1,5 +1,6 @@
 #include "MessageRepository.h"
 
+#include "AttachmentRepository.h"
 #include "Migrations.h"
 
 #include <QDateTime>
@@ -193,6 +194,13 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
     //    don't want a single missing label to fail the whole upsert.
     writeLabelEdges(db, m.id, m.labelIds);
 
+    // 4. Attachments. The FK on attachments.message_id requires the message
+    //    row to already exist (step 2). MessageParser populates m.attachments
+    //    from the MIME parts of full-format fetches; metadata-only fetches
+    //    leave it empty, in which case replaceForMessage clears any stale
+    //    rows from a prior fetch.
+    AttachmentRepository::replaceForMessage(m.id, m.attachments);
+
     db.commit();
     return q.lastInsertId().toLongLong();
 }
@@ -270,7 +278,11 @@ fc::Message MessageRepository::byId(const QString& id) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral("SELECT * FROM messages WHERE id = :id"));
     q.bindValue(QStringLiteral(":id"), id);
-    if (q.exec() && q.next()) return rowToMessage(q);
+    if (q.exec() && q.next()) {
+        auto m = rowToMessage(q);
+        m.attachments = AttachmentRepository::byMessage(m.id);
+        return m;
+    }
     return {};
 }
 
@@ -285,6 +297,11 @@ std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
     q.bindValue(QStringLiteral(":t"), threadId);
     if (!q.exec()) return out;
     while (q.next()) out.push_back(rowToMessage(q));
+    // Attachments live in their own table; pull them in a second pass rather
+    // than trying to JOIN+aggregate. ReaderPane displays them per card.
+    for (auto& m : out) {
+        m.attachments = AttachmentRepository::byMessage(m.id);
+    }
     return out;
 }
 

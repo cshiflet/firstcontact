@@ -57,7 +57,11 @@ private slots:
     void onDeleteLabel(const QString& labelId);
     void onOpenSettings();
     void onToggleStar();
+    void onToggleStarFor(const QString& messageId);
     void onArchiveCurrent();
+    void onDownloadAttachment(const QString& messageId,
+                              const QString& attachmentId,
+                              const QString& filename);
 
     void reloadCurrentLabel();
     void reloadSidebar();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QRect>
 #include <QStyledItemDelegate>
 
 namespace fc::ui {
@@ -22,6 +23,11 @@ public:
                const QModelIndex& index) const override;
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override;
+
+    // Geometry of the clickable star within a row, given the full item
+    // rect. The view uses this in mousePressEvent to detect star clicks
+    // and emit starToggled instead of selecting / opening the row.
+    static QRect starRect(const QRect& itemRect);
 };
 
 }  // namespace fc::ui

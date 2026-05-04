@@ -3,11 +3,15 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QFileInfo>
+#include <QMetaObject>
+#include <QPointer>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRunnable>
 #include <QStandardPaths>
 #include <QString>
 #include <QStringList>
+#include <QThreadPool>
 #include <QUrl>
 
 namespace fc::util {
@@ -61,7 +65,14 @@ bool wslHasWindowsInterop() {
 
 }  // namespace
 
-bool launchBrowser(const QUrl& url) {
+namespace {
+
+// The actual launcher chain. Synchronous and may block the calling thread
+// for several seconds (xdg-open / sensible-browser are launched
+// synchronously so we can detect their exit code). Always invoked from a
+// worker thread via launchBrowser(); never call this directly from the
+// UI thread.
+bool runLauncherChain(const QUrl& url) {
     const QString u = url.toString();
 
     // tryRun: fork-and-forget. Used for direct browser names where we
@@ -193,6 +204,36 @@ bool launchBrowser(const QUrl& url) {
     qWarning("util::launchBrowser: every strategy failed for %s",
              qUtf8Printable(u));
     return false;
+}
+
+}  // namespace
+
+void launchBrowser(const QUrl& url) {
+    launchBrowser(url, nullptr, {});
+}
+
+void launchBrowser(const QUrl& url, QObject* context,
+                    std::function<void(bool)> onComplete) {
+    QPointer<QObject> ctx(context);
+    auto cb = std::move(onComplete);
+    // Spin the chain on the global thread pool so xdg-open's blocking
+    // QProcess::execute (and any other slow rung) doesn't freeze the UI
+    // event loop. Side-effects are limited to spawning more processes,
+    // which is thread-safe.
+    QThreadPool::globalInstance()->start([url, ctx, cb = std::move(cb)]() {
+        const bool ok = runLauncherChain(url);
+        if (!cb) return;
+        if (!ctx) {
+            // No context to dispatch onto — the caller didn't ask for the
+            // callback to land on a specific thread. Run it inline (worker
+            // thread). UI callers that touch widgets MUST pass a context.
+            cb(ok);
+            return;
+        }
+        QMetaObject::invokeMethod(ctx.data(),
+            [cb, ok]() { cb(ok); },
+            Qt::QueuedConnection);
+    });
 }
 
 }  // namespace fc::util

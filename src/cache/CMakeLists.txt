@@ -2,6 +2,7 @@ qt_add_library(fc_cache STATIC
     Database.h Database.cpp
     Migrations.h Migrations.cpp
     MessageRepository.h MessageRepository.cpp
+    AttachmentRepository.h AttachmentRepository.cpp
     LabelRepository.h LabelRepository.cpp
     OutboxRepository.h OutboxRepository.cpp
     PendingOpsRepository.h PendingOpsRepository.cpp

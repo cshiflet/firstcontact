@@ -1,6 +1,7 @@
 #include "MessageParser.h"
 
 #include "util/Base64Url.h"
+#include "util/Html2Text.h"
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -31,7 +32,10 @@ std::pair<QString, QString> splitAddress(const QString& v) {
         if (name.startsWith('"') && name.endsWith('"') && name.size() >= 2) {
             name = name.mid(1, name.size() - 2);
         }
-        return {name, v.mid(lt + 1, gt - lt - 1).trimmed()};
+        // Marketing tools sometimes pre-encode display names in HTML
+        // entities ("Bob &amp; Co"). Decode now so the cache and FTS see
+        // the literal characters.
+        return {fc::util::decodeHtmlEntities(name), v.mid(lt + 1, gt - lt - 1).trimmed()};
     }
     return {{}, v.trimmed()};
 }
@@ -96,7 +100,11 @@ fc::Message MessageParser::parse(const QJsonObject& g) {
     m.id            = g.value(QStringLiteral("id")).toString();
     m.threadId      = g.value(QStringLiteral("threadId")).toString();
     m.historyId     = g.value(QStringLiteral("historyId")).toString();
-    m.snippet       = g.value(QStringLiteral("snippet")).toString();
+    // Gmail returns the snippet HTML-decoded most of the time, but some
+    // forwarded / mailing-list messages slip through with literal numeric
+    // entities ("It&#39;s here"). Decode defensively.
+    m.snippet       = fc::util::decodeHtmlEntities(
+                          g.value(QStringLiteral("snippet")).toString());
     m.internalDate  = g.value(QStringLiteral("internalDate")).toString().toLongLong();
     m.sizeEstimate  = g.value(QStringLiteral("sizeEstimate")).toInt();
 
@@ -111,7 +119,11 @@ fc::Message MessageParser::parse(const QJsonObject& g) {
     const auto payload = g.value(QStringLiteral("payload")).toObject();
     const auto headers = payload.value(QStringLiteral("headers")).toArray();
 
-    m.subject  = header(headers, "Subject");
+    // Subject lines from marketing senders frequently contain literal HTML
+    // entities (&#39;, &amp;, …) because the same template engine
+    // generates the body and the headers. Decode at ingest so the cache,
+    // FTS index, and every reader render the literal characters.
+    m.subject  = fc::util::decodeHtmlEntities(header(headers, "Subject"));
     auto from  = splitAddress(header(headers, "From"));
     m.fromName = from.first;
     m.fromAddr = from.second;

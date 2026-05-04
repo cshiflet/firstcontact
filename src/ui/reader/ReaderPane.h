@@ -34,6 +34,14 @@ public:
     void showThread(const std::vector<fc::Message>& messages);
     void showEmpty(const QString& reason = {});
 
+signals:
+    // Fired when the user clicks one of the attachment chips. The slot owner
+    // (MainWindow) bridges to GmailClient::getAttachment + writes the bytes
+    // to disk; ReaderPane stays UI-only and ignorant of the network layer.
+    void downloadAttachmentRequested(const QString& messageId,
+                                      const QString& attachmentId,
+                                      const QString& filename);
+
 private:
     void clearStack();
     QWidget* buildMessageCard(const fc::Message& m, bool initiallyExpanded);

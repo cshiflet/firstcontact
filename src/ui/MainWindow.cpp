@@ -3,6 +3,7 @@
 #include "api/GmailClient.h"
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
+#include "cache/AttachmentRepository.h"
 #include "cache/Database.h"
 #include "cache/DraftRepository.h"
 #include "cache/LabelRepository.h"
@@ -26,6 +27,7 @@
 #include "sync/SyncService.h"
 #include "tray/Notifier.h"
 #include "tray/TrayController.h"
+#include "util/Browser.h"
 #include "util/MimeBuilder.h"
 
 #include <QAction>
@@ -33,6 +35,9 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
@@ -44,8 +49,10 @@
 #include <QPushButton>
 #include <QSize>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace fc::ui {
@@ -190,6 +197,11 @@ void MainWindow::refreshToolbarIcons() {
 void MainWindow::wireSignals() {
     connect(list_, &MessageListView::messageActivated,
             this,  &MainWindow::onMessageActivated);
+    connect(list_, &MessageListView::starToggled,
+            this,  &MainWindow::onToggleStarFor);
+
+    connect(reader_, &ReaderPane::downloadAttachmentRequested,
+            this,    &MainWindow::onDownloadAttachment);
 
     connect(sidebar_, &SidebarWidget::labelSelected,
             this,     &MainWindow::onLabelSelected);
@@ -271,7 +283,10 @@ void MainWindow::wireSignals() {
                     QApplication::clipboard()->setText(url.toString());
                 });
                 connect(retryBtn, &QPushButton::clicked, [url] {
-                    QDesktopServices::openUrl(url);
+                    // Async — see util::launchBrowser. QDesktopServices::openUrl
+                    // here used to block the UI for tens of seconds whenever
+                    // xdg-open / wslview was misbehaving.
+                    fc::util::launchBrowser(url);
                 });
                 connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
 
@@ -445,12 +460,17 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
     // Cache shortcut: only skip the network round-trip when the cached row
     // looks complete. A row that has body_text but is missing body_html
     // despite advertising body_html_present is incomplete — typically a
-    // pre-migration-v3 row from before we persisted the HTML body. Re-fetch
-    // so "Open in browser" / inline preview works the next click.
+    // pre-migration-v3 row from before we persisted the HTML body. Same
+    // reasoning for hasAttachment with no rows in the attachments table:
+    // pre-AttachmentRepository caches don't have any attachment rows even
+    // when the message advertises has_attachment=1. Re-fetch so the
+    // attachment chips and "Open in browser" / inline preview work on
+    // the next click.
     const bool cacheLooksComplete =
         !cached.id.isEmpty()
         && !cached.bodyText.isEmpty()
-        && (!cached.bodyHtmlPresent || !cached.bodyHtml.isEmpty());
+        && (!cached.bodyHtmlPresent || !cached.bodyHtml.isEmpty())
+        && (!cached.hasAttachment   || !cached.attachments.empty());
 
     if (cacheLooksComplete) {
         renderThread(cached);
@@ -641,16 +661,104 @@ void MainWindow::onDeleteLabel(const QString& labelId) {
 
 void MainWindow::onToggleStar() {
     if (currentMessage_.id.isEmpty()) return;
-    const bool wasStarred = currentMessage_.isStarred;
-    QStringList add, rem;
-    if (wasStarred) rem << QStringLiteral("STARRED");
-    else            add << QStringLiteral("STARRED");
+    onToggleStarFor(currentMessage_.id);
+}
 
-    // Optimistic local edit, then queue the server reconciliation.
-    fc::cache::MessageRepository::applyLabelDiff(currentMessage_.id, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentMessage_.id, add, rem);
+void MainWindow::onToggleStarFor(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+
+    // Re-read from cache so we toggle relative to the row the user clicked,
+    // not to whatever currentMessage_ happens to be (the click target may
+    // not be the currently-selected row).
+    const fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+
+    QStringList add, rem;
+    if (m.isStarred) rem << QStringLiteral("STARRED");
+    else             add << QStringLiteral("STARRED");
+
+    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
     pending_->flush();
+
+    // Keep currentMessage_ in sync if the toggle was on the currently-shown
+    // row, so the next keyboard-bound toggle (or anything else reading
+    // currentMessage_) sees the new state.
+    if (currentMessage_.id == messageId) currentMessage_.isStarred = !m.isStarred;
     reloadCurrentLabel();
+}
+
+void MainWindow::onDownloadAttachment(const QString& messageId,
+                                      const QString& attachmentId,
+                                      const QString& filename) {
+    if (messageId.isEmpty() || attachmentId.isEmpty()) {
+        statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
+        return;
+    }
+    if (!auth_->isAuthorized()) {
+        statusBar()->showMessage(
+            tr("Sign in to download attachments."), 5000);
+        return;
+    }
+
+    statusBar()->showMessage(tr("Downloading %1…").arg(filename));
+    QPointer<MainWindow> self(this);
+    gmail_->getAttachment(messageId, attachmentId,
+        [self, messageId, attachmentId, filename](
+                QByteArray bytes, fc::api::ApiError err) {
+            if (!self) return;
+            if (err) {
+                self->statusBar()->showMessage(
+                    tr("Download failed: %1").arg(err.message), 8000);
+                return;
+            }
+
+            // Pick a destination in ~/Downloads (or the platform equivalent).
+            // QStandardPaths returns an empty string in unusual environments
+            // (e.g. some CI containers); fall back to home in that case
+            // rather than dumping into the cwd.
+            QString dir = QStandardPaths::writableLocation(
+                              QStandardPaths::DownloadLocation);
+            if (dir.isEmpty()) dir = QDir::homePath();
+            QDir().mkpath(dir);
+
+            // Resolve filename collisions by appending " (n)" before the
+            // extension. Don't overwrite — the user might be downloading a
+            // newer copy of an older attachment with the same name.
+            QString safe = filename.isEmpty()
+                ? QStringLiteral("attachment.bin")
+                : QFileInfo(filename).fileName();
+            QString target = dir + QLatin1Char('/') + safe;
+            for (int i = 1; QFileInfo::exists(target) && i < 1000; ++i) {
+                const QFileInfo fi(safe);
+                target = QStringLiteral("%1/%2 (%3)%4%5")
+                    .arg(dir,
+                         fi.completeBaseName(),
+                         QString::number(i),
+                         fi.suffix().isEmpty() ? QString()
+                                               : QStringLiteral("."),
+                         fi.suffix());
+            }
+
+            QFile f(target);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                self->statusBar()->showMessage(
+                    tr("Couldn't write %1: %2").arg(target, f.errorString()),
+                    8000);
+                return;
+            }
+            const auto written = f.write(bytes);
+            f.close();
+            if (written != bytes.size()) {
+                self->statusBar()->showMessage(
+                    tr("Short write to %1").arg(target), 8000);
+                return;
+            }
+
+            fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
+            self->statusBar()->showMessage(tr("Saved to %1").arg(target), 8000);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(target));
+        });
 }
 
 void MainWindow::onArchiveCurrent() {

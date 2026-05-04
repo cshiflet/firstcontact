@@ -17,7 +17,7 @@ QString collapseWhitespace(QString s) {
     return s.trimmed();
 }
 
-QString decodeEntities(QString s) {
+QString decodeEntitiesImpl(QString s) {
     // Numeric &#1234; / &#xAB;
     static const QRegularExpression numRe(QStringLiteral(R"(&#(x?)([0-9A-Fa-f]+);)"));
     QString out;
@@ -96,8 +96,13 @@ QString html2text(const QString& html) {
     static const QRegularExpression tagRe(QStringLiteral("<[^>]+>"));
     s.replace(tagRe, QString());
 
-    s = decodeEntities(s);
+    s = decodeEntitiesImpl(s);
     return collapseWhitespace(s);
+}
+
+QString decodeHtmlEntities(const QString& s) {
+    if (s.isEmpty() || !s.contains(QChar('&'))) return s;
+    return decodeEntitiesImpl(s);
 }
 
 }  // namespace fc::util

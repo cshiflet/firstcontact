@@ -182,8 +182,13 @@ void OAuthClient::authorize() {
     authUrl.setQuery(q);
 
     qInfo("OAuth authorize URL: %s", qUtf8Printable(authUrl.toString()));
-    const bool opened = util::launchBrowser(authUrl);
-    emit browserAuthRequested(authUrl, opened);
+    // Show the dialog immediately (with the URL so the user can copy/paste
+    // if the auto-launch fails downstream); we no longer block here waiting
+    // for the launcher chain to finish. Pre-async, this call could freeze
+    // the UI for tens of seconds when a wedged xdg-open / wslview hung the
+    // synchronous QProcess::execute.
+    emit browserAuthRequested(authUrl, /*openedAutomatically=*/true);
+    util::launchBrowser(authUrl);
 }
 
 void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {

@@ -56,6 +56,19 @@ QSize MessageItemDelegate::sizeHint(const QStyleOptionViewItem&,
     return {0, kRowHeight};
 }
 
+QRect MessageItemDelegate::starRect(const QRect& itemRect) {
+    // Mirrors the painter's geometry exactly: itemRect → inner-padded rect
+    // → kStarSize square at the inner-left, vertically centered. We also
+    // grow the hit target by a few pixels on each side so the click feels
+    // forgiving without overlapping the sender column.
+    const QRect inner = itemRect.adjusted(kPaddingX, kPaddingY,
+                                          -kPaddingX, -kPaddingY);
+    const QRect drawn(inner.left(),
+                      inner.top() + (inner.height() - kStarSize) / 2,
+                      kStarSize, kStarSize);
+    return drawn.adjusted(-4, -4, 4, 4);
+}
+
 void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
                                 const QModelIndex& idx) const {
     p->save();

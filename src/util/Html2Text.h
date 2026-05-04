@@ -14,4 +14,12 @@ namespace fc::util {
 // or HtmlRenderHost (webview tier).
 QString html2text(const QString& html);
 
+// Replaces numeric (&#39;, &#x27;) and a small set of named (&amp;, &lt;,
+// &nbsp;, …) HTML entities with their literal characters. Idempotent — safe
+// to apply to text that has already been decoded. Used to normalize subject
+// lines, snippets, and display names that some senders emit pre-encoded
+// (most commonly marketing tools that build the entire RFC 5322 body in HTML
+// and accidentally encode the headers too).
+QString decodeHtmlEntities(const QString& s);
+
 }  // namespace fc::util

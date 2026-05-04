@@ -39,6 +39,13 @@ public:
     void getMessage(const QString& id,
                     std::function<void(fc::Message, ApiError)> cb);
 
+    // GET /gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId}
+    // Returns the raw decoded bytes (the API replies with base64url-encoded
+    // data; we decode here so callers just get the binary payload).
+    void getAttachment(const QString& messageId,
+                       const QString& attachmentId,
+                       std::function<void(QByteArray, ApiError)> cb);
+
     // GET /gmail/v1/users/me/profile
     struct Profile {
         QString emailAddress;

@@ -65,6 +65,27 @@ void GmailClient::getMessage(const QString& id,
         });
 }
 
+void GmailClient::getAttachment(const QString& messageId,
+                                const QString& attachmentId,
+                                std::function<void(QByteArray, ApiError)> cb) {
+    const QUrl url = base(QStringLiteral("/messages/") + messageId
+                          + QStringLiteral("/attachments/") + attachmentId);
+    rest_->send(RestClient::Verb::Get, url, {}, {},
+        [cb = std::move(cb)](QByteArray body, ApiError err) {
+            if (err) { cb({}, err); return; }
+            // The response is { size, data }; data is base64url-encoded
+            // (Gmail uses URL-safe alphabet WITHOUT padding). Decode here so
+            // every caller doesn't reinvent the decode.
+            const auto o = QJsonDocument::fromJson(body).object();
+            const QByteArray b64 =
+                o.value(QStringLiteral("data")).toString().toLatin1();
+            cb(QByteArray::fromBase64(
+                   b64, QByteArray::Base64UrlEncoding
+                            | QByteArray::OmitTrailingEquals),
+               {});
+        });
+}
+
 void GmailClient::getProfile(std::function<void(Profile, ApiError)> cb) {
     rest_->send(RestClient::Verb::Get, base(QStringLiteral("/profile")), {}, {},
         [cb = std::move(cb)](QByteArray body, ApiError err) {
