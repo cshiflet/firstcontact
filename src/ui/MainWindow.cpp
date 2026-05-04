@@ -11,6 +11,7 @@
 #include "cache/MetaRepository.h"
 #include "cache/OutboxRepository.h"
 #include "cache/PendingOpsRepository.h"
+#include "common/AccountManagerDialog.h"
 #include "common/IconLoader.h"
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
@@ -634,37 +635,32 @@ void MainWindow::refreshAccountMenu() {
 
     if (signedIn) {
         // Header row: non-clickable info line showing the signed-in
-        // identity. If the email is genuinely missing — typical for
-        // users who signed in BEFORE we started persisting it — show
-        // "Unknown" so the user can still recognise that there's an
-        // active session and reach Sign out without confusion.
+        // identity. Emails captured before we persisted them via
+        // setAccountEmail render as "Unknown account" — the manage
+        // dialog lets the user sign out either way.
         const QString headerText = email.isEmpty()
             ? tr("Unknown account")
             : email;
         auto* header = accountMenu_->addAction(headerText);
         header->setEnabled(false);
         accountMenu_->addSeparator();
-
-        auto* signOutAct = accountMenu_->addAction(
-            IconLoader::themed(QStringLiteral("logout.svg")),
-            email.isEmpty() ? tr("Sign out")
-                            : tr("Sign out of %1").arg(email));
-        connect(signOutAct, &QAction::triggered, this, &MainWindow::onSignOut);
-
-        accountMenu_->addSeparator();
-        // v1 is single-account, so "Sign in with another account…" first
-        // signs out the current one. Phase-3+ will turn this into a real
-        // multi-account picker; the menu structure is already shaped for it.
-        auto* switchAct = accountMenu_->addAction(
-            IconLoader::themed(QStringLiteral("login.svg")),
-            tr("Sign in with another account…"));
-        connect(switchAct, &QAction::triggered, this, &MainWindow::onSwitchAccount);
-    } else {
-        auto* signInAct = accountMenu_->addAction(
-            IconLoader::themed(QStringLiteral("login.svg")),
-            tr("Sign in…"));
-        connect(signInAct, &QAction::triggered, this, &MainWindow::onSignIn);
     }
+
+    // Single "Manage…" entry covers sign-in, sign-out, and (eventually)
+    // multi-account switching. AccountManagerDialog owns the actual UI;
+    // it forwards the user's intent back here as signals so MainWindow
+    // can drive its existing onSignIn / onSignOut state machines.
+    auto* manageAct = accountMenu_->addAction(
+        IconLoader::themed(QStringLiteral("user.svg")),
+        tr("Manage…"));
+    connect(manageAct, &QAction::triggered, this, [this] {
+        AccountManagerDialog dlg(auth_, this);
+        connect(&dlg, &AccountManagerDialog::signOutRequested,
+                this, &MainWindow::onSignOut);
+        connect(&dlg, &AccountManagerDialog::addAccountRequested,
+                this, &MainWindow::onSwitchAccount);
+        dlg.exec();
+    });
 }
 
 void MainWindow::onSignIn() {
@@ -694,19 +690,13 @@ void MainWindow::onSignOut() {
 }
 
 void MainWindow::onSwitchAccount() {
-    // v1 is single-account: switching means signing out the current account
-    // and starting the OAuth flow against whatever account the user picks
-    // in Google's consent screen. Confirm explicitly so a stray click on
-    // the menu doesn't drop the active session.
+    // v1 is single-account: switching means signing out the current
+    // account and starting the OAuth flow against whatever account the
+    // user picks in Google's consent screen. The caller is always an
+    // explicit user gesture (Account manager → "Add another account"),
+    // so we don't pop a confirmation dialog here — that'd be the third
+    // click in a row asking the same question.
     if (auth_->isAuthorized()) {
-        const QString current = auth_->accountEmail();
-        const QString prompt = current.isEmpty()
-            ? tr("Sign out of the current account and sign in to a different one?")
-            : tr("Sign out of %1 and sign in to a different account?").arg(current);
-        if (QMessageBox::question(this, tr("Switch account"), prompt)
-                != QMessageBox::Yes) {
-            return;
-        }
         auth_->signOut();
         fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
         sync_->stopScheduler();

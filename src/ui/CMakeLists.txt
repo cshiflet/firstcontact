@@ -16,6 +16,7 @@ qt_add_library(fc_ui STATIC
     common/SettingsDialog.h common/SettingsDialog.cpp
     common/IconLoader.h common/IconLoader.cpp
     common/Preferences.h common/Preferences.cpp
+    common/AccountManagerDialog.h common/AccountManagerDialog.cpp
 )
 qt_add_resources(fc_ui "fc_ui_assets"
     PREFIX "/"
