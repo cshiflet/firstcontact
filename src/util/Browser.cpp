@@ -64,11 +64,27 @@ bool wslHasWindowsInterop() {
 bool launchBrowser(const QUrl& url) {
     const QString u = url.toString();
 
+    // Verbose, diagnostic logging at every step. Browser launching on Linux
+    // (especially under WSL2) has so many failure modes — missing xdg-utils,
+    // snap-confined Firefox, no DISPLAY, MIME default not set — that the
+    // single "launched via X" line we used to print wasn't enough to
+    // root-cause the silent-no-browser case. Now we log every strategy.
     auto tryRun = [&](const QString& label, const QString& exe,
                       const QStringList& args) {
-        if (QStandardPaths::findExecutable(exe).isEmpty()) return false;
-        if (!QProcess::startDetached(exe, args)) return false;
-        qInfo("util::launchBrowser: launched via '%s'", qUtf8Printable(label));
+        const QString resolved = QStandardPaths::findExecutable(exe);
+        if (resolved.isEmpty()) {
+            qInfo("util::launchBrowser: skip '%s' — '%s' not on PATH",
+                  qUtf8Printable(label), qUtf8Printable(exe));
+            return false;
+        }
+        qint64 pid = 0;
+        if (!QProcess::startDetached(exe, args, QString(), &pid)) {
+            qInfo("util::launchBrowser: '%s' (%s) failed to start",
+                  qUtf8Printable(label), qUtf8Printable(resolved));
+            return false;
+        }
+        qInfo("util::launchBrowser: launched via '%s' (%s, pid=%lld)",
+              qUtf8Printable(label), qUtf8Printable(resolved), pid);
         return true;
     };
 
