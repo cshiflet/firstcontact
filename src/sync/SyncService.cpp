@@ -90,6 +90,7 @@ void SyncService::doInitialSync() {
                 return;
             }
             fc::cache::MetaRepository::set(QStringLiteral("email"), p.emailAddress);
+            emit profileFetched(p.emailAddress);
             // Don't record historyId yet — wait until the seed listing finishes
             // so a crash mid-init triggers a full retry rather than relying on
             // a delta we never fetched.

@@ -8,6 +8,7 @@
 #include "cache/DraftRepository.h"
 #include "cache/LabelRepository.h"
 #include "cache/MessageRepository.h"
+#include "cache/MetaRepository.h"
 #include "cache/OutboxRepository.h"
 #include "cache/PendingOpsRepository.h"
 #include "common/IconLoader.h"
@@ -145,10 +146,14 @@ void MainWindow::buildToolBar() {
     tb->setIconSize(QSize(18, 18));
     tb->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
-    // Priorities: lower = collapses into the hamburger sooner. The user-
-    // requested order is "right-of-search first, then left-of-search":
-    // Quit / Account / Settings sit at 1-3, then Delete back through
-    // Refresh at 4-9. Search itself is exempt — it shrinks in place.
+    // Toolbar order, left → right:
+    //   Compose, Reply, Reply all, Forward, Delete | Search | Refresh,
+    //   Settings, Account
+    //
+    // Priorities (lower = collapses into the hamburger sooner):
+    //   1 Settings, 2 Forward, 3 Delete, 4 Refresh,
+    //   5 Reply all, 6 Reply, 7 Compose, 8 Account
+    // Search itself is exempt — it shrinks in place down to ~120 px.
     auto withIcon = [this, tb](const QString& svgName, const QString& label,
                                 int priority) {
         auto* a = tb->addAction(IconLoader::themed(svgName), label);
@@ -160,12 +165,11 @@ void MainWindow::buildToolBar() {
         return a;
     };
 
-    auto* refresh    = withIcon(QStringLiteral("refresh.svg"),   tr("Refresh"),    9);
-    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    8);
-    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      7);
-    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  6);
-    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    5);
-    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     4);
+    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    7);
+    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6);
+    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5);
+    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2);
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     3);
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -182,15 +186,14 @@ void MainWindow::buildToolBar() {
     tb->addWidget(searchEdit_);
     tb->addSeparator();
 
-    auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 3);
+    auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
+    auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 1);
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
-    // "Sign in with another account…". This keeps the toolbar terse
-    // (one slot for sign-in/out) while still surfacing which account
-    // owns the current session. Single-account v1 means at most one
-    // header row in the menu, but the structure mirrors what we'd grow
-    // into for multi-account support later.
+    // "Sign in with another account…". Single-account v1 means at most
+    // one header row in the menu, but the structure mirrors what we'd
+    // grow into for multi-account support later.
     accountButton_ = new QToolButton(tb);
     accountButton_->setIcon(IconLoader::themed(QStringLiteral("user.svg")));
     accountButton_->setPopupMode(QToolButton::InstantPopup);
@@ -201,10 +204,8 @@ void MainWindow::buildToolBar() {
     accountButton_->setMenu(accountMenu_);
     iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
     auto* accountAction = tb->addWidget(accountButton_);
-    overflowEntries_.push_back({accountAction, nullptr, tr("Account"), 2});
+    overflowEntries_.push_back({accountAction, nullptr, tr("Accounts"), 8});
     refreshAccountMenu();
-
-    auto* quit     = withIcon(QStringLiteral("quit.svg"),     tr("Quit"),       1);
 
     // Hamburger: hidden until updateToolbarOverflow finds something that
     // doesn't fit. Lives at the very end of the toolbar so it always has
@@ -241,7 +242,6 @@ void MainWindow::buildToolBar() {
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
     connect(trash,      &QAction::triggered, this, &MainWindow::onDeleteCurrent);
     connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
-    connect(quit,       &QAction::triggered, qApp, &QApplication::quit);
 
     connect(searchEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearchSubmit);
     connect(searchEdit_, &QLineEdit::textChanged,   this, &MainWindow::onSearchChanged);
@@ -440,6 +440,11 @@ void MainWindow::wireSignals() {
                 dlg->show();
             });
 
+    connect(sync_, &fc::sync::SyncService::profileFetched, this,
+            [this](const QString& email) {
+                auth_->setAccountEmail(email);
+                refreshAccountIndicator();
+            });
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
     connect(sync_, &fc::sync::SyncService::messagesUpdated,
@@ -535,27 +540,34 @@ void MainWindow::refreshAccountMenu() {
     if (!accountButton_ || !accountMenu_) return;
     accountMenu_->clear();
 
-    const QString email = auth_->accountEmail();
-    const bool signedIn = auth_->isAuthorized() && !email.isEmpty();
+    // Try the auth layer first; fall back to MetaRepository which the
+    // sync layer populates from getProfile. The two can briefly disagree
+    // on the very first sign-in (token exchange completes before profile
+    // fetch) — the fallback keeps the menu honest in that window.
+    QString email = auth_->accountEmail();
+    if (email.isEmpty()) email = fc::cache::MetaRepository::get(QStringLiteral("email"));
+    const bool signedIn = auth_->isAuthorized();
 
-    // Compact toolbar label: show the email (truncated) when signed in so
-    // the user can see at a glance which account this window is bound to.
-    // Falls back to "Sign in" so the affordance is obvious before any
-    // account exists.
+    accountButton_->setText(tr("Accounts"));
+    accountButton_->setToolTip(signedIn && !email.isEmpty()
+        ? tr("Signed in as %1").arg(email)
+        : tr("Manage Google accounts"));
+
     if (signedIn) {
-        QString shown = email;
-        if (shown.size() > 28) shown = shown.left(26) + QStringLiteral("…");
-        accountButton_->setText(shown);
-        accountButton_->setToolTip(tr("Signed in as %1").arg(email));
-
-        // Header row: non-clickable info line showing the full email.
-        auto* header = accountMenu_->addAction(email);
+        // Header row: non-clickable info line showing the signed-in
+        // identity. Empty-email fallback keeps the menu useful while we
+        // wait for the first profile fetch to complete.
+        const QString headerText = email.isEmpty()
+            ? tr("Signed in (email pending sync)")
+            : email;
+        auto* header = accountMenu_->addAction(headerText);
         header->setEnabled(false);
         accountMenu_->addSeparator();
 
         auto* signOutAct = accountMenu_->addAction(
             IconLoader::themed(QStringLiteral("logout.svg")),
-            tr("Sign out of %1").arg(email));
+            email.isEmpty() ? tr("Sign out")
+                            : tr("Sign out of %1").arg(email));
         connect(signOutAct, &QAction::triggered, this, &MainWindow::onSignOut);
 
         accountMenu_->addSeparator();
@@ -567,9 +579,6 @@ void MainWindow::refreshAccountMenu() {
             tr("Sign in with another account…"));
         connect(switchAct, &QAction::triggered, this, &MainWindow::onSwitchAccount);
     } else {
-        accountButton_->setText(tr("Sign in"));
-        accountButton_->setToolTip(tr("Sign in to a Google account"));
-
         auto* signInAct = accountMenu_->addAction(
             IconLoader::themed(QStringLiteral("login.svg")),
             tr("Sign in…"));
@@ -592,6 +601,10 @@ void MainWindow::onSignOut() {
                               tr("Sign out and clear cached credentials?"))
             == QMessageBox::Yes) {
         auth_->signOut();
+        // Clear the cached profile email so the next sign-in's account
+        // menu doesn't briefly show the previous user's address before
+        // the new initial sync completes.
+        fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
         sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
@@ -614,6 +627,7 @@ void MainWindow::onSwitchAccount() {
             return;
         }
         auth_->signOut();
+        fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
         sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();

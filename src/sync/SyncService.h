@@ -36,6 +36,10 @@ signals:
     void messagesUpdated();
     void newMessages(int count);
     void failed(const QString& reason);
+    // Fires after every successful getProfile so the auth layer can
+    // store the signed-in account's email (it isn't returned in the
+    // OAuth token response). Wired up in MainWindow.
+    void profileFetched(const QString& email);
 
 private:
     void doInitialSync();

@@ -111,6 +111,22 @@ QString OAuthClient::accountEmail() const {
     return d_->tokens.accountEmail;
 }
 
+void OAuthClient::setAccountEmail(const QString& email) {
+    TokenStore::Tokens snapshot;
+    {
+        QMutexLocker lock(&d_->tokenMutex);
+        if (d_->tokens.accountEmail == email) return;   // no-op, no save
+        d_->tokens.accountEmail = email;
+        snapshot = d_->tokens;
+    }
+    // Persist so we keep the email across restarts; otherwise we'd have to
+    // wait for the next initial sync to re-populate it.
+    d_->store->save(snapshot, [](bool ok, QString err) {
+        if (!ok) qWarning("TokenStore::save (email) failed: %s",
+                          qUtf8Printable(err));
+    });
+}
+
 void OAuthClient::ensureHandler() {
     // Recreate the loopback handler on every authorize() call so a previous
     // flow that was abandoned (browser closed, network hiccup) doesn't leave

@@ -298,6 +298,11 @@ std::vector<fc::Message> MessageRepository::listThreadsByLabel(
         hydrateThreadAggregates(q, m);
         out.push_back(std::move(m));
     }
+    int multi = 0;
+    for (const auto& m : out) if (m.threadCount > 1) ++multi;
+    qInfo("listThreadsByLabel(label=%s, limit=%d, offset=%d): %zu threads "
+          "(%d with >1 message)",
+          qUtf8Printable(labelId), limit, offset, out.size(), multi);
     return out;
 }
 

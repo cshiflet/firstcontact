@@ -28,6 +28,11 @@ public:
     bool isAuthorized() const;
     QString accountEmail() const;
 
+    // Persists the account email after the first profile fetch. Called
+    // by MainWindow once SyncService::profileFetched fires, so the
+    // toolbar / account menu can show the signed-in identity.
+    void setAccountEmail(const QString& email);
+
     // Returns a non-empty access token, refreshing if within 60s of expiry.
     // Blocking call safe to use from the sync thread.
     QString accessTokenBlocking();

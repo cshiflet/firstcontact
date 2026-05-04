@@ -12,26 +12,39 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace fc::ui {
 
 SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle(tr("FirstContact Settings"));
-    // Wider default + a sane minimum so wrapped hint text and the longest
-    // combo entries ("Inline rich preview (Qt WebEngine, +~80 MB RAM,
-    // restart required)") don't get truncated at first paint. Users can
-    // still resize larger; we just refuse to go absurdly small.
-    resize(720, 560);
-    setMinimumSize(640, 480);
+    // Reasonable default + a sane minimum. Content lives inside a
+    // QScrollArea, so even on small screens (or when the user shrinks
+    // the dialog) every field stays reachable via vertical scrolling.
+    resize(760, 580);
+    setMinimumSize(560, 360);
 
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(14);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
 
-    auto* appearanceTitle = new QLabel(tr("<h3 style='margin:0'>Appearance</h3>"), this);
+    auto* scroll = new QScrollArea(this);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    auto* content = new QWidget(scroll);
+    scroll->setWidget(content);
+    root->addWidget(scroll, /*stretch=*/1);
+
+    auto* contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(20, 20, 20, 20);
+    contentLayout->setSpacing(14);
+
+    auto* appearanceTitle = new QLabel(tr("<h3 style='margin:0'>Appearance</h3>"), content);
     appearanceTitle->setTextFormat(Qt::RichText);
-    root->addWidget(appearanceTitle);
+    contentLayout->addWidget(appearanceTitle);
 
     auto* form = new QFormLayout;
     // Stretch field columns so combos / line edits fill the available
@@ -41,7 +54,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
-    auto* themeBox = new QComboBox(this);
+    auto* themeBox = new QComboBox(content);
     themeBox->addItem(tr("Match system"), int(Theme::Mode::Auto));
     themeBox->addItem(tr("Light"),        int(Theme::Mode::Light));
     themeBox->addItem(tr("Dark"),         int(Theme::Mode::Dark));
@@ -55,21 +68,21 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     auto* themeHint = new QLabel(tr(
         "Theme changes apply immediately and are remembered next launch."),
-        this);
+        content);
     themeHint->setObjectName(QStringLiteral("FormHint"));
     themeHint->setWordWrap(true);
     form->addRow(QString(), themeHint);
-    root->addLayout(form);
+    contentLayout->addLayout(form);
 
     // ------------------------------------------------------------- HTML preview
-    auto* htmlTitle = new QLabel(tr("<h3 style='margin:0'>HTML preview</h3>"), this);
+    auto* htmlTitle = new QLabel(tr("<h3 style='margin:0'>HTML preview</h3>"), content);
     htmlTitle->setTextFormat(Qt::RichText);
-    root->addWidget(htmlTitle);
+    contentLayout->addWidget(htmlTitle);
 
     auto* htmlForm = new QFormLayout;
     htmlForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     htmlForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    auto* htmlBox = new QComboBox(this);
+    auto* htmlBox = new QComboBox(content);
     htmlBox->addItem(tr("Disabled — sanitized text only"),
                      int(Preferences::HtmlPreview::Disabled));
     htmlBox->addItem(tr("Open in external browser (recommended)"),
@@ -92,18 +105,18 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         "loaded into FirstContact.<br>"
         "<b>Inline rich preview</b> renders the HTML in-place using Qt "
         "WebEngine. Highest fidelity but pre-loads Chromium at startup; "
-        "requires restarting the app to take effect."), this);
+        "requires restarting the app to take effect."), content);
     htmlHint->setObjectName(QStringLiteral("FormHint"));
     htmlHint->setWordWrap(true);
     htmlHint->setTextFormat(Qt::RichText);
     htmlForm->addRow(QString(), htmlHint);
-    root->addLayout(htmlForm);
+    contentLayout->addLayout(htmlForm);
 
     // ---------------------------------------------------------- Attachments
     auto* attachTitle = new QLabel(
-        tr("<h3 style='margin:0'>Attachments</h3>"), this);
+        tr("<h3 style='margin:0'>Attachments</h3>"), content);
     attachTitle->setTextFormat(Qt::RichText);
-    root->addWidget(attachTitle);
+    contentLayout->addWidget(attachTitle);
 
     auto* attachForm = new QFormLayout;
     attachForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
@@ -113,7 +126,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     // both in a QWidget so the QFormLayout treats them as a single growing
     // field — addRow(QHBoxLayout*) was collapsing the inner widgets to
     // their sizeHint and giving the line edit no horizontal room.
-    auto* dirHolder = new QWidget(this);
+    auto* dirHolder = new QWidget(content);
     auto* dirRow    = new QHBoxLayout(dirHolder);
     dirRow->setContentsMargins(0, 0, 0, 0);
     auto* dirEdit  = new QLineEdit(Preferences::attachmentDir(), dirHolder);
@@ -137,7 +150,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     auto* askBox = new QCheckBox(
         tr("Ask me where to save every time (overrides the folder above)"),
-        this);
+        content);
     askBox->setChecked(Preferences::alwaysAskAttachmentLocation());
     connect(askBox, &QCheckBox::toggled, this, [](bool on) {
         Preferences::setAlwaysAskAttachmentLocation(on);
@@ -148,24 +161,24 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         "Left-click an attachment chip to download to the folder above. "
         "Right-click for <b>Save as…</b> at any time. With <i>ask every "
         "time</i> turned on, every download (including <b>Download all</b>) "
-        "asks for the destination first."), this);
+        "asks for the destination first."), content);
     attachHint->setObjectName(QStringLiteral("FormHint"));
     attachHint->setWordWrap(true);
     attachHint->setTextFormat(Qt::RichText);
     attachForm->addRow(QString(), attachHint);
-    root->addLayout(attachForm);
+    contentLayout->addLayout(attachForm);
 
     // ----------------------------------------------------- Conversation view
     auto* convTitle = new QLabel(
-        tr("<h3 style='margin:0'>Inbox layout</h3>"), this);
+        tr("<h3 style='margin:0'>Inbox layout</h3>"), content);
     convTitle->setTextFormat(Qt::RichText);
-    root->addWidget(convTitle);
+    contentLayout->addWidget(convTitle);
 
     auto* convForm = new QFormLayout;
     convForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     convForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     auto* convBox = new QCheckBox(
-        tr("Group messages by conversation"), this);
+        tr("Group messages by conversation"), content);
     convBox->setChecked(Preferences::conversationView());
     connect(convBox, &QCheckBox::toggled, this, [](bool on) {
         Preferences::setConversationView(on);
@@ -174,19 +187,25 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     auto* convHint = new QLabel(tr(
         "When on, the message list shows one row per thread (Gmail-web "
         "default). When off, every message is its own row. Toggling takes "
-        "effect on the next label / search refresh."), this);
+        "effect on the next label / search refresh."), content);
     convHint->setObjectName(QStringLiteral("FormHint"));
     convHint->setWordWrap(true);
     convForm->addRow(QString(), convHint);
-    root->addLayout(convForm);
+    contentLayout->addLayout(convForm);
 
-    root->addStretch(1);
+    contentLayout->addStretch(1);
 
+    // Buttons live OUTSIDE the scroll area so they're always visible at
+    // the bottom regardless of how far the content has been scrolled.
+    auto* buttonRow = new QHBoxLayout;
+    buttonRow->setContentsMargins(20, 12, 20, 16);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
     buttons->button(QDialogButtonBox::Close)->setObjectName(QStringLiteral("primary"));
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    root->addWidget(buttons);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(buttons);
+    root->addLayout(buttonRow);
 }
 
 void SettingsDialog::onThemeChanged(int idx) {
