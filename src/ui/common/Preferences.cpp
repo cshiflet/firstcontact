@@ -8,9 +8,11 @@ namespace fc::ui {
 
 namespace {
 constexpr char kKey[] = "html/preview";
-constexpr char kAttachmentDirKey[]  = "attachments/dir";
-constexpr char kConversationKey[]   = "ui/conversationView";
-constexpr char kToolbarShowTextKey[] = "ui/toolbarShowText";
+constexpr char kAttachmentDirKey[]    = "attachments/dir";
+constexpr char kConversationKey[]     = "ui/conversationView";
+constexpr char kToolbarShowTextKey[]  = "ui/toolbarShowText";
+constexpr char kSidebarColorsKey[]    = "ui/sidebarLabelColors";
+constexpr char kMessageListPillsKey[] = "ui/messageListLabelPills";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -80,6 +82,28 @@ bool Preferences::toolbarShowText() {
 void Preferences::setToolbarShowText(bool on) {
     QSettings s;
     s.setValue(QLatin1String(kToolbarShowTextKey), on);
+    s.sync();
+}
+
+bool Preferences::sidebarLabelColors() {
+    QSettings s;
+    return s.value(QLatin1String(kSidebarColorsKey), true).toBool();
+}
+
+void Preferences::setSidebarLabelColors(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kSidebarColorsKey), on);
+    s.sync();
+}
+
+bool Preferences::messageListLabelPills() {
+    QSettings s;
+    return s.value(QLatin1String(kMessageListPillsKey), true).toBool();
+}
+
+void Preferences::setMessageListLabelPills(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kMessageListPillsKey), on);
     s.sync();
 }
 

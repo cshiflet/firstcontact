@@ -1,6 +1,7 @@
 #include "SidebarWidget.h"
 
 #include "models/LabelTreeModel.h"
+#include "ui/common/Preferences.h"
 
 #include <QHeaderView>
 #include <QInputDialog>
@@ -33,6 +34,30 @@ public:
             return;
         }
         QStyledItemDelegate::paint(painter, opt, idx);
+        // Sidebar swatch — painted on top of the default text. Only
+        // applies to user labels with a Gmail-assigned background colour
+        // and only when the pref is on. Drawing AFTER the base paint
+        // keeps hover / selection chrome intact; we just lay a small
+        // filled square (rounded a hair) at the right edge of the row.
+        if (!Preferences::sidebarLabelColors()) return;
+        if (idx.data(fc::LabelTreeModel::TypeRole).toString()
+                != QLatin1String("user")) return;
+        const QString bgHex = idx.data(fc::LabelTreeModel::ColorBgRole).toString();
+        if (bgHex.isEmpty()) return;
+        const QColor bg(bgHex);
+        if (!bg.isValid()) return;
+
+        const int sw = 10;
+        const QRect r = opt.rect;
+        const QRect swatch(r.right() - sw - 8,
+                           r.top() + (r.height() - sw) / 2,
+                           sw, sw);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(bg);
+        painter->drawRoundedRect(swatch, 2, 2);
+        painter->restore();
     }
 
 private:
@@ -121,6 +146,10 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
 }
 
 fc::LabelTreeModel* SidebarWidget::model() const { return model_; }
+
+void SidebarWidget::refreshAppearance() {
+    if (tree_) tree_->viewport()->update();
+}
 
 void SidebarWidget::selectLabel(const QString& id) {
     // Walk the tree; depth is small.

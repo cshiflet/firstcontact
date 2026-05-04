@@ -27,6 +27,10 @@ public:
         // 0 in non-conversation mode; >0 means this row represents a
         // thread, and the delegate should render a "(N)" count badge.
         ThreadCountRole,
+        // QStringList of labelIds carried by this message — the
+        // delegate filters down to user labels with assigned colours
+        // before rendering.
+        LabelIdsRole,
     };
 
     explicit MessageListModel(QObject* parent = nullptr);

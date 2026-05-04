@@ -83,6 +83,39 @@ void writeLabelEdges(QSqlDatabase& db, const QString& messageId,
     }
 }
 
+// Bulk-load message_labels rows for a batch of messages and stamp them
+// onto each Message's labelIds field. Done as a single SELECT with an
+// IN clause rather than N+1 per-message queries — the message-list
+// delegate's per-row label-pill rendering would otherwise fan out into
+// ~100 SQL queries per scroll repaint.
+void hydrateLabelIds(std::vector<fc::Message>& messages) {
+    if (messages.empty()) return;
+    auto db = fc::cache::databaseHandle();
+
+    QString placeholders;
+    placeholders.reserve(messages.size() * 2);
+    for (size_t i = 0; i < messages.size(); ++i) {
+        if (i) placeholders += QLatin1Char(',');
+        placeholders += QLatin1Char('?');
+    }
+
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT message_id, label_id FROM message_labels "
+        "WHERE message_id IN (%1)").arg(placeholders));
+    for (const auto& m : messages) q.addBindValue(m.id);
+    if (!q.exec()) {
+        qWarning("hydrateLabelIds: %s", qUtf8Printable(q.lastError().text()));
+        return;
+    }
+
+    QHash<QString, QStringList> byMsg;
+    while (q.next()) {
+        byMsg[q.value(0).toString()] << q.value(1).toString();
+    }
+    for (auto& m : messages) m.labelIds = byMsg.value(m.id);
+}
+
 }  // namespace
 
 qint64 MessageRepository::upsert(const fc::Message& m) {
@@ -222,6 +255,7 @@ std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
     q.bindValue(QStringLiteral(":off"), offset);
     if (!q.exec()) return out;
     while (q.next()) out.push_back(rowToMessage(q));
+    hydrateLabelIds(out);
     return out;
 }
 
@@ -298,6 +332,7 @@ std::vector<fc::Message> MessageRepository::listThreadsByLabel(
         hydrateThreadAggregates(q, m);
         out.push_back(std::move(m));
     }
+    hydrateLabelIds(out);
     int multi = 0;
     for (const auto& m : out) if (m.threadCount > 1) ++multi;
     qInfo("listThreadsByLabel(label=%s, limit=%d, offset=%d): %zu threads "
@@ -351,6 +386,7 @@ std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int 
         return out;
     }
     while (q.next()) out.push_back(rowToMessage(q));
+    hydrateLabelIds(out);
     return out;
 }
 
@@ -382,6 +418,7 @@ std::vector<fc::Message> MessageRepository::searchFtsThreads(
         hydrateThreadAggregates(q, m);
         out.push_back(std::move(m));
     }
+    hydrateLabelIds(out);
     return out;
 }
 
@@ -414,6 +451,7 @@ std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
     for (auto& m : out) {
         m.attachments = AttachmentRepository::byMessage(m.id);
     }
+    hydrateLabelIds(out);
     return out;
 }
 

@@ -21,6 +21,8 @@ public:
         TypeRole,
         UnreadRole,
         TotalRole,
+        ColorBgRole,
+        ColorFgRole,
     };
 
     explicit LabelTreeModel(QObject* parent = nullptr);

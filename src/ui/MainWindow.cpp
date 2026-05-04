@@ -13,6 +13,7 @@
 #include "cache/PendingOpsRepository.h"
 #include "common/AccountManagerDialog.h"
 #include "common/IconLoader.h"
+#include "common/LabelStyleCache.h"
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
 #include "common/Shortcuts.h"
@@ -293,11 +294,14 @@ void MainWindow::onOpenSettings() {
     SettingsDialog dlg(this);
     dlg.exec();
     // Settings can flip Preferences::conversationView() (changes the
-    // grouping in the message list), the toolbar layout, and attachment
-    // defaults; the theme listener already lives on Theme::changed.
-    // Reload now so changes take effect without needing the user to
-    // click a sidebar entry or restart.
+    // grouping in the message list), the toolbar layout, attachment
+    // defaults, and label-colour display toggles; the theme listener
+    // already lives on Theme::changed. Reload now so changes take
+    // effect without needing the user to click a sidebar entry or
+    // restart.
     refreshToolbarStyle();
+    sidebar_->refreshAppearance();
+    if (list_) list_->viewport()->update();
     reloadCurrentLabel();
 }
 
@@ -525,6 +529,16 @@ void MainWindow::wireSignals() {
             });
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
+    // Keep the in-memory label-style cache (used by the message-list
+    // pill delegate) in sync with the freshly-synced labels table.
+    // labelsUpdated runs in the UI thread (queued from the sync
+    // thread), so invalidate() is safe to call here.
+    connect(sync_, &fc::sync::SyncService::labelsUpdated,
+            &LabelStyleCache::instance(), &LabelStyleCache::invalidate);
+    connect(&LabelStyleCache::instance(), &LabelStyleCache::changed, this,
+            [this] {
+                if (list_) list_->viewport()->update();
+            });
     connect(sync_, &fc::sync::SyncService::messagesUpdated,
             this,  &MainWindow::reloadCurrentLabel);
     connect(sync_, &fc::sync::SyncService::failed, this,

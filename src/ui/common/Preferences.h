@@ -55,6 +55,21 @@ public:
     // reachable.
     static bool toolbarShowText();
     static void setToolbarShowText(bool on);
+
+    // When true, each user label in the sidebar gets a small filled
+    // swatch in its Gmail-assigned background colour (text colour
+    // ignored at this size — it's just a chip). Falls back gracefully
+    // for labels with no colour set on the server.
+    static bool sidebarLabelColors();
+    static void setSidebarLabelColors(bool on);
+
+    // When true, message-list rows show a small coloured pill per
+    // user label they carry, painted in the label's Gmail bg / fg.
+    // System labels (INBOX / STARRED / UNREAD / CATEGORY_*) are
+    // suppressed because they'd appear on every row and just be
+    // visual noise.
+    static bool messageListLabelPills();
+    static void setMessageListLabelPills(bool on);
 };
 
 }  // namespace fc::ui

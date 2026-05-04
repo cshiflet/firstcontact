@@ -195,6 +195,44 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     convForm->addRow(QString(), toolbarBox);
     contentLayout->addLayout(convForm);
 
+    // ------------------------------------------------------------- Labels
+    auto* labelsTitle = new QLabel(
+        tr("<h3 style='margin:0'>Label colors</h3>"), content);
+    labelsTitle->setTextFormat(Qt::RichText);
+    contentLayout->addWidget(labelsTitle);
+
+    auto* labelsForm = new QFormLayout;
+    labelsForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    labelsForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    auto* sidebarColorsBox = new QCheckBox(
+        tr("Show colored swatches next to sidebar labels"), content);
+    sidebarColorsBox->setChecked(Preferences::sidebarLabelColors());
+    connect(sidebarColorsBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setSidebarLabelColors(on);
+    });
+    labelsForm->addRow(QString(), sidebarColorsBox);
+
+    auto* listPillsBox = new QCheckBox(
+        tr("Show colored label pills on messages in the list"), content);
+    listPillsBox->setChecked(Preferences::messageListLabelPills());
+    connect(listPillsBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setMessageListLabelPills(on);
+    });
+    labelsForm->addRow(QString(), listPillsBox);
+
+    auto* labelsHint = new QLabel(tr(
+        "Colors are pulled from your Gmail account (Settings → Labels in "
+        "Gmail web). Labels with no color set just don't get a swatch / "
+        "pill — system labels (Inbox, Starred, categories) are suppressed "
+        "from the message-list pills since they'd appear on every row."),
+        content);
+    labelsHint->setObjectName(QStringLiteral("FormHint"));
+    labelsHint->setWordWrap(true);
+    labelsHint->setTextFormat(Qt::RichText);
+    labelsForm->addRow(QString(), labelsHint);
+    contentLayout->addLayout(labelsForm);
+
     contentLayout->addStretch(1);
 
     // Buttons live OUTSIDE the scroll area so they're always visible at

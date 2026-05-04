@@ -17,6 +17,9 @@ public:
 
     fc::LabelTreeModel* model() const;
     void selectLabel(const QString& id);
+    // Cheap repaint with no data change — used after a Settings toggle
+    // flips a delegate-time preference (e.g. label-colour swatches).
+    void refreshAppearance();
 
 signals:
     void labelSelected(const QString& id);

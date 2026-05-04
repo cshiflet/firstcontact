@@ -11,7 +11,9 @@ struct LabelTreeModel::Node {
     QString id;
     QString name;            // pretty label segment ("Booking" not "Travel/Booking")
     QString fullName;        // full Gmail label name
-    QString type;            // "system" | "user"
+    QString type;            // "system" | "user" | "section"
+    QString colorBg;         // Gmail-assigned background hex (may be empty)
+    QString colorFg;         // Gmail-assigned text hex (may be empty)
     int unreadCount = 0;     // self only — what the API reported for this id
     int totalCount  = 0;
     int aggUnread   = 0;     // self + recursive descendants — for display
@@ -106,12 +108,17 @@ void LabelTreeModel::reload() {
             n->fullName  = accum;
             n->type      = QStringLiteral("user");
             n->parent    = parentNode;
-            // Only the leaf carries a real id + counts.
+            // Only the leaf carries a real id + counts + colours. The
+            // synthetic intermediate nodes (e.g. "Travel" when the user
+            // only created "Travel/Booking") have no Gmail-side identity
+            // so there's nothing to colour.
             const bool isLeaf = (i == parts.size() - 1);
             if (isLeaf) {
                 n->id          = r.id;
                 n->unreadCount = r.unreadCount;
                 n->totalCount  = r.totalCount;
+                n->colorBg     = r.colorBg;
+                n->colorFg     = r.colorFg;
             }
             Node* raw = n.get();
             parentNode->children.push_back(std::move(n));
@@ -190,6 +197,8 @@ QVariant LabelTreeModel::data(const QModelIndex& idx, int role) const {
         case TypeRole:      return n->type;
         case UnreadRole:    return n->aggUnread;
         case TotalRole:     return n->aggTotal;
+        case ColorBgRole:   return n->colorBg;
+        case ColorFgRole:   return n->colorFg;
         default:            return {};
     }
 }

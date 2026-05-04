@@ -1,7 +1,9 @@
 #include "MessageItemDelegate.h"
 
-#include "ui/common/IconLoader.h"
 #include "models/MessageListModel.h"
+#include "ui/common/IconLoader.h"
+#include "ui/common/LabelStyleCache.h"
+#include "ui/common/Preferences.h"
 
 #include <QApplication>
 #include <QDateTime>
@@ -242,20 +244,81 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     // Subject (left) + snippet (continuation, dim) on line 2, single line, elided.
     const QRect subjectRow(x, inner.top() + inner.height() / 2,
                             rightCursor - x, inner.height() / 2);
+    int subjectStartX = subjectRow.left();
+
+    // Label pills first — Gmail-web style: small coloured chips between
+    // the row's left edge and the subject text. Cap at kMaxPills so a
+    // very-tagged message doesn't squeeze the subject to nothing; the
+    // remainder stay reachable via the reader pane / message detail.
+    if (Preferences::messageListLabelPills()) {
+        const auto labelIds = idx.data(fc::MessageListModel::LabelIdsRole)
+                                  .toStringList();
+        if (!labelIds.isEmpty()) {
+            constexpr int kMaxPills        = 3;
+            constexpr int kPillPadX        = 6;
+            constexpr int kPillSpacing     = 4;
+            constexpr int kPillBudgetRatio = 2;   // pills get at most half the row
+            const int budget = subjectRow.width() / kPillBudgetRatio;
+
+            QFont pillFont = opt.font;
+            pillFont.setPointSizeF(pillFont.pointSizeF() * 0.85);
+            pillFont.setWeight(QFont::DemiBold);
+            QFontMetrics pillFm(pillFont);
+            const int pillH = pillFm.height();
+
+            int pillsDrawn = 0;
+            int xCursor = subjectRow.left();
+            const int xLimit = subjectRow.left() + budget;
+
+            const auto& cache = LabelStyleCache::instance();
+            for (const auto& lid : labelIds) {
+                if (pillsDrawn >= kMaxPills) break;
+                const auto style = cache.get(lid);
+                if (style.type != QLatin1String("user"))    continue;
+                if (!style.bg.isValid())                    continue;
+
+                const QString text = style.name;
+                const int textW = pillFm.horizontalAdvance(text);
+                const int pillW = textW + 2 * kPillPadX;
+                if (xCursor + pillW > xLimit) break;
+
+                const QRect pill(xCursor,
+                                 subjectRow.top() + (subjectRow.height() - pillH) / 2,
+                                 pillW, pillH);
+                p->save();
+                p->setRenderHint(QPainter::Antialiasing);
+                p->setPen(Qt::NoPen);
+                p->setBrush(style.bg);
+                p->drawRoundedRect(pill, pillH / 2.0, pillH / 2.0);
+                p->setPen(style.fg.isValid() ? style.fg : Qt::white);
+                p->setFont(pillFont);
+                p->drawText(pill, Qt::AlignCenter, text);
+                p->restore();
+
+                xCursor += pillW + kPillSpacing;
+                ++pillsDrawn;
+            }
+            subjectStartX = xCursor;
+        }
+    }
+
+    const QRect subjectRect(subjectStartX, subjectRow.top(),
+                            subjectRow.right() - subjectStartX,
+                            subjectRow.height());
     QFontMetrics subjectFm(subjectFont);
     QString subjectClipped = subjectFm.elidedText(
         subject.isEmpty() ? QStringLiteral("(no subject)") : subject,
-        Qt::ElideRight, subjectRow.width());
+        Qt::ElideRight, subjectRect.width());
     int subjectAdvance = subjectFm.horizontalAdvance(subjectClipped);
     p->setFont(subjectFont);
     p->setPen(subject.isEmpty() ? secondary : primary);
-    p->drawText(subjectRow, Qt::AlignVCenter | Qt::AlignLeft, subjectClipped);
+    p->drawText(subjectRect, Qt::AlignVCenter | Qt::AlignLeft, subjectClipped);
 
-    if (subjectAdvance + 16 < subjectRow.width() && !snippet.isEmpty()) {
-        const QRect snippetRect(subjectRow.left() + subjectAdvance + 8,
-                                subjectRow.top(),
-                                subjectRow.width() - subjectAdvance - 8,
-                                subjectRow.height());
+    if (subjectAdvance + 16 < subjectRect.width() && !snippet.isEmpty()) {
+        const QRect snippetRect(subjectRect.left() + subjectAdvance + 8,
+                                subjectRect.top(),
+                                subjectRect.width() - subjectAdvance - 8,
+                                subjectRect.height());
         QFontMetrics snippetFm(snippetFont);
         p->setFont(snippetFont);
         p->setPen(secondary);
