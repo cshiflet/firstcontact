@@ -117,6 +117,50 @@ QString headerHtml(const fc::Message& m, bool full) {
     return h;
 }
 
+// QTextBrowser variant that height-for-widths to the rendered document
+// height instead of the default 192-px sizeHint with no relationship
+// to content. Without this every message card in a thread stacked at
+// either the 360-px minimum (huge for one-line replies) or the
+// QTextEdit default (still arbitrary). With heightForWidth, the
+// outer QScrollArea handles vertical scrolling; the body itself
+// reports exactly the height its document needs.
+class AutoSizeTextBrowser : public QTextBrowser {
+public:
+    using QTextBrowser::QTextBrowser;
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int w) const override {
+        QTextDocument* doc = document();
+        const qreal saved = doc->textWidth();
+        // Account for the QTextEdit frame + viewport horizontal margins
+        // so the document doesn't reflow when later painted into the
+        // viewport.
+        const int textW = qMax(50, w - 4);
+        doc->setTextWidth(textW);
+        const int h = static_cast<int>(doc->size().height())
+                    + static_cast<int>(2 * doc->documentMargin())
+                    + 4;
+        doc->setTextWidth(saved);
+        return h;
+    }
+
+    QSize sizeHint() const override {
+        const int w = viewport() && viewport()->width() > 50
+            ? viewport()->width() : 600;
+        return { w, heightForWidth(w) };
+    }
+    QSize minimumSizeHint() const override { return { 0, 40 }; }
+
+protected:
+    void resizeEvent(QResizeEvent* e) override {
+        QTextBrowser::resizeEvent(e);
+        // updateGeometry() so the parent layout re-asks for our new
+        // heightForWidth after a width change.
+        updateGeometry();
+    }
+};
+
 QString humanSize(qint64 bytes) {
     if (bytes <= 0) return {};
     constexpr double KB = 1024.0;
@@ -215,7 +259,7 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     header->setText(headerHtml(m, /*full=*/initiallyExpanded));
     cardLayout->addWidget(header);
 
-    auto* body = new QTextBrowser(card);
+    auto* body = new AutoSizeTextBrowser(card);
     // Trim the QTextDocument's default 4-pt margin: combined with the
     // card padding it added enough whitespace around the message body
     // that emails felt floaty rather than dense.
@@ -236,8 +280,13 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
     body->setStyleSheet(QStringLiteral("background: transparent;"));
-    body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    body->setMinimumHeight(360);   // floor so the card has a useful default
+    // Horizontally fill the card; vertically size to the document via
+    // AutoSizeTextBrowser::heightForWidth. No more 360-px floor — short
+    // replies in a thread now render at their natural one- or two-line
+    // height instead of stretching out a huge empty box.
+    body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    body->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    body->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     // Defensive: explicitly pin link color on the body's palette so dark mode
     // doesn't render <a href> anchors in the unreadable Fusion-default blue.
     // This matches what Theme::apply pins on the application palette.
@@ -255,7 +304,10 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     }
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
-    cardLayout->addWidget(body, /*stretch=*/1);
+    // No vertical stretch: AutoSizeTextBrowser reports the exact height
+    // the document needs, so giving it stretch=1 would just stretch it
+    // past content and re-introduce the empty-box problem.
+    cardLayout->addWidget(body);
 
     // Attachment chips. One QPushButton per attachment, click → emit a
     // download request that MainWindow bridges to GmailClient::getAttachment.
@@ -470,14 +522,14 @@ void ReaderPane::showEmpty(const QString& reason) {
 
 void ReaderPane::showMessage(const fc::Message& m) {
     clearStack();
-    // Single-message view: drop the trailing stretch so the card fills the
-    // pane vertically. The card's body has Expanding size policy so it
-    // grows with the available height.
-    if (auto* tail = contentLayout_->takeAt(contentLayout_->count() - 1)) {
-        delete tail;
-    }
+    // The body in each card now sizes to its rendered document height,
+    // so we do NOT stretch the card to fill the pane vertically — that
+    // would just inflate the body back to a giant empty box for short
+    // messages. Insert the card above the trailing stretch (which
+    // clearStack just re-added) and let the QScrollArea handle any
+    // overflow.
     auto* card = buildMessageCard(m, /*initiallyExpanded=*/true);
-    contentLayout_->addWidget(card, /*stretch=*/1);
+    contentLayout_->insertWidget(0, card);
 }
 
 void ReaderPane::showThread(const std::vector<fc::Message>& messages) {
