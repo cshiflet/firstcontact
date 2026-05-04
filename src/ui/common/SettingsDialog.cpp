@@ -18,7 +18,12 @@ namespace fc::ui {
 
 SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle(tr("FirstContact Settings"));
-    resize(520, 360);
+    // Wider default + a sane minimum so wrapped hint text and the longest
+    // combo entries ("Inline rich preview (Qt WebEngine, +~80 MB RAM,
+    // restart required)") don't get truncated at first paint. Users can
+    // still resize larger; we just refuse to go absurdly small.
+    resize(720, 560);
+    setMinimumSize(640, 480);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(20, 20, 20, 20);
@@ -29,10 +34,19 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     root->addWidget(appearanceTitle);
 
     auto* form = new QFormLayout;
+    // Stretch field columns so combos / line edits fill the available
+    // dialog width rather than collapsing to their content's intrinsic
+    // sizeHint (which on Fusion is just "wide enough for the current
+    // item").
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
     auto* themeBox = new QComboBox(this);
     themeBox->addItem(tr("Match system"), int(Theme::Mode::Auto));
     themeBox->addItem(tr("Light"),        int(Theme::Mode::Light));
     themeBox->addItem(tr("Dark"),         int(Theme::Mode::Dark));
+    themeBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    themeBox->setMinimumWidth(280);
     const int themeIdx = themeBox->findData(int(Theme::currentMode()));
     if (themeIdx >= 0) themeBox->setCurrentIndex(themeIdx);
     connect(themeBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -53,6 +67,8 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     root->addWidget(htmlTitle);
 
     auto* htmlForm = new QFormLayout;
+    htmlForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    htmlForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     auto* htmlBox = new QComboBox(this);
     htmlBox->addItem(tr("Disabled — sanitized text only"),
                      int(Preferences::HtmlPreview::Disabled));
@@ -60,6 +76,8 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
                      int(Preferences::HtmlPreview::ExternalBrowser));
     htmlBox->addItem(tr("Inline rich preview (Qt WebEngine, +~80 MB RAM, restart required)"),
                      int(Preferences::HtmlPreview::InlineWebEngine));
+    htmlBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    htmlBox->setMinimumWidth(420);
     const int htmlIdx = htmlBox->findData(int(Preferences::htmlPreview()));
     if (htmlIdx >= 0) htmlBox->setCurrentIndex(htmlIdx);
     connect(htmlBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -88,15 +106,25 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     root->addWidget(attachTitle);
 
     auto* attachForm = new QFormLayout;
+    attachForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    attachForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
-    // Default download directory: read-only field + Browse… button.
-    auto* dirRow   = new QHBoxLayout;
-    auto* dirEdit  = new QLineEdit(Preferences::attachmentDir(), this);
+    // Default download directory: read-only field + Browse… button. Wrap
+    // both in a QWidget so the QFormLayout treats them as a single growing
+    // field — addRow(QHBoxLayout*) was collapsing the inner widgets to
+    // their sizeHint and giving the line edit no horizontal room.
+    auto* dirHolder = new QWidget(this);
+    auto* dirRow    = new QHBoxLayout(dirHolder);
+    dirRow->setContentsMargins(0, 0, 0, 0);
+    auto* dirEdit  = new QLineEdit(Preferences::attachmentDir(), dirHolder);
     dirEdit->setReadOnly(true);
-    auto* browseBtn = new QPushButton(tr("Browse…"), this);
+    dirEdit->setMinimumWidth(320);
+    dirEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* browseBtn = new QPushButton(tr("Browse…"), dirHolder);
+    browseBtn->setMinimumWidth(96);
     dirRow->addWidget(dirEdit, /*stretch=*/1);
     dirRow->addWidget(browseBtn);
-    attachForm->addRow(tr("Save folder:"), dirRow);
+    attachForm->addRow(tr("Save folder:"), dirHolder);
 
     connect(browseBtn, &QPushButton::clicked, this, [this, dirEdit] {
         const QString picked = QFileDialog::getExistingDirectory(
@@ -134,6 +162,8 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     root->addWidget(convTitle);
 
     auto* convForm = new QFormLayout;
+    convForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    convForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     auto* convBox = new QCheckBox(
         tr("Group messages by conversation"), this);
     convBox->setChecked(Preferences::conversationView());

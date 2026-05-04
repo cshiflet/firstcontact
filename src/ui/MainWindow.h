@@ -10,6 +10,8 @@
 class QAction;
 class QSplitter;
 class QLineEdit;
+class QMenu;
+class QToolButton;
 
 namespace fc { class MessageListModel; }
 namespace fc::auth  { class OAuthClient; class ClientConfig; }
@@ -75,7 +77,9 @@ private:
     void buildLayout();
     void wireSignals();
     void refreshAccountIndicator();
+    void refreshAccountMenu();    // (re)builds the Account toolbar dropdown
     void refreshToolbarIcons();   // re-bake icons from the active palette
+    void onSwitchAccount();       // sign out + immediately re-authorize
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
 
     fc::auth::ClientConfig*    config_;
@@ -95,6 +99,8 @@ private:
     QLineEdit*               searchEdit_;
     QAction*                 searchIconAction_ = nullptr;
     QList<QPair<QAction*, QString>> iconActions_;
+    QToolButton*             accountButton_ = nullptr;
+    QMenu*                   accountMenu_   = nullptr;
     TrayController*          tray_;
     Shortcuts*               shortcuts_;
 

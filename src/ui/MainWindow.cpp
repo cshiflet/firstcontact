@@ -50,10 +50,12 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSize>
+#include <QMenu>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -146,7 +148,6 @@ void MainWindow::buildToolBar() {
         return a;
     };
 
-    auto* signIn     = withIcon(QStringLiteral("login.svg"),     tr("Sign In"));
     auto* refresh    = withIcon(QStringLiteral("refresh.svg"),   tr("Refresh"));
     auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"));
     auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"));
@@ -166,10 +167,29 @@ void MainWindow::buildToolBar() {
     tb->addSeparator();
 
     auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"));
-    auto* signOut  = withIcon(QStringLiteral("logout.svg"),   tr("Sign out"));
+
+    // Account dropdown — mirrors baremail's web UI: a single tool button
+    // that pops a menu listing the signed-in email plus Sign out and
+    // "Sign in with another account…". This keeps the toolbar terse
+    // (one slot for sign-in/out) while still surfacing which account
+    // owns the current session. Single-account v1 means at most one
+    // header row in the menu, but the structure mirrors what we'd grow
+    // into for multi-account support later.
+    accountButton_ = new QToolButton(tb);
+    accountButton_->setIcon(IconLoader::themed(QStringLiteral("user.svg")));
+    accountButton_->setPopupMode(QToolButton::InstantPopup);
+    accountButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    accountButton_->setAutoRaise(true);
+    accountButton_->setCursor(Qt::PointingHandCursor);
+    accountMenu_ = new QMenu(accountButton_);
+    accountButton_->setMenu(accountMenu_);
+    iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
+    auto* accountAction = tb->addWidget(accountButton_);
+    Q_UNUSED(accountAction);
+    refreshAccountMenu();
+
     auto* quit     = withIcon(QStringLiteral("quit.svg"),     tr("Quit"));
 
-    connect(signIn,     &QAction::triggered, this, &MainWindow::onSignIn);
     connect(refresh,    &QAction::triggered, this, &MainWindow::onRefresh);
     connect(compose,    &QAction::triggered, this, &MainWindow::onComposeNew);
     connect(reply,      &QAction::triggered, this, &MainWindow::onReplyCurrent);
@@ -177,7 +197,6 @@ void MainWindow::buildToolBar() {
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
     connect(trash,      &QAction::triggered, this, &MainWindow::onDeleteCurrent);
     connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
-    connect(signOut,    &QAction::triggered, this, &MainWindow::onSignOut);
     connect(quit,       &QAction::triggered, qApp, &QApplication::quit);
 
     connect(searchEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearchSubmit);
@@ -392,6 +411,53 @@ void MainWindow::refreshAccountIndicator() {
     statusBar()->showMessage(email.isEmpty()
         ? tr("Not signed in.")
         : tr("Signed in as %1").arg(email));
+    refreshAccountMenu();
+}
+
+void MainWindow::refreshAccountMenu() {
+    if (!accountButton_ || !accountMenu_) return;
+    accountMenu_->clear();
+
+    const QString email = auth_->accountEmail();
+    const bool signedIn = auth_->isAuthorized() && !email.isEmpty();
+
+    // Compact toolbar label: show the email (truncated) when signed in so
+    // the user can see at a glance which account this window is bound to.
+    // Falls back to "Sign in" so the affordance is obvious before any
+    // account exists.
+    if (signedIn) {
+        QString shown = email;
+        if (shown.size() > 28) shown = shown.left(26) + QStringLiteral("…");
+        accountButton_->setText(shown);
+        accountButton_->setToolTip(tr("Signed in as %1").arg(email));
+
+        // Header row: non-clickable info line showing the full email.
+        auto* header = accountMenu_->addAction(email);
+        header->setEnabled(false);
+        accountMenu_->addSeparator();
+
+        auto* signOutAct = accountMenu_->addAction(
+            IconLoader::themed(QStringLiteral("logout.svg")),
+            tr("Sign out of %1").arg(email));
+        connect(signOutAct, &QAction::triggered, this, &MainWindow::onSignOut);
+
+        accountMenu_->addSeparator();
+        // v1 is single-account, so "Sign in with another account…" first
+        // signs out the current one. Phase-3+ will turn this into a real
+        // multi-account picker; the menu structure is already shaped for it.
+        auto* switchAct = accountMenu_->addAction(
+            IconLoader::themed(QStringLiteral("login.svg")),
+            tr("Sign in with another account…"));
+        connect(switchAct, &QAction::triggered, this, &MainWindow::onSwitchAccount);
+    } else {
+        accountButton_->setText(tr("Sign in"));
+        accountButton_->setToolTip(tr("Sign in to a Google account"));
+
+        auto* signInAct = accountMenu_->addAction(
+            IconLoader::themed(QStringLiteral("login.svg")),
+            tr("Sign in…"));
+        connect(signInAct, &QAction::triggered, this, &MainWindow::onSignIn);
+    }
 }
 
 void MainWindow::onSignIn() {
@@ -414,6 +480,29 @@ void MainWindow::onSignOut() {
         pending_->stop();
         drafts_->stop();
     }
+}
+
+void MainWindow::onSwitchAccount() {
+    // v1 is single-account: switching means signing out the current account
+    // and starting the OAuth flow against whatever account the user picks
+    // in Google's consent screen. Confirm explicitly so a stray click on
+    // the menu doesn't drop the active session.
+    if (auth_->isAuthorized()) {
+        const QString current = auth_->accountEmail();
+        const QString prompt = current.isEmpty()
+            ? tr("Sign out of the current account and sign in to a different one?")
+            : tr("Sign out of %1 and sign in to a different account?").arg(current);
+        if (QMessageBox::question(this, tr("Switch account"), prompt)
+                != QMessageBox::Yes) {
+            return;
+        }
+        auth_->signOut();
+        sync_->stopScheduler();
+        outbox_->stop();
+        pending_->stop();
+        drafts_->stop();
+    }
+    onSignIn();
 }
 
 void MainWindow::onRefresh() {

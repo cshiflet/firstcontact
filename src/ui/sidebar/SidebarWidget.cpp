@@ -4,22 +4,73 @@
 
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
+#include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QVBoxLayout>
 
 namespace fc::ui {
 
+namespace {
+
+// Sidebar delegate that paints a 1-pixel separator above the FIRST root-
+// level user label. Mirrors the visual break Gmail web puts between
+// system folders (Inbox / Starred / Sent / …) and the user-defined label
+// list. The model already tags each node with TypeRole; we just check
+// neighbouring siblings to decide whether this row is the boundary.
+class SidebarDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem& opt,
+                   const QModelIndex& idx) const override {
+        QSize s = QStyledItemDelegate::sizeHint(opt, idx);
+        if (isFirstUserLabelAtRoot(idx)) s.rheight() += 10;  // top padding
+        return s;
+    }
+
+    void paint(QPainter* painter,
+               const QStyleOptionViewItem& opt,
+               const QModelIndex& idx) const override {
+        QStyleOptionViewItem o = opt;
+        if (isFirstUserLabelAtRoot(idx)) {
+            // Draw a faint divider just above where the row would normally
+            // start, then shrink the option rect so the row contents land
+            // below it.
+            const int y = opt.rect.top() + 5;
+            painter->save();
+            QColor line = opt.palette.color(QPalette::Disabled,
+                                            QPalette::WindowText);
+            line.setAlpha(80);
+            painter->setPen(QPen(line, 1));
+            painter->drawLine(opt.rect.left() + 6, y,
+                              opt.rect.right() - 6, y);
+            painter->restore();
+            o.rect.adjust(0, 10, 0, 0);
+        }
+        QStyledItemDelegate::paint(painter, o, idx);
+    }
+
+private:
+    static bool isFirstUserLabelAtRoot(const QModelIndex& idx) {
+        if (!idx.isValid() || idx.parent().isValid()) return false;
+        const auto type = idx.data(fc::LabelTreeModel::TypeRole).toString();
+        if (type != QLatin1String("user")) return false;
+        if (idx.row() == 0) return true;
+        const auto prev = idx.sibling(idx.row() - 1, idx.column());
+        return prev.data(fc::LabelTreeModel::TypeRole).toString()
+                 != QLatin1String("user");
+    }
+};
+
+}  // namespace
+
 SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-
-    auto* title = new QLabel(tr("MAILBOXES"), this);
-    title->setObjectName(QStringLiteral("SectionTitle"));
-    layout->addWidget(title);
 
     tree_  = new QTreeView(this);
     tree_->setObjectName(QStringLiteral("SidebarTree"));
@@ -40,6 +91,7 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     tree_->setFrameShape(QFrame::NoFrame);
     tree_->setExpandsOnDoubleClick(true);
     tree_->setAnimated(true);
+    tree_->setItemDelegate(new SidebarDelegate(tree_));
     // Expand everything by default so users see the full label hierarchy
     // on first run; the QTreeView remembers per-node expansion state for
     // the lifetime of the model instance, so collapsing a branch sticks
