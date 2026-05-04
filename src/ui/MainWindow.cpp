@@ -47,7 +47,9 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
+#include <QDateTime>
 #include <QLabel>
+#include <QTimer>
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -95,6 +97,15 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     // them — otherwise the QObject::connect calls fire against null pointers.
     tray_      = new TrayController(this, this);
     shortcuts_ = new Shortcuts(this);
+
+    // Permanent sync indicator on the right of the status bar. The
+    // transient showMessage() slot on the left still fires for one-off
+    // notifications ("Saved to /home/…", "Move to Trash") — both
+    // coexist because addPermanentWidget docks to the right side.
+    syncStatusLabel_ = new QLabel(tr("Not synced"), this);
+    syncStatusLabel_->setObjectName(QStringLiteral("FormHint"));
+    syncStatusLabel_->setContentsMargins(0, 0, 8, 0);
+    statusBar()->addPermanentWidget(syncStatusLabel_);
 
     wireSignals();
 
@@ -548,9 +559,44 @@ void MainWindow::wireSignals() {
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
                 statusBar()->showMessage(tr("Sync error: %1").arg(reason), 5000);
+                lastSyncFailed_ = true;
+                if (syncStatusLabel_) syncStatusLabel_->setText(tr("Sync failed"));
             });
     connect(sync_, &fc::sync::SyncService::newMessages,
             this,  &MainWindow::onNewMessages);
+
+    // Permanent sync indicator. SyncService emits stateChanged(Idle)
+    // BEFORE emit failed (synchronously), so on a failed sync the
+    // Idle handler would race ahead and overwrite "Sync failed" with
+    // a fresh timestamp. Defer the success-text update via QTimer
+    // ::singleShot(0); by the time it runs, any pending failed signal
+    // has fired and set lastSyncFailed_, so we know to skip.
+    connect(sync_, &fc::sync::SyncService::stateChanged, this,
+            [this](fc::sync::SyncService::State s) {
+                if (!syncStatusLabel_) return;
+                switch (s) {
+                    case fc::sync::SyncService::State::Idle:
+                        QTimer::singleShot(0, this, [this] {
+                            if (lastSyncFailed_) {
+                                lastSyncFailed_ = false;
+                                return;       // failed handler already updated
+                            }
+                            lastSyncTime_ = QDateTime::currentDateTime()
+                                .toString(QStringLiteral("h:mm AP"));
+                            if (syncStatusLabel_) {
+                                syncStatusLabel_->setText(
+                                    tr("Synced %1").arg(lastSyncTime_));
+                            }
+                        });
+                        break;
+                    case fc::sync::SyncService::State::InitialSync:
+                        syncStatusLabel_->setText(tr("Initial sync…"));
+                        break;
+                    case fc::sync::SyncService::State::IncrementalSync:
+                        syncStatusLabel_->setText(tr("Syncing…"));
+                        break;
+                }
+            });
 
     connect(outbox_, &fc::sync::OutboxWorker::itemSent, this,
             [this](qint64, const QString&) {
@@ -747,6 +793,15 @@ void MainWindow::reloadSidebar() {
 
 void MainWindow::reloadCurrentLabel() {
     const bool conv = Preferences::conversationView();
+
+    // Capture the user's currently-viewed message + thread so we can
+    // re-select it after replaceAll. Without this, every background
+    // sync (which fires messagesUpdated → reloadCurrentLabel) would
+    // wipe the selection and reset the reader pane — which is jarring
+    // when the user is mid-read.
+    const QString preservedId       = currentMessage_.id;
+    const QString preservedThreadId = currentMessage_.threadId;
+
     auto rows = currentSearchQuery_.isEmpty()
         ? (conv
             ? fc::cache::MessageRepository::listThreadsByLabel(currentLabelId_, kPageSize, 0)
@@ -755,18 +810,45 @@ void MainWindow::reloadCurrentLabel() {
             ? fc::cache::MessageRepository::searchFtsThreads(currentSearchQuery_, kPageSize)
             : fc::cache::MessageRepository::searchFts(currentSearchQuery_, kPageSize));
     listModel_->replaceAll(std::move(rows));
-    currentRow_ = -1;
-    reader_->showEmpty();
-    // Resolve the label's pretty name from the cache so the status bar
-    // shows "Bills" instead of "Label_37". Falls back to the raw id
-    // for system labels that haven't synced yet (rare) or any other
-    // case where the lookup misses.
-    const auto row = fc::cache::LabelRepository::byId(currentLabelId_);
-    const QString labelDisplay = row.name.isEmpty() ? currentLabelId_ : row.name;
-    statusBar()->showMessage(currentSearchQuery_.isEmpty()
-        ? tr("Showing %1 messages in %2").arg(listModel_->rowCount())
-                                          .arg(labelDisplay)
-        : tr("Search results: %1").arg(listModel_->rowCount()));
+
+    // Try to restore the selection: first by exact message id, then by
+    // thread id. The thread fallback covers conversation-view rows
+    // where a fresh message just landed and the row's id (== latest
+    // message of the thread) has shifted to the new arrival.
+    int restoredRow = -1;
+    const int n = listModel_->rowCount();
+    if (!preservedId.isEmpty()) {
+        for (int i = 0; i < n; ++i) {
+            const auto idx = listModel_->index(i, 0);
+            if (idx.data(fc::MessageListModel::IdRole).toString() == preservedId) {
+                restoredRow = i;
+                break;
+            }
+        }
+    }
+    if (restoredRow < 0 && !preservedThreadId.isEmpty()) {
+        for (int i = 0; i < n; ++i) {
+            const auto idx = listModel_->index(i, 0);
+            if (idx.data(fc::MessageListModel::ThreadIdRole).toString()
+                    == preservedThreadId) {
+                restoredRow = i;
+                break;
+            }
+        }
+    }
+    if (restoredRow >= 0) {
+        list_->setCurrentIndex(listModel_->index(restoredRow, 0));
+        currentRow_ = restoredRow;
+        // Reader keeps whatever it was showing — we deliberately don't
+        // re-render the thread, even when the row's id shifted to a
+        // newer message; that would be jarring while the user is
+        // reading. The next explicit click triggers onMessageActivated
+        // and pulls in the latest content.
+    } else {
+        currentRow_ = -1;
+        reader_->showEmpty();
+        currentMessage_ = {};
+    }
 }
 
 void MainWindow::onMessageActivated(const QString& messageId, int row) {
