@@ -191,7 +191,19 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     cardLayout->addWidget(header);
 
     auto* body = new QTextBrowser(card);
-    body->setOpenExternalLinks(true);
+    // Route external-link clicks through util::launchBrowser instead of
+    // Qt's default QDesktopServices::openUrl. The default path on Linux
+    // ends up calling xdg-open, which on WSL ends up calling wslview,
+    // which on user setups with /mnt/c missing or partially mounted just
+    // silently fails. Our launcher chain has the WSL/xdg-open quirks
+    // baked in and falls through to direct browser names.
+    body->setOpenExternalLinks(false);
+    body->setOpenLinks(false);
+    QObject::connect(body, &QTextBrowser::anchorClicked, body,
+                     [](const QUrl& clicked) {
+                         if (!clicked.isValid()) return;
+                         fc::util::launchBrowser(clicked);
+                     });
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
     body->setStyleSheet(QStringLiteral("background: transparent;"));

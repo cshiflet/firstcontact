@@ -88,16 +88,28 @@ bool launchBrowser(const QUrl& url) {
         return true;
     };
 
-    // On WSL the Linux side typically has no browser — bridge to the Windows
-    // host before falling back to Linux launchers. WSL2 forwards localhost
-    // between Windows and the Linux side, so loopback URLs from our local
-    // HTTP server (or the OAuth callback) work even though the URL is opened
-    // in a process running on Windows.
+    static const QStringList kKnownBrowsers = {
+        QStringLiteral("firefox"),
+        QStringLiteral("google-chrome"),
+        QStringLiteral("chromium"),
+        QStringLiteral("chromium-browser"),
+        QStringLiteral("brave-browser"),
+        QStringLiteral("microsoft-edge"),
+    };
+    const QString browserEnv =
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BROWSER"));
+
+    // Tier 1: WSL → Windows browser via wslview / cmd.exe / powershell.exe.
+    // Only attempted when /mnt/c has the binaries wslview needs internally;
+    // otherwise wslview "starts" (forks) and fails downstream, which
+    // QProcess::startDetached can't tell us about.
     if (isWsl()) {
         if (!wslHasWindowsInterop()) {
             qInfo("util::launchBrowser: WSL Windows interop unavailable "
                   "(/mnt/c not mounted, or reg.exe / powershell.exe missing) "
-                  "- falling through to Linux browser launchers");
+                  "- skipping wslview and the xdg-open chain (which also "
+                  "delegates to wslview on WSL); will try $BROWSER + known "
+                  "Linux browser names directly");
         } else {
             if (tryRun("wslview", "wslview", {u})) return true;
             if (tryRun("cmd.exe",        "cmd.exe",
@@ -106,30 +118,43 @@ bool launchBrowser(const QUrl& url) {
                        {"-NoProfile", "-Command",
                         QStringLiteral("Start-Process '%1'").arg(u)})) return true;
         }
+        // On WSL we deliberately skip QDesktopServices / xdg-open / gio / etc.
+        // below: every one of them ends up calling wslview, which already
+        // failed (or was skipped) above — and worse, xdg-open returns its
+        // failure as a non-zero EXIT code that QProcess::startDetached can't
+        // observe, so we'd falsely report success and never try the Linux
+        // browser names.
+        if (!browserEnv.isEmpty()
+            && tryRun("$BROWSER", browserEnv, {u})) return true;
+        for (const QString& exe : kKnownBrowsers) {
+            if (tryRun(exe, exe, {u})) return true;
+        }
+        qWarning("util::launchBrowser: every WSL-safe strategy failed for %s",
+                 qUtf8Printable(u));
+        return false;
     }
 
+    // Tier 2 (non-WSL): system default via QDesktopServices.
     if (QDesktopServices::openUrl(url)) {
         qInfo("util::launchBrowser: launched via QDesktopServices");
         return true;
     }
 
-    const QString browserEnv =
-        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BROWSER"));
+    // Tier 3 (non-WSL): explicit user preference via $BROWSER.
     if (!browserEnv.isEmpty()
         && tryRun("$BROWSER", browserEnv, {u})) return true;
 
+    // Tier 4 (non-WSL): the xdg-open / desktop-environment opener chain.
     if (tryRun("xdg-open",         "xdg-open",         {u})) return true;
     if (tryRun("sensible-browser", "sensible-browser", {u})) return true;
     if (tryRun("gio open",         "gio",              {"open", u})) return true;
     if (tryRun("kde-open5",        "kde-open5",        {u})) return true;
     if (tryRun("gnome-open",       "gnome-open",       {u})) return true;
 
-    for (const QString& exe : {QStringLiteral("firefox"),
-                                QStringLiteral("google-chrome"),
-                                QStringLiteral("chromium"),
-                                QStringLiteral("chromium-browser"),
-                                QStringLiteral("brave-browser"),
-                                QStringLiteral("microsoft-edge")}) {
+    // Tier 5: known browsers by literal name. Last resort — works on a
+    // minimal install with no desktop integration at all, as long as one
+    // of these is on PATH.
+    for (const QString& exe : kKnownBrowsers) {
         if (tryRun(exe, exe, {u})) return true;
     }
 
