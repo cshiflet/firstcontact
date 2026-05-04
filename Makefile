@@ -70,6 +70,7 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    qt6-svg-dev libqt6svg6 \
 	    libsecret-1-dev qtkeychain-qt6-dev \
 	    libsqlite3-dev sqlite3 \
+	    libxkbcommon-dev \
 	    librsvg2-bin appstream xvfb \
 	    xdg-utils
 	@# wslu provides `wslview` (WSL → Windows browser bridge). Harmless on
