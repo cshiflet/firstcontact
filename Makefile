@@ -123,6 +123,9 @@ build: configure ## Compile (defaults to Debug; override with BUILD_TYPE=Release
 run: build ## Launch firstcontact from the build tree.
 	$(BUILD_DIR)/src/app/firstcontact
 
+run-dry: build ## Launch with FC_DRY_RUN=1 — destructive ops (delete, label edit, star/archive/trash, pending-ops flush) are blocked.
+	FC_DRY_RUN=1 $(BUILD_DIR)/src/app/firstcontact
+
 smoke: build ## Headless smoke launch — boots the GUI under offscreen for 4s.
 	@rm -f $(LOCK_FILE) 2>/dev/null || true
 	@bash -c 'QT_QPA_PLATFORM=offscreen timeout --signal=TERM 4 \
