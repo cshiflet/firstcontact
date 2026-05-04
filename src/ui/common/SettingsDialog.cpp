@@ -25,11 +25,25 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     resize(760, 580);
     setMinimumSize(560, 360);
 
-    auto* root = new QVBoxLayout(this);
+    // The dialog itself uses zero margins; an inner styled QFrame
+    // ("DialogShell") fills the entire dialog and paints the visible
+    // border. QSS borders directly on QDialog don't reliably paint on
+    // top-level windows under Fusion + the WM frame, so the inner
+    // QFrame gives us a guaranteed-visible edge between dialog
+    // content and whatever's behind it on screen.
+    auto* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setSpacing(0);
+    auto* shell = new QFrame(this);
+    shell->setObjectName(QStringLiteral("DialogShell"));
+    shell->setFrameShape(QFrame::NoFrame);
+    outerLayout->addWidget(shell);
+
+    auto* root = new QVBoxLayout(shell);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    auto* scroll = new QScrollArea(this);
+    auto* scroll = new QScrollArea(shell);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);

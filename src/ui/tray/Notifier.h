@@ -20,6 +20,12 @@ public:
                        const QString& latestSubject,
                        const QString& threadIdToOpen);
 
+    // Surface a Critical-priority toast (system tray on platforms that
+    // support it) for unrecoverable errors the user should know about
+    // — sync failure, send failure, etc. Body should be short; we cap
+    // it for platforms with strict toast budgets.
+    void notifyError(const QString& title, const QString& body);
+
 signals:
     // Emitted when the user activates a notification (e.g. clicks the toast).
     // Phase 3 wires this to MainWindow to focus the relevant thread.

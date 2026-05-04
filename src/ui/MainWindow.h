@@ -12,6 +12,7 @@
 #include <vector>
 
 class QAction;
+class QFrame;
 class QLabel;
 class QLineEdit;
 class QMenu;
@@ -139,6 +140,15 @@ private:
     // the appropriate baseline once they expire.
     bool                     isSyncing_      = false;
     bool                     lastSyncFailed_ = false;
+
+    // Persistent error chip. Shown in the status bar (right-side
+    // permanent slot) whenever we have an unresolved sync / outbox
+    // failure that the user should be looking at. Includes a
+    // dismiss button so the user can clear it; we also auto-clear
+    // when the next sync starts so a subsequent successful run
+    // tidies up after itself.
+    QFrame*                  errorBanner_       = nullptr;
+    QLabel*                  errorBannerLabel_  = nullptr;
 
     // Overflow plumbing — hamburger button + menu plus the ordered list of
     // toolbar entries that may collapse into the menu when the window is

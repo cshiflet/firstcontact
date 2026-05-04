@@ -48,6 +48,7 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QDateTime>
+#include <QFrame>
 #include <QLabel>
 #include <QTimer>
 #include <QLineEdit>
@@ -97,6 +98,38 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     // them — otherwise the QObject::connect calls fire against null pointers.
     tray_      = new TrayController(this, this);
     shortcuts_ = new Shortcuts(this);
+
+    // Persistent error chip. Lives on the right side of the status bar
+    // (addPermanentWidget), hidden until a failure puts something in
+    // it. Sticks until the user dismisses it OR a subsequent sync
+    // starts — in either case we want the red glyph to draw the eye
+    // away from the rest of the chrome until the user has actually
+    // seen the message.
+    errorBanner_ = new QFrame(this);
+    errorBanner_->setObjectName(QStringLiteral("ErrorBanner"));
+    errorBanner_->hide();
+    {
+        auto* row = new QHBoxLayout(errorBanner_);
+        row->setContentsMargins(8, 1, 4, 1);
+        row->setSpacing(6);
+        auto* icon = new QLabel(QStringLiteral("⚠"), errorBanner_);
+        icon->setObjectName(QStringLiteral("ErrorBannerIcon"));
+        errorBannerLabel_ = new QLabel(errorBanner_);
+        errorBannerLabel_->setObjectName(QStringLiteral("ErrorBannerText"));
+        errorBannerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* dismiss = new QPushButton(QStringLiteral("✕"), errorBanner_);
+        dismiss->setObjectName(QStringLiteral("ErrorBannerClose"));
+        dismiss->setFlat(true);
+        dismiss->setFixedSize(20, 20);
+        dismiss->setToolTip(tr("Dismiss"));
+        dismiss->setCursor(Qt::PointingHandCursor);
+        row->addWidget(icon);
+        row->addWidget(errorBannerLabel_, /*stretch=*/1);
+        row->addWidget(dismiss);
+        connect(dismiss, &QPushButton::clicked, errorBanner_,
+                &QWidget::hide);
+    }
+    statusBar()->addPermanentWidget(errorBanner_);
 
     wireSignals();
 
@@ -557,6 +590,20 @@ void MainWindow::wireSignals() {
                 lastSyncFailed_ = true;
                 statusBar()->showMessage(
                     tr("Sync failed: %1").arg(reason), 30000);
+                // Persistent attention: keep a red chip in the status
+                // bar AND fire a Critical tray toast. The transient
+                // 30 s message in the slot above will roll off into
+                // "Signed in as …" eventually, but the chip stays
+                // until the user dismisses it or another sync starts.
+                if (errorBanner_ && errorBannerLabel_) {
+                    errorBannerLabel_->setText(reason);
+                    errorBanner_->setToolTip(reason);
+                    errorBanner_->show();
+                }
+                if (tray_ && tray_->notifier()) {
+                    tray_->notifier()->notifyError(
+                        tr("FirstContact — sync failed"), reason);
+                }
             });
     connect(sync_, &fc::sync::SyncService::newMessages,
             this,  &MainWindow::onNewMessages);
@@ -572,10 +619,12 @@ void MainWindow::wireSignals() {
                 switch (s) {
                     case fc::sync::SyncService::State::InitialSync:
                         isSyncing_ = true;
+                        if (errorBanner_) errorBanner_->hide();
                         statusBar()->showMessage(tr("Initial sync…"));
                         break;
                     case fc::sync::SyncService::State::IncrementalSync:
                         isSyncing_ = true;
+                        if (errorBanner_) errorBanner_->hide();
                         statusBar()->showMessage(tr("Syncing…"));
                         break;
                     case fc::sync::SyncService::State::Idle: {

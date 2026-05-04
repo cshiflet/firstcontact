@@ -28,12 +28,44 @@ QMainWindow {
     background-color: #1a1a1a;
 }
 
-/* QDialog gets a 1-pixel divider so its edge is visible against the
- * main window when the two overlap (the OS frame alone can be hard to
- * pick out against our dark surfaces). */
 QDialog {
     background-color: #1a1a1a;
-    border: 1px solid #404040;
+}
+
+/* SettingsDialog (and any other dialog that opts in via a
+ * QFrame#DialogShell) paints its own border so its edge is
+ * unmistakable against the dark main window when the two overlap.
+ * QSS borders directly on QDialog don't reliably paint on top-level
+ * windows under Fusion + the WM frame, hence the inner shell. */
+QFrame#DialogShell {
+    background-color: #1a1a1a;
+    border: 2px solid #8a8e94;
+}
+
+QFrame#ErrorBanner {
+    background-color: #d93025;
+    border: 1px solid #b8231b;
+    border-radius: 4px;
+    padding: 0 2px;
+}
+QFrame#ErrorBanner QLabel {
+    background: transparent;
+    color: #ffffff;
+    font-weight: 600;
+}
+QFrame#ErrorBanner QLabel#ErrorBannerIcon {
+    font-size: 12pt;
+}
+QFrame#ErrorBanner QPushButton#ErrorBannerClose {
+    background: transparent;
+    color: #ffffff;
+    border: none;
+    padding: 0;
+    font-weight: 700;
+}
+QFrame#ErrorBanner QPushButton#ErrorBannerClose:hover {
+    background-color: rgba(255, 255, 255, 40);
+    border-radius: 3px;
 }
 
 /* Checkboxes & radio buttons — Fusion's default unchecked indicator is
