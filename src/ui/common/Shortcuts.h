@@ -11,6 +11,7 @@ namespace fc::ui {
 //   /  focus search    j/k  next/prev message
 //   c  compose         r    reply         e    archive
 //   #  delete          s    star toggle   ?    show shortcuts help
+//   u  read toggle (read ↔ unread for the current thread)
 class Shortcuts : public QObject {
     Q_OBJECT
 public:
@@ -27,6 +28,7 @@ signals:
     void archiveCurrent();
     void deleteCurrent();
     void toggleStar();
+    void toggleRead();
     void showHelp();
 };
 

@@ -66,6 +66,10 @@ private slots:
     void onToggleStarFor(const QString& messageId);
     void onArchiveCurrent();
     void onDeleteCurrent();
+    // Toggle read / unread for the entire current thread. If any
+    // message in the thread carries UNREAD we drop UNREAD from every
+    // message; otherwise we add UNREAD to every message.
+    void onToggleReadCurrent();
     // Left-click: write to a per-session temp dir and hand off to the
     // OS viewer; no permanent save, no AttachmentRepository update.
     void onOpenAttachment(const QString& messageId,
@@ -96,6 +100,14 @@ private:
     void updateToolbarOverflow(); // hide/show toolbar items into hamburger
     void onSwitchAccount();       // sign out + immediately re-authorize
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
+
+    // Apply (add, remove) label sets to every message in a thread,
+    // queue the equivalent server reconciliation for each, and refresh
+    // the visible inbox. Used by archive, mark-read toggle, and the
+    // auto-mark-on-open flow.
+    void applyLabelDiffToThread(const QString& threadId,
+                                 const QStringList& add,
+                                 const QStringList& remove);
 
     fc::auth::ClientConfig*    config_;
     fc::auth::OAuthClient*     auth_;

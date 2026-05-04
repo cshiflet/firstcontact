@@ -178,7 +178,9 @@ void MainWindow::buildToolBar() {
     auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6);
     auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5);
     auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2);
-    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     3);
+    auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3);
+    auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2);
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2);
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -283,6 +285,8 @@ void MainWindow::buildToolBar() {
     connect(reply,      &QAction::triggered, this, &MainWindow::onReplyCurrent);
     connect(replyAll,   &QAction::triggered, this, &MainWindow::onReplyAllCurrent);
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
+    connect(archiveAct, &QAction::triggered, this, &MainWindow::onArchiveCurrent);
+    connect(readAct,    &QAction::triggered, this, &MainWindow::onToggleReadCurrent);
     connect(trash,      &QAction::triggered, this, &MainWindow::onDeleteCurrent);
     connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
 
@@ -593,6 +597,7 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
     connect(shortcuts_, &Shortcuts::deleteCurrent,  this, &MainWindow::onDeleteCurrent);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
+    connect(shortcuts_, &Shortcuts::toggleRead,     this, &MainWindow::onToggleReadCurrent);
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
         const int n = listModel_->rowCount();
         if (n == 0) return;
@@ -772,6 +777,28 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
             reader_->showMessage(selected);
         }
         fc::cache::MessageRepository::markAccessed(selected.id);
+
+        // Auto-mark-as-read on open. Mirrors Gmail web — opening a
+        // conversation marks every message in it as read on the
+        // server. Drop UNREAD only when something is unread (avoids a
+        // pointless server round-trip on already-read threads). Also
+        // skipped under FC_DRY_RUN so debug sessions don't quietly
+        // mutate state — applyLabelDiffToThread → enqueueModify is
+        // already gated by PendingOpsWorker's dry-run check, but
+        // bailing early skips the local cache write too.
+        if (fc::util::DryRun::enabled()) return;
+        bool anyUnread = false;
+        for (const auto& m : thread) if (m.isUnread) { anyUnread = true; break; }
+        if (anyUnread) {
+            applyLabelDiffToThread(selected.threadId, {},
+                                   {QStringLiteral("UNREAD")});
+            currentMessage_.isUnread = false;
+            // Repaint sidebar (unread counts) + message list (bold/
+            // accent stripe drops away). reloadCurrentLabel is heavier
+            // than needed but keeps the inbox row counts honest.
+            reloadCurrentLabel();
+            reloadSidebar();
+        }
     };
 
     // Cache shortcut: only skip the network round-trip when the cached row
@@ -1268,6 +1295,19 @@ void MainWindow::onDeleteCurrent() {
     reloadCurrentLabel();
 }
 
+void MainWindow::applyLabelDiffToThread(const QString& threadId,
+                                         const QStringList& add,
+                                         const QStringList& remove) {
+    if (threadId.isEmpty()) return;
+    const auto messages = fc::cache::MessageRepository::byThread(threadId);
+    for (const auto& m : messages) {
+        if (m.id.isEmpty()) continue;
+        fc::cache::MessageRepository::applyLabelDiff(m.id, add, remove);
+        fc::cache::PendingOpsRepository::enqueueModify(m.id, add, remove);
+    }
+    pending_->flush();
+}
+
 void MainWindow::onArchiveCurrent() {
     if (currentMessage_.id.isEmpty()) return;
     if (fc::util::DryRun::block(QStringLiteral("archive-message"))) {
@@ -1275,11 +1315,44 @@ void MainWindow::onArchiveCurrent() {
             tr("Dry-run mode: archive blocked."), 4000);
         return;
     }
+    // Archive the entire conversation, matching Gmail web semantics.
+    // For single-message rows, byThread returns the one message and the
+    // loop is a no-op extra cost — fine.
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(currentMessage_.id, {}, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentMessage_.id, {}, rem);
-    pending_->flush();
+    applyLabelDiffToThread(currentMessage_.threadId, {}, rem);
+    statusBar()->showMessage(tr("Archived."), 3000);
     reloadCurrentLabel();
+}
+
+void MainWindow::onToggleReadCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("toggle-read"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: read-toggle blocked."), 4000);
+        return;
+    }
+
+    // Read state for the row in the message list reflects "any message
+    // in the thread is unread"; mirror that here. If anything is unread
+    // we treat the whole thread as currently-unread and mark it read,
+    // and vice versa. Avoids the surprise of "I clicked toggle and only
+    // one of three messages flipped state."
+    const auto messages = fc::cache::MessageRepository::byThread(
+                              currentMessage_.threadId);
+    bool anyUnread = false;
+    for (const auto& m : messages) if (m.isUnread) { anyUnread = true; break; }
+
+    QStringList add, rem;
+    if (anyUnread) rem << QStringLiteral("UNREAD");
+    else           add << QStringLiteral("UNREAD");
+
+    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    currentMessage_.isUnread = !anyUnread;
+    statusBar()->showMessage(anyUnread ? tr("Marked as read.")
+                                       : tr("Marked as unread."),
+                              3000);
+    reloadCurrentLabel();
+    reloadSidebar();
 }
 
 void MainWindow::onNewMessages(int count) {

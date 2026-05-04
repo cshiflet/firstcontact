@@ -34,6 +34,8 @@ Shortcuts::Shortcuts(QMainWindow* main) : QObject(main) {
             &QShortcut::activated, this, &Shortcuts::deleteCurrent);
     connect(make(main, QKeySequence(QStringLiteral("s"))),
             &QShortcut::activated, this, &Shortcuts::toggleStar);
+    connect(make(main, QKeySequence(QStringLiteral("u"))),
+            &QShortcut::activated, this, &Shortcuts::toggleRead);
     connect(make(main, QKeySequence(QStringLiteral("?"))),
             &QShortcut::activated, this, &Shortcuts::showHelp);
 }
