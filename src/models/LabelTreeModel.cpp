@@ -3,6 +3,8 @@
 #include <QHash>
 #include <QStringList>
 
+#include <functional>
+
 namespace fc {
 
 struct LabelTreeModel::Node {
@@ -10,8 +12,10 @@ struct LabelTreeModel::Node {
     QString name;            // pretty label segment ("Booking" not "Travel/Booking")
     QString fullName;        // full Gmail label name
     QString type;            // "system" | "user"
-    int unreadCount = 0;
+    int unreadCount = 0;     // self only — what the API reported for this id
     int totalCount  = 0;
+    int aggUnread   = 0;     // self + recursive descendants — for display
+    int aggTotal    = 0;
     Node* parent = nullptr;
     std::vector<NodePtr> children;
 };
@@ -97,6 +101,21 @@ void LabelTreeModel::reload() {
         }
     }
 
+    // DFS that rolls each leaf's count up to its ancestors. Mirrors Gmail
+    // web: a parent label like "Travel" shows self + every descendant's
+    // unread. Done after the tree is built so per-node `unreadCount`
+    // (what the API reported for this exact label id) stays untouched.
+    std::function<void(Node*)> aggregate = [&](Node* n) {
+        n->aggUnread = n->unreadCount;
+        n->aggTotal  = n->totalCount;
+        for (const auto& c : n->children) {
+            aggregate(c.get());
+            n->aggUnread += c->aggUnread;
+            n->aggTotal  += c->aggTotal;
+        }
+    };
+    for (const auto& top : root_->children) aggregate(top.get());
+
     endResetModel();
 }
 
@@ -132,15 +151,20 @@ QVariant LabelTreeModel::data(const QModelIndex& idx, int role) const {
     if (!idx.isValid()) return {};
     Node* n = static_cast<Node*>(idx.internalPointer());
     switch (role) {
-        case Qt::DisplayRole:
-            return n->unreadCount > 0
-                ? QStringLiteral("%1 (%2)").arg(n->name).arg(n->unreadCount)
-                : n->name;
+        case Qt::DisplayRole: {
+            // Show the rolled-up unread count for parent rows and for
+            // synthetic intermediate rows that have no real label id of
+            // their own. Leaves keep their own count (which equals the
+            // aggregate when there are no children).
+            const int u = n->aggUnread;
+            return u > 0 ? QStringLiteral("%1 (%2)").arg(n->name).arg(u)
+                         : n->name;
+        }
         case IdRole:        return n->id;
         case NameRole:      return n->fullName;
         case TypeRole:      return n->type;
-        case UnreadRole:    return n->unreadCount;
-        case TotalRole:     return n->totalCount;
+        case UnreadRole:    return n->aggUnread;
+        case TotalRole:     return n->aggTotal;
         default:            return {};
     }
 }

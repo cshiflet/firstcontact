@@ -32,6 +32,7 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
         case StarredRole:       return m.isStarred;
         case ImportantRole:     return m.isImportant;
         case HasAttachmentRole: return m.hasAttachment;
+        case ThreadCountRole:   return m.threadCount;
         case Qt::DisplayRole:
             return QStringLiteral("%1 — %2").arg(
                 decode(m.fromName.isEmpty() ? m.fromAddr : m.fromName),
@@ -52,6 +53,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const {
         {StarredRole,       "starred"},
         {ImportantRole,     "important"},
         {HasAttachmentRole, "hasAttachment"},
+        {ThreadCountRole,   "threadCount"},
     };
 }
 

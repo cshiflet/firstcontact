@@ -47,6 +47,12 @@ public:
     // attachmentDir() with collision-safe naming.
     static bool alwaysAskAttachmentLocation();
     static void setAlwaysAskAttachmentLocation(bool ask);
+
+    // Conversation view: when true, the message list groups messages by
+    // thread and shows one row per thread (Gmail-web default). When false,
+    // each message is its own row regardless of thread membership.
+    static bool conversationView();
+    static void setConversationView(bool on);
 };
 
 }  // namespace fc::ui

@@ -42,6 +42,17 @@ struct Message {
 
     QStringList labelIds;
     std::vector<Attachment> attachments;
+
+    // Thread aggregate. Populated only by listThreadsByLabel /
+    // searchFtsThreads — those queries return one row per thread, hydrated
+    // with the LATEST message's per-message fields (id / subject / from /
+    // snippet / internalDate) plus these whole-thread roll-ups. For all
+    // other paths (byId / listByLabel / byThread / searchFts) threadCount
+    // stays 0 and the OR'd flags stay false.
+    int  threadCount   = 0;     // 0 = single-message context, ignore aggregates
+    bool threadHasUnread     = false;
+    bool threadHasStarred    = false;
+    bool threadHasAttachment = false;
 };
 
 }  // namespace fc

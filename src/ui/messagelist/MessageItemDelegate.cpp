@@ -89,10 +89,18 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     const bool starred    = idx.data(fc::MessageListModel::StarredRole).toBool();
     const bool important  = idx.data(fc::MessageListModel::ImportantRole).toBool();
     const bool hasAttach  = idx.data(fc::MessageListModel::HasAttachmentRole).toBool();
-    const QString from    = idx.data(fc::MessageListModel::FromRole).toString();
+    const QString fromRaw = idx.data(fc::MessageListModel::FromRole).toString();
     const QString subject = idx.data(fc::MessageListModel::SubjectRole).toString();
     const QString snippet = idx.data(fc::MessageListModel::SnippetRole).toString();
     const qint64  date    = idx.data(fc::MessageListModel::DateRole).toLongLong();
+    const int  threadCount = idx.data(fc::MessageListModel::ThreadCountRole).toInt();
+    // In conversation mode (>1 message in the thread) suffix the sender
+    // column with the message count, mirroring Gmail web's "Alice, Bob (3)"
+    // / "Alice (5)" treatment. In single-message rows (threadCount <= 1)
+    // we just show the sender as-is.
+    const QString from = (threadCount > 1)
+        ? QStringLiteral("%1 (%2)").arg(fromRaw).arg(threadCount)
+        : fromRaw;
 
     const QColor accent  = accentColor(opt.palette);
     const QColor primary = opt.palette.color(QPalette::Text);

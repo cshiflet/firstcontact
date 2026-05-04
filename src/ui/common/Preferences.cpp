@@ -10,6 +10,7 @@ namespace {
 constexpr char kKey[] = "html/preview";
 constexpr char kAttachmentDirKey[] = "attachments/dir";
 constexpr char kAttachmentAskKey[] = "attachments/alwaysAsk";
+constexpr char kConversationKey[]  = "ui/conversationView";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -66,6 +67,19 @@ bool Preferences::alwaysAskAttachmentLocation() {
 void Preferences::setAlwaysAskAttachmentLocation(bool ask) {
     QSettings s;
     s.setValue(QLatin1String(kAttachmentAskKey), ask);
+    s.sync();
+}
+
+bool Preferences::conversationView() {
+    QSettings s;
+    // Default ON to match Gmail web's default behaviour. Users who hate
+    // it can flip it off in Settings.
+    return s.value(QLatin1String(kConversationKey), true).toBool();
+}
+
+void Preferences::setConversationView(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kConversationKey), on);
     s.sync();
 }
 

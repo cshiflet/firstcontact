@@ -127,6 +127,29 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     attachForm->addRow(QString(), attachHint);
     root->addLayout(attachForm);
 
+    // ----------------------------------------------------- Conversation view
+    auto* convTitle = new QLabel(
+        tr("<h3 style='margin:0'>Inbox layout</h3>"), this);
+    convTitle->setTextFormat(Qt::RichText);
+    root->addWidget(convTitle);
+
+    auto* convForm = new QFormLayout;
+    auto* convBox = new QCheckBox(
+        tr("Group messages by conversation"), this);
+    convBox->setChecked(Preferences::conversationView());
+    connect(convBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setConversationView(on);
+    });
+    convForm->addRow(QString(), convBox);
+    auto* convHint = new QLabel(tr(
+        "When on, the message list shows one row per thread (Gmail-web "
+        "default). When off, every message is its own row. Toggling takes "
+        "effect on the next label / search refresh."), this);
+    convHint->setObjectName(QStringLiteral("FormHint"));
+    convHint->setWordWrap(true);
+    convForm->addRow(QString(), convHint);
+    root->addLayout(convForm);
+
     root->addStretch(1);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);

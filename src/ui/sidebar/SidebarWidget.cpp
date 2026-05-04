@@ -26,8 +26,12 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     model_ = new fc::LabelTreeModel(this);
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);
-    tree_->setRootIsDecorated(false);
-    tree_->setIndentation(14);
+    // Show the disclosure arrows on every row that has children so users
+    // can fold a parent label like "Travel" closed without losing it. The
+    // previous setRootIsDecorated(false) hid the arrows on the top level —
+    // the tree was technically there, just unreachable when collapsed.
+    tree_->setRootIsDecorated(true);
+    tree_->setIndentation(18);
     tree_->setUniformRowHeights(true);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -35,7 +39,17 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     tree_->setMouseTracking(true);
     tree_->setFrameShape(QFrame::NoFrame);
     tree_->setExpandsOnDoubleClick(true);
-    tree_->expandToDepth(1);
+    tree_->setAnimated(true);
+    // Expand everything by default so users see the full label hierarchy
+    // on first run; the QTreeView remembers per-node expansion state for
+    // the lifetime of the model instance, so collapsing a branch sticks
+    // until the next reload().
+    tree_->expandAll();
+
+    // Re-expand on reload — beginResetModel/endResetModel collapses the
+    // tree back to its default state.
+    connect(model_, &QAbstractItemModel::modelReset, tree_,
+            [this] { tree_->expandAll(); });
 
     layout->addWidget(tree_);
 

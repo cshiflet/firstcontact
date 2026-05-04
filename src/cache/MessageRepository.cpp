@@ -227,6 +227,82 @@ std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
 
 namespace {
 
+// Collapses a per-message ranked CTE into one row per thread, hydrated
+// with the LATEST message's fields (rn=1) plus whole-thread aggregates.
+// Returns the SELECT statement built around an arbitrary CTE name and an
+// inner WHERE clause that selects which messages enter the partition.
+//
+// Window functions need SQLite ≥ 3.25 (Ubuntu 24.04 ships 3.45+); fall
+// back if we ever build against an older sqlite.
+QString buildThreadRollupSql(const QString& innerWhere) {
+    return QStringLiteral(
+        "WITH ranked AS ("
+        "  SELECT m.*, "
+        "    ROW_NUMBER() OVER (PARTITION BY m.thread_id "
+        "                        ORDER BY m.internal_date DESC) AS rn, "
+        "    COUNT(*)   OVER (PARTITION BY m.thread_id) AS t_count, "
+        "    SUM(m.is_unread)      OVER (PARTITION BY m.thread_id) AS t_unread, "
+        "    MAX(m.is_starred)     OVER (PARTITION BY m.thread_id) AS t_starred, "
+        "    MAX(m.has_attachment) OVER (PARTITION BY m.thread_id) AS t_attach "
+        "  FROM messages m "
+        "  %1"
+        ") "
+        "SELECT id, thread_id, history_id, internal_date, size_estimate, "
+        "       from_addr, from_name, to_addrs, cc_addrs, bcc_addrs, reply_to, "
+        "       subject, snippet, body_text, body_html, body_html_present, "
+        "       is_unread, is_starred, is_important, has_attachment, "
+        "       t_count, t_unread, t_starred, t_attach "
+        "FROM ranked "
+        "WHERE rn = 1 "
+        "ORDER BY internal_date DESC "
+        "LIMIT :lim OFFSET :off").arg(innerWhere);
+}
+
+void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
+    m.threadCount          = q.value(QStringLiteral("t_count")).toInt();
+    const int unread       = q.value(QStringLiteral("t_unread")).toInt();
+    const int starred      = q.value(QStringLiteral("t_starred")).toInt();
+    const int hasAttach    = q.value(QStringLiteral("t_attach")).toInt();
+    m.threadHasUnread      = unread > 0;
+    m.threadHasStarred     = starred > 0;
+    m.threadHasAttachment  = hasAttach > 0;
+    // For display, override the per-message flags with the thread-level
+    // ones so the row-level icons in the message list reflect the whole
+    // conversation rather than just the latest message.
+    m.isUnread       = m.threadHasUnread;
+    m.isStarred      = m.threadHasStarred;
+    m.hasAttachment  = m.threadHasAttachment;
+}
+
+}  // namespace
+
+std::vector<fc::Message> MessageRepository::listThreadsByLabel(
+        const QString& labelId, int limit, int offset) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+
+    QSqlQuery q(db);
+    q.prepare(buildThreadRollupSql(QStringLiteral(
+        "JOIN message_labels ml ON ml.message_id = m.id "
+        "WHERE ml.label_id = :l")));
+    q.bindValue(QStringLiteral(":l"),   labelId);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), offset);
+    if (!q.exec()) {
+        qWarning("listThreadsByLabel: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) {
+        auto m = rowToMessage(q);
+        hydrateThreadAggregates(q, m);
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+namespace {
+
 // Splits a user-typed query into whitespace-separated terms, double-quotes
 // each one (escaping embedded quotes), and joins them with " AND ". This
 // gives FTS5 a syntactically-valid expression regardless of the operators,
@@ -270,6 +346,37 @@ std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int 
         return out;
     }
     while (q.next()) out.push_back(rowToMessage(q));
+    return out;
+}
+
+std::vector<fc::Message> MessageRepository::searchFtsThreads(
+        const QString& query, int limit) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    const QString fts = normaliseFtsQuery(query);
+    if (fts.isEmpty()) return out;
+
+    // Collapse FTS hits into per-thread rows the same way listThreadsByLabel
+    // does for label browsing. The CTE filters down to messages that match
+    // the FTS query; window functions then pick the latest per thread and
+    // fold in the aggregates.
+    QSqlQuery q(db);
+    q.prepare(buildThreadRollupSql(QStringLiteral(
+        "JOIN messages_fts f ON f.rowid = m.rowid "
+        "WHERE messages_fts MATCH :q")));
+    q.bindValue(QStringLiteral(":q"),   fts);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), 0);
+    if (!q.exec()) {
+        qWarning("FTS thread search failed: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) {
+        auto m = rowToMessage(q);
+        hydrateThreadAggregates(q, m);
+        out.push_back(std::move(m));
+    }
     return out;
 }
 

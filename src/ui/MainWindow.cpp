@@ -436,9 +436,14 @@ void MainWindow::reloadSidebar() {
 }
 
 void MainWindow::reloadCurrentLabel() {
+    const bool conv = Preferences::conversationView();
     auto rows = currentSearchQuery_.isEmpty()
-        ? fc::cache::MessageRepository::listByLabel(currentLabelId_, kPageSize, 0)
-        : fc::cache::MessageRepository::searchFts(currentSearchQuery_, kPageSize);
+        ? (conv
+            ? fc::cache::MessageRepository::listThreadsByLabel(currentLabelId_, kPageSize, 0)
+            : fc::cache::MessageRepository::listByLabel(currentLabelId_, kPageSize, 0))
+        : (conv
+            ? fc::cache::MessageRepository::searchFtsThreads(currentSearchQuery_, kPageSize)
+            : fc::cache::MessageRepository::searchFts(currentSearchQuery_, kPageSize));
     listModel_->replaceAll(std::move(rows));
     currentRow_ = -1;
     reader_->showEmpty();

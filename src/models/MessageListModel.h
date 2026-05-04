@@ -24,6 +24,9 @@ public:
         StarredRole,
         ImportantRole,
         HasAttachmentRole,
+        // 0 in non-conversation mode; >0 means this row represents a
+        // thread, and the delegate should render a "(N)" count badge.
+        ThreadCountRole,
     };
 
     explicit MessageListModel(QObject* parent = nullptr);
