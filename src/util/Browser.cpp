@@ -36,15 +36,27 @@ bool isWsl() {
     return result;
 }
 
-// True if WSL has Windows interop reachable. False when the user has
-// `automount = false` in /etc/wsl.conf or otherwise lacks /mnt/c — in that
-// case wslview / cmd.exe / powershell.exe will all fail the moment they
-// shell out, even though startDetached returns success because the launcher
-// scripts fork before erroring out.
+// True if WSL has Windows interop reachable AND fully populated. False when
+// /mnt/c isn't mounted at all OR when key Windows binaries are missing —
+// the user might have a partially-mounted Windows drive where cmd.exe
+// exists but reg.exe / powershell.exe don't, in which case wslview's
+// internal default-browser lookup fails silently after QProcess::startDetached
+// has already returned success. We'd then claim the launch worked and never
+// fall through to the Linux launcher chain.
+//
+// Be strict here: if we can't be sure wslview will work end-to-end, skip
+// the entire WSL block and let the Linux fallbacks (xdg-open, $BROWSER,
+// firefox / chrome / chromium) handle it.
 bool wslHasWindowsInterop() {
-    if (!QStandardPaths::findExecutable(QStringLiteral("cmd.exe")).isEmpty())
-        return true;
-    return QFileInfo::exists(QStringLiteral("/mnt/c/Windows/System32/cmd.exe"));
+    auto present = [](const QString& path) {
+        if (QFileInfo::exists(path)) return true;
+        return !QStandardPaths::findExecutable(QFileInfo(path).fileName())
+                    .isEmpty();
+    };
+    return present(QStringLiteral("/mnt/c/Windows/System32/cmd.exe"))
+        && present(QStringLiteral("/mnt/c/Windows/System32/reg.exe"))
+        && present(QStringLiteral(
+               "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"));
 }
 
 }  // namespace
@@ -67,8 +79,9 @@ bool launchBrowser(const QUrl& url) {
     // in a process running on Windows.
     if (isWsl()) {
         if (!wslHasWindowsInterop()) {
-            qInfo("util::launchBrowser: WSL has no Windows interop "
-                  "(/mnt/c not mounted?) - skipping wslview/cmd.exe/powershell.exe");
+            qInfo("util::launchBrowser: WSL Windows interop unavailable "
+                  "(/mnt/c not mounted, or reg.exe / powershell.exe missing) "
+                  "- falling through to Linux browser launchers");
         } else {
             if (tryRun("wslview", "wslview", {u})) return true;
             if (tryRun("cmd.exe",        "cmd.exe",
