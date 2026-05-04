@@ -248,14 +248,16 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
 
     // Label pills first — Gmail-web style: small coloured chips between
     // the row's left edge and the subject text. Cap at kMaxPills so a
-    // very-tagged message doesn't squeeze the subject to nothing; the
-    // remainder stay reachable via the reader pane / message detail.
+    // very-tagged message doesn't squeeze the subject to nothing; if
+    // the cap (or width budget) cuts us short, append a small "…"
+    // overflow chip so the user knows more labels exist.
     if (Preferences::messageListLabelPills()) {
         const auto labelIds = idx.data(fc::MessageListModel::LabelIdsRole)
                                   .toStringList();
         if (!labelIds.isEmpty()) {
             constexpr int kMaxPills        = 3;
             constexpr int kPillPadX        = 6;
+            constexpr int kEllipsisPadX    = 5;   // tighter so it tends to fit
             constexpr int kPillSpacing     = 4;
             constexpr int kPillBudgetRatio = 2;   // pills get at most half the row
             const int budget = subjectRow.width() / kPillBudgetRatio;
@@ -266,19 +268,29 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
             QFontMetrics pillFm(pillFont);
             const int pillH = pillFm.height();
 
+            const auto& cache = LabelStyleCache::instance();
+
+            // Pre-filter: only user labels that have a usable bg colour
+            // are eligible. We count eligibles up front so the ellipsis
+            // pill below can tell whether the row is truncated by cap /
+            // budget vs. just shorter than kMaxPills.
+            std::vector<LabelStyleCache::Style> eligible;
+            eligible.reserve(labelIds.size());
+            for (const auto& lid : labelIds) {
+                auto ls = cache.get(lid);
+                if (ls.type != QLatin1String("user")) continue;
+                if (!ls.bg.isValid())                 continue;
+                eligible.push_back(std::move(ls));
+            }
+
             int pillsDrawn = 0;
             int xCursor = subjectRow.left();
             const int xLimit = subjectRow.left() + budget;
 
-            const auto& cache = LabelStyleCache::instance();
-            for (const auto& lid : labelIds) {
-                if (pillsDrawn >= kMaxPills) break;
-                const auto style = cache.get(lid);
-                if (style.type != QLatin1String("user"))    continue;
-                if (!style.bg.isValid())                    continue;
-
-                const QString text = style.name;
-                const int textW = pillFm.horizontalAdvance(text);
+            for (size_t i = 0;
+                 i < eligible.size() && pillsDrawn < kMaxPills; ++i) {
+                const auto& ls = eligible[i];
+                const int textW = pillFm.horizontalAdvance(ls.name);
                 const int pillW = textW + 2 * kPillPadX;
                 if (xCursor + pillW > xLimit) break;
 
@@ -288,16 +300,45 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
                 p->save();
                 p->setRenderHint(QPainter::Antialiasing);
                 p->setPen(Qt::NoPen);
-                p->setBrush(style.bg);
+                p->setBrush(ls.bg);
                 p->drawRoundedRect(pill, pillH / 2.0, pillH / 2.0);
-                p->setPen(style.fg.isValid() ? style.fg : Qt::white);
+                p->setPen(ls.fg.isValid() ? ls.fg : Qt::white);
                 p->setFont(pillFont);
-                p->drawText(pill, Qt::AlignCenter, text);
+                p->drawText(pill, Qt::AlignCenter, ls.name);
                 p->restore();
 
                 xCursor += pillW + kPillSpacing;
                 ++pillsDrawn;
             }
+
+            // Ellipsis chip — only when there were more eligible labels
+            // we couldn't show. Neutral palette colour (not a label
+            // colour) so it reads as a UI-side overflow marker, not a
+            // label of its own.
+            if (pillsDrawn < static_cast<int>(eligible.size())) {
+                const QString ellip = QStringLiteral("…");
+                const int textW = pillFm.horizontalAdvance(ellip);
+                const int pillW = textW + 2 * kEllipsisPadX;
+                if (xCursor + pillW <= xLimit) {
+                    const QRect pill(xCursor,
+                                     subjectRow.top() + (subjectRow.height() - pillH) / 2,
+                                     pillW, pillH);
+                    QColor bg = opt.palette.color(QPalette::Disabled,
+                                                   QPalette::WindowText);
+                    bg.setAlpha(60);
+                    p->save();
+                    p->setRenderHint(QPainter::Antialiasing);
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(bg);
+                    p->drawRoundedRect(pill, pillH / 2.0, pillH / 2.0);
+                    p->setPen(secondary);
+                    p->setFont(pillFont);
+                    p->drawText(pill, Qt::AlignCenter, ellip);
+                    p->restore();
+                    xCursor += pillW + kPillSpacing;
+                }
+            }
+
             subjectStartX = xCursor;
         }
     }
