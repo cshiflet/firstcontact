@@ -14,6 +14,7 @@ qt_add_resources(fc_cache "fc_cache_schema"
     FILES
         "${CMAKE_SOURCE_DIR}/resources/schema/0001_init.sql"
         "${CMAKE_SOURCE_DIR}/resources/schema/0002_fts.sql"
+        "${CMAKE_SOURCE_DIR}/resources/schema/0003_body_html.sql"
 )
 target_include_directories(fc_cache PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_cache

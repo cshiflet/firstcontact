@@ -45,6 +45,7 @@ fc::Message rowToMessage(const QSqlQuery& q) {
     m.subject         = q.value(QStringLiteral("subject")).toString();
     m.snippet         = q.value(QStringLiteral("snippet")).toString();
     m.bodyText        = q.value(QStringLiteral("body_text")).toString();
+    m.bodyHtml        = q.value(QStringLiteral("body_html")).toString();
     m.bodyHtmlPresent = q.value(QStringLiteral("body_html_present")).toBool();
     m.isUnread        = q.value(QStringLiteral("is_unread")).toBool();
     m.isStarred       = q.value(QStringLiteral("is_starred")).toBool();
@@ -122,13 +123,13 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
         "INSERT INTO messages(id, thread_id, history_id, internal_date, "
         "  size_estimate, from_addr, from_name, to_addrs, cc_addrs, bcc_addrs, "
         "  reply_to, subject, snippet, is_unread, is_starred, is_important, "
-        "  has_attachment, body_text, body_html_present, fetched_format, "
-        "  bytes_cached, last_accessed_at, created_at) "
+        "  has_attachment, body_text, body_html, body_html_present, "
+        "  fetched_format, bytes_cached, last_accessed_at, created_at) "
         "VALUES(:id, :thread_id, :history_id, :internal_date, :size_estimate, "
         "  :from_addr, :from_name, :to_addrs, :cc_addrs, :bcc_addrs, :reply_to, "
         "  :subject, :snippet, :is_unread, :is_starred, :is_important, "
-        "  :has_attachment, :body_text, :body_html_present, :fetched_format, "
-        "  :bytes_cached, :last_accessed_at, :created_at) "
+        "  :has_attachment, :body_text, :body_html, :body_html_present, "
+        "  :fetched_format, :bytes_cached, :last_accessed_at, :created_at) "
         "ON CONFLICT(id) DO UPDATE SET "
         "  history_id     = excluded.history_id, "
         "  internal_date  = excluded.internal_date, "
@@ -145,6 +146,7 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
         "  is_important   = excluded.is_important, "
         "  has_attachment = excluded.has_attachment, "
         "  body_text      = COALESCE(NULLIF(excluded.body_text, ''), messages.body_text), "
+        "  body_html      = COALESCE(NULLIF(excluded.body_html, ''), messages.body_html), "
         "  body_html_present = excluded.body_html_present, "
         "  fetched_format = excluded.fetched_format"));
 
@@ -168,11 +170,13 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
     q.bindValue(QStringLiteral(":is_important"),      m.isImportant ? 1 : 0);
     q.bindValue(QStringLiteral(":has_attachment"),    m.hasAttachment ? 1 : 0);
     q.bindValue(QStringLiteral(":body_text"),         m.bodyText);
+    q.bindValue(QStringLiteral(":body_html"),         m.bodyHtml);
     q.bindValue(QStringLiteral(":body_html_present"), m.bodyHtmlPresent ? 1 : 0);
     q.bindValue(QStringLiteral(":fetched_format"),
                 m.bodyText.isEmpty() ? QStringLiteral("metadata")
                                      : QStringLiteral("full"));
-    q.bindValue(QStringLiteral(":bytes_cached"), m.bodyText.size());
+    q.bindValue(QStringLiteral(":bytes_cached"),
+                m.bodyText.size() + m.bodyHtml.size());
     q.bindValue(QStringLiteral(":last_accessed_at"), now);
     q.bindValue(QStringLiteral(":created_at"),       now);
 

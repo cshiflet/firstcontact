@@ -64,11 +64,9 @@ bool wslHasWindowsInterop() {
 bool launchBrowser(const QUrl& url) {
     const QString u = url.toString();
 
-    // Verbose, diagnostic logging at every step. Browser launching on Linux
-    // (especially under WSL2) has so many failure modes — missing xdg-utils,
-    // snap-confined Firefox, no DISPLAY, MIME default not set — that the
-    // single "launched via X" line we used to print wasn't enough to
-    // root-cause the silent-no-browser case. Now we log every strategy.
+    // tryRun: fork-and-forget. Used for direct browser names where we
+    // don't care about exit code; the browser process keeps running long
+    // after our forked launcher returns.
     auto tryRun = [&](const QString& label, const QString& exe,
                       const QStringList& args) {
         const QString resolved = QStandardPaths::findExecutable(exe);
@@ -86,6 +84,33 @@ bool launchBrowser(const QUrl& url) {
         qInfo("util::launchBrowser: launched via '%s' (%s, pid=%lld)",
               qUtf8Printable(label), qUtf8Printable(resolved), pid);
         return true;
+    };
+
+    // tryRunSync: launches synchronously and inspects the exit code. Used
+    // for indirection-layer launchers (xdg-open, sensible-browser, gio
+    // open) where the process exits as soon as it has dispatched the URL
+    // — a non-zero code is the only honest signal that it failed. With
+    // tryRun (startDetached) we'd see "succeeded" even when xdg-open
+    // returns exit 4 ("no application found"), since the fork itself
+    // completed. Capped at 10 s; xdg-open typically exits in well under
+    // 100 ms either way.
+    auto tryRunSync = [&](const QString& label, const QString& exe,
+                          const QStringList& args) {
+        const QString resolved = QStandardPaths::findExecutable(exe);
+        if (resolved.isEmpty()) {
+            qInfo("util::launchBrowser: skip '%s' — '%s' not on PATH",
+                  qUtf8Printable(label), qUtf8Printable(exe));
+            return false;
+        }
+        const int rc = QProcess::execute(exe, args);
+        if (rc == 0) {
+            qInfo("util::launchBrowser: launched via '%s' (%s, exit 0)",
+                  qUtf8Printable(label), qUtf8Printable(resolved));
+            return true;
+        }
+        qInfo("util::launchBrowser: '%s' (%s) returned exit %d — trying next",
+              qUtf8Printable(label), qUtf8Printable(resolved), rc);
+        return false;
     };
 
     static const QStringList kKnownBrowsers = {
@@ -118,12 +143,19 @@ bool launchBrowser(const QUrl& url) {
                        {"-NoProfile", "-Command",
                         QStringLiteral("Start-Process '%1'").arg(u)})) return true;
         }
-        // On WSL we deliberately skip QDesktopServices / xdg-open / gio / etc.
-        // below: every one of them ends up calling wslview, which already
-        // failed (or was skipped) above — and worse, xdg-open returns its
-        // failure as a non-zero EXIT code that QProcess::startDetached can't
-        // observe, so we'd falsely report success and never try the Linux
-        // browser names.
+        // On WSL the xdg-open / gio / etc. layer typically delegates to
+        // wslview — but if the user has installed a Linux browser AND
+        // configured xdg-mime to point at it (or wslview was uninstalled),
+        // xdg-open will hand the URL to that browser directly. Try it,
+        // but synchronously so we can see the exit code: xdg-open returns
+        // 4 when no application is found, which startDetached would
+        // happily report as "launched". Same logic for sensible-browser
+        // and gio open — all are layered launchers that exit quickly with
+        // a real status.
+        if (tryRunSync("xdg-open",         "xdg-open",         {u})) return true;
+        if (tryRunSync("sensible-browser", "sensible-browser", {u})) return true;
+        if (tryRunSync("gio open",         "gio",              {"open", u})) return true;
+
         if (!browserEnv.isEmpty()
             && tryRun("$BROWSER", browserEnv, {u})) return true;
         for (const QString& exe : kKnownBrowsers) {

@@ -101,6 +101,10 @@ void Migrations::run(QSqlDatabase& db) {
         execAll(db, readResource(QStringLiteral(":/schema/0002_fts.sql")));
         setSchemaVersion(db, 2);
     }
+    if (v < 3) {
+        execAll(db, readResource(QStringLiteral(":/schema/0003_body_html.sql")));
+        setSchemaVersion(db, 3);
+    }
 }
 
 }  // namespace fc::cache
