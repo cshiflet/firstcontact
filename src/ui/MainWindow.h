@@ -59,9 +59,12 @@ private slots:
     void onToggleStar();
     void onToggleStarFor(const QString& messageId);
     void onArchiveCurrent();
+    void onDeleteCurrent();
     void onDownloadAttachment(const QString& messageId,
                               const QString& attachmentId,
-                              const QString& filename);
+                              const QString& filename,
+                              bool forceSaveAs);
+    void onDownloadAllAttachments(const QString& messageId);
 
     void reloadCurrentLabel();
     void reloadSidebar();

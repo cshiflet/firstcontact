@@ -30,6 +30,23 @@ public:
     // names are set explicitly in that path so the lookup hits the same
     // .conf file).
     static const char* htmlPreviewKey();
+
+    // Attachment download settings ---------------------------------------
+
+    // Folder where attachments land when the user takes the default action
+    // (left-click on an attachment chip with "always ask" off, or "Download
+    // all"). Empty string means "use the platform default Downloads folder
+    // resolved via QStandardPaths". Returned value is always non-empty —
+    // unset / blank stored values are resolved to the platform default.
+    static QString attachmentDir();
+    static void    setAttachmentDir(const QString& dir);
+
+    // When true, every save action — including left-clicks and "Download
+    // all" — pops a file picker so the user can confirm the destination
+    // and rename the file. When false, left-click goes straight to
+    // attachmentDir() with collision-safe naming.
+    static bool alwaysAskAttachmentLocation();
+    static void setAlwaysAskAttachmentLocation(bool ask);
 };
 
 }  // namespace fc::ui

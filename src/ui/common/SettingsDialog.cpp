@@ -3,10 +3,14 @@
 #include "Preferences.h"
 #include "Theme.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFileDialog>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -76,6 +80,52 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     htmlHint->setTextFormat(Qt::RichText);
     htmlForm->addRow(QString(), htmlHint);
     root->addLayout(htmlForm);
+
+    // ---------------------------------------------------------- Attachments
+    auto* attachTitle = new QLabel(
+        tr("<h3 style='margin:0'>Attachments</h3>"), this);
+    attachTitle->setTextFormat(Qt::RichText);
+    root->addWidget(attachTitle);
+
+    auto* attachForm = new QFormLayout;
+
+    // Default download directory: read-only field + Browse… button.
+    auto* dirRow   = new QHBoxLayout;
+    auto* dirEdit  = new QLineEdit(Preferences::attachmentDir(), this);
+    dirEdit->setReadOnly(true);
+    auto* browseBtn = new QPushButton(tr("Browse…"), this);
+    dirRow->addWidget(dirEdit, /*stretch=*/1);
+    dirRow->addWidget(browseBtn);
+    attachForm->addRow(tr("Save folder:"), dirRow);
+
+    connect(browseBtn, &QPushButton::clicked, this, [this, dirEdit] {
+        const QString picked = QFileDialog::getExistingDirectory(
+            this, tr("Choose default download folder"),
+            Preferences::attachmentDir());
+        if (picked.isEmpty()) return;
+        Preferences::setAttachmentDir(picked);
+        dirEdit->setText(picked);
+    });
+
+    auto* askBox = new QCheckBox(
+        tr("Ask me where to save every time (overrides the folder above)"),
+        this);
+    askBox->setChecked(Preferences::alwaysAskAttachmentLocation());
+    connect(askBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setAlwaysAskAttachmentLocation(on);
+    });
+    attachForm->addRow(QString(), askBox);
+
+    auto* attachHint = new QLabel(tr(
+        "Left-click an attachment chip to download to the folder above. "
+        "Right-click for <b>Save as…</b> at any time. With <i>ask every "
+        "time</i> turned on, every download (including <b>Download all</b>) "
+        "asks for the destination first."), this);
+    attachHint->setObjectName(QStringLiteral("FormHint"));
+    attachHint->setWordWrap(true);
+    attachHint->setTextFormat(Qt::RichText);
+    attachForm->addRow(QString(), attachHint);
+    root->addLayout(attachForm);
 
     root->addStretch(1);
 

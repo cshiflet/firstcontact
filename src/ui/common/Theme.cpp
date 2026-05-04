@@ -110,13 +110,52 @@ void Theme::apply(Mode mode) {
     // what QTextBrowser / QLabel use for <a href> anchor color when no
     // inline `color:` style is set; Fusion's default is a dark blue that's
     // unreadable against our dark surfaces.
+    //
+    // QPalette::{WindowText,Text,ButtonText} matter for IconLoader::themed —
+    // the toolbar / sidebar / message-list icons re-tint their SVG to that
+    // colour, so without setting it explicitly we'd render black-on-dark
+    // icons in dark mode (Fusion's default is black regardless of stylesheet).
     QPalette pal = QApplication::palette();
     if (resolved == Mode::Dark) {
-        pal.setColor(QPalette::Link,        QColor(QStringLiteral("#8ab4f8")));
-        pal.setColor(QPalette::LinkVisited, QColor(QStringLiteral("#c58af9")));
+        const QColor fg(QStringLiteral("#e8eaed"));
+        const QColor fgDim(QStringLiteral("#9aa0a6"));
+        const QColor bg(QStringLiteral("#1a1a1a"));
+        const QColor bgAlt(QStringLiteral("#232323"));
+        pal.setColor(QPalette::WindowText,        fg);
+        pal.setColor(QPalette::Text,              fg);
+        pal.setColor(QPalette::ButtonText,        fg);
+        pal.setColor(QPalette::ToolTipText,       fg);
+        pal.setColor(QPalette::PlaceholderText,   fgDim);
+        pal.setColor(QPalette::Window,            bg);
+        pal.setColor(QPalette::Base,              bgAlt);
+        pal.setColor(QPalette::AlternateBase,     bg);
+        pal.setColor(QPalette::Button,            bgAlt);
+        pal.setColor(QPalette::ToolTipBase,       bgAlt);
+        pal.setColor(QPalette::Disabled, QPalette::WindowText, fgDim);
+        pal.setColor(QPalette::Disabled, QPalette::Text,       fgDim);
+        pal.setColor(QPalette::Disabled, QPalette::ButtonText, fgDim);
+        pal.setColor(QPalette::Link,              QColor(QStringLiteral("#8ab4f8")));
+        pal.setColor(QPalette::LinkVisited,       QColor(QStringLiteral("#c58af9")));
     } else {
-        pal.setColor(QPalette::Link,        QColor(QStringLiteral("#1a73e8")));
-        pal.setColor(QPalette::LinkVisited, QColor(QStringLiteral("#7c4dff")));
+        const QColor fg(QStringLiteral("#202124"));
+        const QColor fgDim(QStringLiteral("#5f6368"));
+        const QColor bg(QStringLiteral("#ffffff"));
+        const QColor bgAlt(QStringLiteral("#f5f6f7"));
+        pal.setColor(QPalette::WindowText,        fg);
+        pal.setColor(QPalette::Text,              fg);
+        pal.setColor(QPalette::ButtonText,        fg);
+        pal.setColor(QPalette::ToolTipText,       fg);
+        pal.setColor(QPalette::PlaceholderText,   fgDim);
+        pal.setColor(QPalette::Window,            bg);
+        pal.setColor(QPalette::Base,              bg);
+        pal.setColor(QPalette::AlternateBase,     bgAlt);
+        pal.setColor(QPalette::Button,            bgAlt);
+        pal.setColor(QPalette::ToolTipBase,       bg);
+        pal.setColor(QPalette::Disabled, QPalette::WindowText, fgDim);
+        pal.setColor(QPalette::Disabled, QPalette::Text,       fgDim);
+        pal.setColor(QPalette::Disabled, QPalette::ButtonText, fgDim);
+        pal.setColor(QPalette::Link,              QColor(QStringLiteral("#1a73e8")));
+        pal.setColor(QPalette::LinkVisited,       QColor(QStringLiteral("#7c4dff")));
     }
     QApplication::setPalette(pal);
 

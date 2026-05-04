@@ -1,5 +1,6 @@
 #include "MessageItemDelegate.h"
 
+#include "ui/common/IconLoader.h"
 #include "models/MessageListModel.h"
 
 #include <QApplication>
@@ -179,10 +180,14 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     p->setPen(unread ? accent : secondary);
     p->drawText(dateRect, Qt::AlignVCenter | Qt::AlignRight, formatDate(date));
 
-    // Attachment icon: bottom-right of the row, just left of where the date sat.
+    // Attachment icon: bottom-right of the row, just left of where the date
+    // sat. Tint to the row's secondary text colour rather than the SVG's
+    // built-in stroke — without this the icon renders black in dark mode
+    // because QIcon caches the SVG as a pixmap with no theme-awareness.
     int rightCursor = rightEdge;
     if (hasAttach) {
-        QIcon icon(QStringLiteral(":/icons/symbolic/paperclip.svg"));
+        const QIcon icon = IconLoader::tinted(
+            QStringLiteral("paperclip.svg"), secondary);
         const int y = inner.bottom() - kAttachmentIconSize;
         const QRect ir(rightEdge - kAttachmentIconSize, y,
                        kAttachmentIconSize, kAttachmentIconSize);

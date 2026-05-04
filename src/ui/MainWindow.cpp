@@ -11,6 +11,7 @@
 #include "cache/OutboxRepository.h"
 #include "cache/PendingOpsRepository.h"
 #include "common/IconLoader.h"
+#include "common/Preferences.h"
 #include "common/SettingsDialog.h"
 #include "common/Shortcuts.h"
 #include "common/Theme.h"
@@ -37,6 +38,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -150,6 +152,7 @@ void MainWindow::buildToolBar() {
     auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"));
     auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"));
     auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"));
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"));
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -172,6 +175,7 @@ void MainWindow::buildToolBar() {
     connect(reply,      &QAction::triggered, this, &MainWindow::onReplyCurrent);
     connect(replyAll,   &QAction::triggered, this, &MainWindow::onReplyAllCurrent);
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
+    connect(trash,      &QAction::triggered, this, &MainWindow::onDeleteCurrent);
     connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
     connect(signOut,    &QAction::triggered, this, &MainWindow::onSignOut);
     connect(quit,       &QAction::triggered, qApp, &QApplication::quit);
@@ -202,6 +206,8 @@ void MainWindow::wireSignals() {
 
     connect(reader_, &ReaderPane::downloadAttachmentRequested,
             this,    &MainWindow::onDownloadAttachment);
+    connect(reader_, &ReaderPane::downloadAllRequested,
+            this,    &MainWindow::onDownloadAllAttachments);
 
     connect(sidebar_, &SidebarWidget::labelSelected,
             this,     &MainWindow::onLabelSelected);
@@ -352,6 +358,7 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::replyAllToCurrent, this, &MainWindow::onReplyAllCurrent);
     connect(shortcuts_, &Shortcuts::forwardCurrent,    this, &MainWindow::onForwardCurrent);
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
+    connect(shortcuts_, &Shortcuts::deleteCurrent,  this, &MainWindow::onDeleteCurrent);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
         const int n = listModel_->rowCount();
@@ -688,9 +695,53 @@ void MainWindow::onToggleStarFor(const QString& messageId) {
     reloadCurrentLabel();
 }
 
+namespace {
+
+// Returns a path under `dir` for `filename` that doesn't already exist,
+// inserting " (1)", " (2)", … before the suffix as needed. Used by the
+// non-picker download paths so we never silently overwrite an existing
+// file the user may still need.
+QString uniqueTargetPath(const QString& dir, const QString& filename) {
+    const QString safe = filename.isEmpty()
+        ? QStringLiteral("attachment.bin")
+        : QFileInfo(filename).fileName();
+    QString target = dir + QLatin1Char('/') + safe;
+    for (int i = 1; QFileInfo::exists(target) && i < 1000; ++i) {
+        const QFileInfo fi(safe);
+        target = QStringLiteral("%1/%2 (%3)%4%5")
+            .arg(dir,
+                 fi.completeBaseName(),
+                 QString::number(i),
+                 fi.suffix().isEmpty() ? QString() : QStringLiteral("."),
+                 fi.suffix());
+    }
+    return target;
+}
+
+// Writes bytes to absolute path. Returns true on full write. Caller is
+// responsible for surfacing the error path.
+bool writeBytesToPath(const QString& path, const QByteArray& bytes,
+                      QString* errOut) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+    const auto written = f.write(bytes);
+    f.close();
+    if (written != bytes.size()) {
+        if (errOut) *errOut = QObject::tr("short write");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 void MainWindow::onDownloadAttachment(const QString& messageId,
                                       const QString& attachmentId,
-                                      const QString& filename) {
+                                      const QString& filename,
+                                      bool forceSaveAs) {
     if (messageId.isEmpty() || attachmentId.isEmpty()) {
         statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
         return;
@@ -701,64 +752,142 @@ void MainWindow::onDownloadAttachment(const QString& messageId,
         return;
     }
 
+    // Resolve the destination NOW (synchronously, before the network call)
+    // so the file picker is a direct response to the user's gesture.
+    // Showing it inside the gmail_->getAttachment callback would feel
+    // disconnected — by the time bytes arrive, the user has moved on.
+    const bool ask = forceSaveAs || Preferences::alwaysAskAttachmentLocation();
+    QString target;
+    if (ask) {
+        const QString suggested = Preferences::attachmentDir()
+            + QLatin1Char('/')
+            + (filename.isEmpty() ? QStringLiteral("attachment.bin")
+                                  : QFileInfo(filename).fileName());
+        target = QFileDialog::getSaveFileName(
+            this, tr("Save attachment"), suggested);
+        if (target.isEmpty()) {
+            statusBar()->showMessage(tr("Download cancelled."), 3000);
+            return;
+        }
+    } else {
+        const QString dir = Preferences::attachmentDir();
+        QDir().mkpath(dir);
+        target = uniqueTargetPath(dir, filename);
+    }
+
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
     QPointer<MainWindow> self(this);
     gmail_->getAttachment(messageId, attachmentId,
-        [self, messageId, attachmentId, filename](
-                QByteArray bytes, fc::api::ApiError err) {
+        [self, attachmentId, target](QByteArray bytes, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 self->statusBar()->showMessage(
                     tr("Download failed: %1").arg(err.message), 8000);
                 return;
             }
-
-            // Pick a destination in ~/Downloads (or the platform equivalent).
-            // QStandardPaths returns an empty string in unusual environments
-            // (e.g. some CI containers); fall back to home in that case
-            // rather than dumping into the cwd.
-            QString dir = QStandardPaths::writableLocation(
-                              QStandardPaths::DownloadLocation);
-            if (dir.isEmpty()) dir = QDir::homePath();
-            QDir().mkpath(dir);
-
-            // Resolve filename collisions by appending " (n)" before the
-            // extension. Don't overwrite — the user might be downloading a
-            // newer copy of an older attachment with the same name.
-            QString safe = filename.isEmpty()
-                ? QStringLiteral("attachment.bin")
-                : QFileInfo(filename).fileName();
-            QString target = dir + QLatin1Char('/') + safe;
-            for (int i = 1; QFileInfo::exists(target) && i < 1000; ++i) {
-                const QFileInfo fi(safe);
-                target = QStringLiteral("%1/%2 (%3)%4%5")
-                    .arg(dir,
-                         fi.completeBaseName(),
-                         QString::number(i),
-                         fi.suffix().isEmpty() ? QString()
-                                               : QStringLiteral("."),
-                         fi.suffix());
-            }
-
-            QFile f(target);
-            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QString writeErr;
+            if (!writeBytesToPath(target, bytes, &writeErr)) {
                 self->statusBar()->showMessage(
-                    tr("Couldn't write %1: %2").arg(target, f.errorString()),
-                    8000);
+                    tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
                 return;
             }
-            const auto written = f.write(bytes);
-            f.close();
-            if (written != bytes.size()) {
-                self->statusBar()->showMessage(
-                    tr("Short write to %1").arg(target), 8000);
-                return;
-            }
-
             fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
             self->statusBar()->showMessage(tr("Saved to %1").arg(target), 8000);
             QDesktopServices::openUrl(QUrl::fromLocalFile(target));
         });
+}
+
+void MainWindow::onDownloadAllAttachments(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (!auth_->isAuthorized()) {
+        statusBar()->showMessage(
+            tr("Sign in to download attachments."), 5000);
+        return;
+    }
+
+    const auto m = fc::cache::MessageRepository::byId(messageId);
+    if (m.attachments.empty()) {
+        statusBar()->showMessage(tr("No attachments on this message."), 4000);
+        return;
+    }
+
+    // For "Download all" the natural unit is a folder, not a per-file picker
+    // (asking N times in a row is hostile UX). When always-ask is on, ask
+    // once for a folder; otherwise use the configured default. Each file
+    // gets uniqueTargetPath collision handling within that folder.
+    QString dir;
+    if (Preferences::alwaysAskAttachmentLocation()) {
+        dir = QFileDialog::getExistingDirectory(
+            this, tr("Save all attachments to folder"),
+            Preferences::attachmentDir());
+        if (dir.isEmpty()) {
+            statusBar()->showMessage(tr("Download cancelled."), 3000);
+            return;
+        }
+    } else {
+        dir = Preferences::attachmentDir();
+    }
+    QDir().mkpath(dir);
+
+    int kicked = 0;
+    QPointer<MainWindow> self(this);
+    for (const auto& a : m.attachments) {
+        if (a.id.isEmpty()) continue;   // inline-only; not addressable
+        const QString target = uniqueTargetPath(dir, a.filename);
+        const QString attachmentId = a.id;
+        const QString filename     = a.filename;
+        gmail_->getAttachment(messageId, attachmentId,
+            [self, attachmentId, target, filename](
+                    QByteArray bytes, fc::api::ApiError err) {
+                if (!self) return;
+                if (err) {
+                    self->statusBar()->showMessage(
+                        tr("Download failed (%1): %2").arg(filename, err.message),
+                        8000);
+                    return;
+                }
+                QString writeErr;
+                if (!writeBytesToPath(target, bytes, &writeErr)) {
+                    self->statusBar()->showMessage(
+                        tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
+                    return;
+                }
+                fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
+                self->statusBar()->showMessage(
+                    tr("Saved %1").arg(QFileInfo(target).fileName()), 4000);
+            });
+        ++kicked;
+    }
+
+    if (kicked == 0) {
+        statusBar()->showMessage(
+            tr("No downloadable attachments on this message."), 4000);
+    } else {
+        statusBar()->showMessage(
+            tr("Downloading %1 attachments to %2…").arg(kicked).arg(dir));
+    }
+}
+
+void MainWindow::onDeleteCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (QMessageBox::question(this, tr("Move to Trash"),
+            tr("Move this message to Trash?"),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    // Gmail's "trash" is a label transition: drop INBOX (and any system
+    // categories) and add TRASH. The pending-ops worker reconciles via
+    // messages.modify, which Gmail accepts as the canonical move-to-trash
+    // action. We deliberately don't call the dedicated /trash endpoint
+    // because applyLabelDiff already supports the offline-edit path.
+    const QString id = currentMessage_.id;
+    const QStringList add{QStringLiteral("TRASH")};
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(id, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(id, add, rem);
+    pending_->flush();
+    statusBar()->showMessage(tr("Moved to Trash."), 3000);
+    reloadCurrentLabel();
 }
 
 void MainWindow::onArchiveCurrent() {

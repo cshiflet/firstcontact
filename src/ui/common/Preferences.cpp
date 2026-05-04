@@ -1,11 +1,15 @@
 #include "Preferences.h"
 
+#include <QDir>
 #include <QSettings>
+#include <QStandardPaths>
 
 namespace fc::ui {
 
 namespace {
 constexpr char kKey[] = "html/preview";
+constexpr char kAttachmentDirKey[] = "attachments/dir";
+constexpr char kAttachmentAskKey[] = "attachments/alwaysAsk";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -34,6 +38,34 @@ Preferences::HtmlPreview Preferences::htmlPreview() {
 void Preferences::setHtmlPreview(HtmlPreview m) {
     QSettings s;
     s.setValue(QLatin1String(kKey), htmlPreviewToString(m));
+    s.sync();
+}
+
+QString Preferences::attachmentDir() {
+    QSettings s;
+    QString stored = s.value(QLatin1String(kAttachmentDirKey)).toString().trimmed();
+    if (stored.isEmpty()) {
+        stored = QStandardPaths::writableLocation(
+                     QStandardPaths::DownloadLocation);
+    }
+    if (stored.isEmpty()) stored = QDir::homePath();
+    return stored;
+}
+
+void Preferences::setAttachmentDir(const QString& dir) {
+    QSettings s;
+    s.setValue(QLatin1String(kAttachmentDirKey), dir);
+    s.sync();
+}
+
+bool Preferences::alwaysAskAttachmentLocation() {
+    QSettings s;
+    return s.value(QLatin1String(kAttachmentAskKey), false).toBool();
+}
+
+void Preferences::setAlwaysAskAttachmentLocation(bool ask) {
+    QSettings s;
+    s.setValue(QLatin1String(kAttachmentAskKey), ask);
     s.sync();
 }
 

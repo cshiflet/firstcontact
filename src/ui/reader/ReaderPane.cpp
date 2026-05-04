@@ -3,6 +3,7 @@
 #include "HtmlRenderHostLoader.h"
 #include "IHtmlRenderHost.h"
 #include "LocalHtmlServer.h"
+#include "ui/common/IconLoader.h"
 #include "ui/common/Preferences.h"
 #include "ui/common/Theme.h"
 #include "util/Browser.h"
@@ -10,11 +11,13 @@
 #include "util/Html2Text.h"
 #include "util/Linkify.h"
 
+#include <QAction>
 #include <QDateTime>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
@@ -259,6 +262,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     if (initiallyExpanded && !m.attachments.empty()) {
         auto* attachRow = new QHBoxLayout;
         attachRow->setSpacing(6);
+
+        // Count downloadable attachments — the "Download all" button only
+        // makes sense when at least two are real attachmentId-backed parts.
+        int downloadable = 0;
+        for (const auto& a : m.attachments) if (!a.id.isEmpty()) ++downloadable;
+
         for (const auto& a : m.attachments) {
             const QString sizeStr = humanSize(a.size);
             QString label = a.filename.isEmpty()
@@ -266,13 +275,19 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                 : a.filename;
             if (!sizeStr.isEmpty()) label += QStringLiteral("  ·  ") + sizeStr;
 
+            // IconLoader::themed re-renders the SVG in the active theme's
+            // foreground colour; otherwise the icon is invisible black-
+            // on-dark in dark mode.
             auto* chip = new QPushButton(
-                QIcon(QStringLiteral(":/icons/symbolic/paperclip.svg")),
+                IconLoader::themed(QStringLiteral("paperclip.svg")),
                 label, card);
             chip->setObjectName(QStringLiteral("attachmentChip"));
             chip->setCursor(Qt::PointingHandCursor);
-            chip->setToolTip(QObject::tr("Download %1 (%2)")
-                                .arg(a.filename, a.mimeType));
+            chip->setToolTip(QObject::tr("Download %1 (%2) — right-click for "
+                                          "Save as").arg(a.filename, a.mimeType));
+            // Right-click context menu: Save as… (forces a picker even when
+            // "always ask" is off).
+            chip->setContextMenuPolicy(Qt::CustomContextMenu);
             // Inline parts (signature images, embedded chains) come back from
             // Gmail with body.attachmentId blank — only the message-level
             // attachmentId is downloadable. Disable the chip in that case
@@ -283,10 +298,38 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
             const QString filename     = a.filename;
             QObject::connect(chip, &QPushButton::clicked, this,
                 [this, messageId, attachmentId, filename]() {
-                    emit downloadAttachmentRequested(messageId, attachmentId, filename);
+                    emit downloadAttachmentRequested(
+                        messageId, attachmentId, filename,
+                        /*forceSaveAs=*/false);
+                });
+            QObject::connect(chip, &QWidget::customContextMenuRequested, this,
+                [this, chip, messageId, attachmentId, filename](const QPoint& pos) {
+                    if (attachmentId.isEmpty()) return;
+                    QMenu menu(chip);
+                    auto* saveAs = menu.addAction(QObject::tr("Save as…"));
+                    QObject::connect(saveAs, &QAction::triggered, this,
+                        [this, messageId, attachmentId, filename]() {
+                            emit downloadAttachmentRequested(
+                                messageId, attachmentId, filename,
+                                /*forceSaveAs=*/true);
+                        });
+                    menu.exec(chip->mapToGlobal(pos));
                 });
             attachRow->addWidget(chip);
         }
+
+        if (downloadable >= 2) {
+            auto* allBtn = new QPushButton(
+                IconLoader::themed(QStringLiteral("paperclip.svg")),
+                QObject::tr("Download all"), card);
+            allBtn->setObjectName(QStringLiteral("attachmentChip"));
+            allBtn->setCursor(Qt::PointingHandCursor);
+            const QString messageId = m.id;
+            QObject::connect(allBtn, &QPushButton::clicked, this,
+                [this, messageId]() { emit downloadAllRequested(messageId); });
+            attachRow->addWidget(allBtn);
+        }
+
         attachRow->addStretch(1);
         cardLayout->addLayout(attachRow);
     }
