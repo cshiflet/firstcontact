@@ -38,7 +38,14 @@ namespace fc::ui {
 class LocalHtmlServer : public QObject {
     Q_OBJECT
 public:
-    explicit LocalHtmlServer(const QByteArray& html, QObject* parent = nullptr);
+    // allowRemoteImages widens the served Content-Security-Policy so the
+    // browser may fetch http(s) image URLs in the email body. Scripts,
+    // iframes, fonts, and beacons stay blocked either way; this is
+    // strictly an "I trust this sender's images" knob, equivalent to the
+    // "Show images" affordance in Gmail web. Default off.
+    explicit LocalHtmlServer(const QByteArray& html,
+                              bool allowRemoteImages = false,
+                              QObject* parent = nullptr);
 
     // Binds the loopback socket. Returns false on bind failure.
     bool start();
@@ -55,11 +62,12 @@ private slots:
     void onNewConnection();
 
 private:
-    QTcpServer* server_      = nullptr;
+    QTcpServer* server_            = nullptr;
     QByteArray  html_;
     QString     token_;
-    QTimer*     lifetime_    = nullptr;
-    bool        firstServed_ = false;
+    QTimer*     lifetime_          = nullptr;
+    bool        firstServed_       = false;
+    bool        allowRemoteImages_ = false;
 };
 
 }  // namespace fc::ui

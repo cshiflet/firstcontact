@@ -73,8 +73,13 @@ void sendAndClose(QTcpSocket* sock, const QByteArray& response,
 
 }  // namespace
 
-LocalHtmlServer::LocalHtmlServer(const QByteArray& html, QObject* parent)
-    : QObject(parent), html_(html), token_(makeToken()) {
+LocalHtmlServer::LocalHtmlServer(const QByteArray& html,
+                                  bool allowRemoteImages,
+                                  QObject* parent)
+    : QObject(parent),
+      html_(html),
+      token_(makeToken()),
+      allowRemoteImages_(allowRemoteImages) {
     server_ = new QTcpServer(this);
     connect(server_, &QTcpServer::newConnection,
             this,    &LocalHtmlServer::onNewConnection);
@@ -170,10 +175,18 @@ void LocalHtmlServer::onNewConnection() {
                 return;
             }
 
+            // CSP: scripts / iframes / forms / beacons stay locked down
+            // regardless. The only thing allowRemoteImages_ widens is
+            // img-src — equivalent to Gmail web's "Show images" toggle.
+            const char* imgSrc = allowRemoteImages_
+                ? "data: blob: https: http:"
+                : "data: blob:";
             QByteArray extra;
-            extra.append("Content-Security-Policy: default-src 'none'; "
-                         "img-src data: blob:; "
-                         "style-src 'unsafe-inline'; "
+            extra.append("Content-Security-Policy: default-src 'none'; ");
+            extra.append("img-src ");
+            extra.append(imgSrc);
+            extra.append("; ");
+            extra.append("style-src 'unsafe-inline'; "
                          "font-src data:; "
                          "base-uri 'none'; "
                          "form-action 'none'; "

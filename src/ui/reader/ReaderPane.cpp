@@ -302,6 +302,86 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     }
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
+
+    // "Open in browser" rows. We render TWO copies — one above the body
+    // and one below — so the link is reachable without scrolling whether
+    // the email is short and the user wants to dismiss it quickly, or
+    // long and the user has scrolled down to the bottom. Each row carries
+    // two buttons:
+    //   - "Open in browser"          (strict CSP, no remote loads)
+    //   - "Open with images"         (CSP widened to img-src: http(s);
+    //                                  scripts / iframes / forms still off)
+    // Both share LocalHtmlServer holders captured by the lambdas so a
+    // re-click reuses the same server / URL token.
+    const auto previewMode = Preferences::htmlPreview();
+    const bool offerBrowserButtons =
+        initiallyExpanded
+        && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
+        && previewMode != Preferences::HtmlPreview::Disabled;
+    auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
+    auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
+    auto htmlForServer = m.bodyHtml.isEmpty()
+        ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
+        : m.bodyHtml;
+
+    auto buildBrowserRow = [&]() -> QHBoxLayout* {
+        auto* row = new QHBoxLayout;
+        row->addStretch(1);
+
+        auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), card);
+        strictBtn->setObjectName(QStringLiteral("link"));
+        strictBtn->setCursor(Qt::PointingHandCursor);
+        strictBtn->setToolTip(QObject::tr(
+            "Render in your system browser with strict policy "
+            "(no remote images / scripts)."));
+        row->addWidget(strictBtn);
+
+        auto* imagesBtn = new QPushButton(QObject::tr("Open with images"), card);
+        imagesBtn->setObjectName(QStringLiteral("link"));
+        imagesBtn->setCursor(Qt::PointingHandCursor);
+        imagesBtn->setToolTip(QObject::tr(
+            "Render in your system browser and allow remote images "
+            "(scripts / iframes / forms still blocked)."));
+        row->addWidget(imagesBtn);
+
+        // Click handlers reuse the per-mode holder if its server is
+        // still listening; otherwise spin a fresh one.
+        auto makeOpener = [card, htmlForServer]
+            (QPushButton* btn,
+             std::shared_ptr<QPointer<LocalHtmlServer>> holder,
+             bool allowImages) {
+            QObject::connect(btn, &QPushButton::clicked, card,
+                [card, btn, htmlForServer, holder, allowImages]() {
+                    LocalHtmlServer* srv = holder->data();
+                    if (!srv) {
+                        srv = new LocalHtmlServer(htmlForServer.toUtf8(),
+                                                   allowImages, card);
+                        if (!srv->start()) {
+                            btn->setText(QObject::tr("Couldn't start local server"));
+                            srv->deleteLater();
+                            return;
+                        }
+                        *holder = srv;
+                        QObject::connect(srv, &LocalHtmlServer::expired,
+                                         card, [holder] { holder->clear(); });
+                    }
+                    const QUrl u = srv->url();
+                    qInfo("LocalHtmlServer: serving HTML at %s "
+                          "(allowRemoteImages=%s)",
+                          qUtf8Printable(u.toString()),
+                          allowImages ? "true" : "false");
+                    fc::util::launchBrowser(u);
+                });
+        };
+        makeOpener(strictBtn, srvHolderStrict, /*allowImages=*/false);
+        makeOpener(imagesBtn, srvHolderImages, /*allowImages=*/true);
+        return row;
+    };
+
+    if (offerBrowserButtons) {
+        cardLayout->addLayout(buildBrowserRow());
+    }
+
     // No vertical stretch: AutoSizeTextBrowser reports the exact height
     // the document needs, so giving it stretch=1 would just stretch it
     // past content and re-introduce the empty-box problem.
@@ -390,57 +470,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         cardLayout->addLayout(attachRow);
     }
 
-    // Offer "Open in browser" when the message has HTML and the user
-    // hasn't disabled the feature. The inline WebEngine path was
-    // dropped — see commit message — leaving a single, simpler
-    // external-browser handoff via LocalHtmlServer.
-    const auto previewMode = Preferences::htmlPreview();
-    if (initiallyExpanded
-        && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
-        && previewMode != Preferences::HtmlPreview::Disabled) {
-        auto* row = new QHBoxLayout;
-        row->addStretch(1);
-        auto* webBtn = new QPushButton(tr("Open in browser"), card);
-        webBtn->setObjectName(QStringLiteral("link"));
-        webBtn->setCursor(Qt::PointingHandCursor);
-        row->addWidget(webBtn);
-        cardLayout->addLayout(row);
-
-        const QString html = m.bodyHtml.isEmpty()
-            ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
-            : m.bodyHtml;
-
-        // Holder for the LocalHtmlServer that survives across button clicks.
-        // shared_ptr<QPointer<...>> so the lambda captures by value but
-        // assignments are visible across invocations; QPointer auto-clears
-        // when the QObject is destroyed (deleteLater on expiry).
-        auto srvHolder = std::make_shared<QPointer<LocalHtmlServer>>();
-
-        QObject::connect(webBtn, &QPushButton::clicked, card,
-            [card, webBtn, html, srvHolder]() {
-                // Reuse the prior server if it's still listening — same
-                // URL/token still serves the same HTML — so the user
-                // can close the browser and click again to re-open
-                // without waiting for the lifetime timer to recycle it.
-                LocalHtmlServer* srv = srvHolder->data();
-                if (!srv) {
-                    srv = new LocalHtmlServer(html.toUtf8(), card);
-                    if (!srv->start()) {
-                        webBtn->setText(QObject::tr("Couldn't start local server"));
-                        srv->deleteLater();
-                        return;
-                    }
-                    *srvHolder = srv;
-                    QObject::connect(srv, &LocalHtmlServer::expired,
-                                     card, [srvHolder] {
-                        srvHolder->clear();
-                    });
-                }
-                const QUrl u = srv->url();
-                qInfo("LocalHtmlServer: serving HTML at %s",
-                      qUtf8Printable(u.toString()));
-                fc::util::launchBrowser(u);
-            });
+    // Mirror of the top-of-card "Open in browser" / "Open with images"
+    // row so the link is reachable when the user is at the bottom of a
+    // long message. Same shared holders → same servers → same URL/token
+    // when re-clicked from either copy.
+    if (offerBrowserButtons) {
+        cardLayout->addLayout(buildBrowserRow());
     }
 
     if (!initiallyExpanded) {
