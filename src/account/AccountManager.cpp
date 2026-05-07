@@ -8,6 +8,7 @@
 #include "sync/SyncService.h"
 
 #include <QDateTime>
+#include <QFileInfo>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -344,6 +345,88 @@ void AccountManager::setAccentColor(const QString& id,
     }
     q.bindValue(QStringLiteral(":id"), id);
     if (q.exec()) reload();
+}
+
+qint64 AccountManager::cacheSizeFor(const QString& id) const {
+    if (id.isEmpty()) return 0;
+    auto db = fc::cache::databaseHandle();
+
+    qint64 total = 0;
+    {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT COALESCE(SUM(bytes_cached), 0) FROM messages "
+            "WHERE account_id = :a"));
+        q.bindValue(QStringLiteral(":a"), id);
+        if (q.exec() && q.next()) total += q.value(0).toLongLong();
+    }
+    // Attachments — sum of on-disk sizes for downloaded files.
+    {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT local_path FROM attachments "
+            "WHERE account_id = :a AND local_path IS NOT NULL"));
+        q.bindValue(QStringLiteral(":a"), id);
+        if (q.exec()) {
+            while (q.next()) {
+                QFileInfo fi(q.value(0).toString());
+                if (fi.exists()) total += fi.size();
+            }
+        }
+    }
+    return total;
+}
+
+QStringList AccountManager::orphanedAccountIds() const {
+    auto db = fc::cache::databaseHandle();
+    QStringList out;
+    QSqlQuery q(db);
+    // UNION across the per-account child tables, anti-join with
+    // accounts. Any account_id that shows up in cache but not in the
+    // accounts table is orphaned.
+    if (!q.exec(QStringLiteral(
+            "SELECT DISTINCT account_id FROM ("
+            "  SELECT account_id FROM messages    "
+            "  UNION SELECT account_id FROM threads "
+            "  UNION SELECT account_id FROM labels "
+            "  UNION SELECT account_id FROM drafts "
+            "  UNION SELECT account_id FROM outbox "
+            "  UNION SELECT account_id FROM pending_ops "
+            "  UNION SELECT account_id FROM attachments "
+            "  UNION SELECT account_id FROM message_labels "
+            "  UNION SELECT account_id FROM account_meta) AS u "
+            "WHERE account_id NOT IN (SELECT id FROM accounts) "
+            "  AND account_id IS NOT NULL"))) return out;
+    while (q.next()) out << q.value(0).toString();
+    return out;
+}
+
+int AccountManager::dropOrphanedCache() {
+    const auto orphans = orphanedAccountIds();
+    int dropped = 0;
+    for (const auto& id : orphans) {
+        if (dropCache(id)) ++dropped;
+    }
+    return dropped;
+}
+
+int AccountManager::clearMessagesOlderThan(const QString& id, int days) {
+    if (id.isEmpty() || days <= 0) return 0;
+    const qint64 cutoff = QDateTime::currentMSecsSinceEpoch()
+                        - qint64(days) * 24 * 60 * 60 * 1000LL;
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "DELETE FROM messages "
+        "WHERE account_id = :a AND internal_date < :c"));
+    q.bindValue(QStringLiteral(":a"), id);
+    q.bindValue(QStringLiteral(":c"), cutoff);
+    if (!q.exec()) {
+        qWarning("clearMessagesOlderThan: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return 0;
+    }
+    return q.numRowsAffected();
 }
 
 AccountInfo AccountManager::accountById(const QString& id) const {

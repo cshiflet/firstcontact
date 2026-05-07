@@ -98,9 +98,34 @@ public:
     // threads, labels, message_labels, attachments, drafts, outbox,
     // pending_ops, account_meta) without deleting the accounts row
     // itself. v1 surfaces this as the "drop cache?" yes branch in
-    // the sign-out prompt; v4 will reuse it under the cache-manager
+    // the sign-out prompt; v4 reuses it under the cache-manager
     // dialog. Returns true on success.
     bool dropCache(const QString& id);
+
+    // v4 — cache manager dialog support.
+
+    // Approximate cache size for the given account: sum of
+    // messages.bytes_cached plus the sizes of any attachments whose
+    // local_path file exists on disk.
+    qint64 cacheSizeFor(const QString& id) const;
+
+    // Returns account_ids that appear in cache rows (any per-account
+    // table) but no longer have an accounts row. Caused by an out-of-
+    // band accounts-table delete that didn't cascade due to an old
+    // schema or a manual SQL operation; cache-manager surfaces them
+    // as an "Orphaned" group with a "Drop orphaned cache" button.
+    QStringList orphanedAccountIds() const;
+
+    // Wipes every cache row whose account_id is in orphanedAccountIds().
+    // Returns the number of orphaned account ids cleaned up.
+    int dropOrphanedCache();
+
+    // Deletes messages whose internal_date is older than `days` days
+    // ago, scoped to the given account. Threads / labels stay; only
+    // body+metadata for old messages is purged. Useful for users who
+    // want to free disk without losing label structure. Returns the
+    // number of deleted message rows.
+    int clearMessagesOlderThan(const QString& id, int days);
 
     // Convenience: lookup by id. Returns an empty-id AccountInfo when
     // the id isn't known.

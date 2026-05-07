@@ -15,6 +15,7 @@
 #include "cache/OutboxRepository.h"
 #include "cache/PendingOpsRepository.h"
 #include "common/AccountManagerDialog.h"
+#include "common/CacheManagerDialog.h"
 #include "common/IconLoader.h"
 #include "common/LabelStyleCache.h"
 #include "common/Preferences.h"
@@ -1056,6 +1057,14 @@ void MainWindow::refreshAccountMenu() {
                     }
                     auth_->authorize();
                 });
+        dlg.exec();
+    });
+
+    // v4 — cache manager dialog. Lists every account's cached size +
+    // orphan accounts; per-row drop / drop > N days actions.
+    auto* cacheAct = accountMenu_->addAction(tr("Cache storage…"));
+    connect(cacheAct, &QAction::triggered, this, [this] {
+        CacheManagerDialog dlg(accounts_, this);
         dlg.exec();
     });
 }

@@ -2,8 +2,16 @@
 
 #include "account/AccountManager.h"
 #include "cache/Database.h"
+#include "cache/LabelRepository.h"
+#include "cache/MessageRepository.h"
 #include "cache/MetaRepository.h"
+#include "cache/Migrations.h"   // databaseHandle()
 #include "cache/PendingOpsRepository.h"
+#include "models/Message.h"
+
+#include <QDateTime>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 
 #include <QCoreApplication>
 #include <QFile>
@@ -175,6 +183,125 @@ private slots:
         // pending_ops row is gone.
         const auto due = fc::cache::PendingOpsRepository::due(id);
         QVERIFY(due.empty());
+    }
+
+    void cacheSizeReturnsBytesCachedSum() {
+        fc::account::AccountManager mgr;
+        const QString id = mgr.add(QStringLiteral("size@example.test"));
+        QVERIFY(!id.isEmpty());
+
+        // Seed a label so the message FK is satisfied.
+        fc::cache::LabelRow lbl;
+        lbl.accountId = id;
+        lbl.id        = QStringLiteral("INBOX");
+        lbl.name      = QStringLiteral("Inbox");
+        lbl.type      = QStringLiteral("system");
+        fc::cache::LabelRepository::upsert(id, lbl);
+
+        // Insert a couple of messages with non-empty bodyText so
+        // bytes_cached has a non-zero value.
+        for (int i = 0; i < 3; ++i) {
+            fc::Message m;
+            m.accountId    = id;
+            m.id           = QStringLiteral("msg-%1").arg(i);
+            m.threadId     = QStringLiteral("thr-%1").arg(i);
+            m.internalDate = 1700000000000LL;
+            m.subject      = QStringLiteral("subject");
+            m.bodyText     = QString(1024, QChar('x'));   // 1KB each
+            m.labelIds     = {QStringLiteral("INBOX")};
+            QVERIFY(fc::cache::MessageRepository::upsert(id, m) > 0);
+        }
+
+        const qint64 size = mgr.cacheSizeFor(id);
+        QVERIFY(size >= 3 * 1024);
+    }
+
+    void orphanedAccountIdsListsRowsWithoutAccountsEntry() {
+        fc::account::AccountManager mgr;
+
+        // Insert a message with an account_id that has no accounts row.
+        // We sidestep the FK chain by using account_meta (which carries
+        // account_id but its FK cascades only on accounts deletion).
+        // Easiest path: directly INSERT a row that bypasses the FK
+        // (account_meta FK is ON DELETE CASCADE, but inserting an
+        // account_id that doesn't exist also fails). So we add an
+        // accounts row, write to account_meta, then DELETE the
+        // accounts row out-of-band (cascades to account_meta — so the
+        // simulated orphan can't actually be created via the public
+        // API). The test relies on inserting into account_meta via
+        // direct SQL after disabling FKs briefly.
+
+        auto db = fc::cache::databaseHandle();
+        QSqlQuery off(db);
+        off.exec(QStringLiteral("PRAGMA foreign_keys = OFF"));
+        QSqlQuery ins(db);
+        ins.prepare(QStringLiteral(
+            "INSERT INTO account_meta(account_id, key, value) "
+            "VALUES('orphan-test-id', 'history_id', '42')"));
+        QVERIFY(ins.exec());
+        QSqlQuery on(db);
+        on.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+
+        const auto orphans = mgr.orphanedAccountIds();
+        QVERIFY(orphans.contains(QStringLiteral("orphan-test-id")));
+
+        const int dropped = mgr.dropOrphanedCache();
+        QVERIFY(dropped >= 1);
+
+        // Subsequent call should find nothing.
+        QVERIFY(!mgr.orphanedAccountIds()
+                    .contains(QStringLiteral("orphan-test-id")));
+    }
+
+    void clearMessagesOlderThanRespectsCutoff() {
+        fc::account::AccountManager mgr;
+        const QString id = mgr.add(QStringLiteral("aged@example.test"));
+        QVERIFY(!id.isEmpty());
+
+        // Seed INBOX so the FK is satisfied.
+        fc::cache::LabelRow lbl;
+        lbl.accountId = id;
+        lbl.id        = QStringLiteral("INBOX");
+        lbl.name      = QStringLiteral("Inbox");
+        lbl.type      = QStringLiteral("system");
+        fc::cache::LabelRepository::upsert(id, lbl);
+
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+        // Old message (45 days old).
+        {
+            fc::Message m;
+            m.accountId    = id;
+            m.id           = QStringLiteral("old-msg");
+            m.threadId     = QStringLiteral("old-thr");
+            m.internalDate = now - qint64(45) * 24 * 60 * 60 * 1000LL;
+            m.subject      = QStringLiteral("old");
+            m.bodyText     = QStringLiteral("old body");
+            m.labelIds     = {QStringLiteral("INBOX")};
+            fc::cache::MessageRepository::upsert(id, m);
+        }
+        // Fresh message (5 days old).
+        {
+            fc::Message m;
+            m.accountId    = id;
+            m.id           = QStringLiteral("fresh-msg");
+            m.threadId     = QStringLiteral("fresh-thr");
+            m.internalDate = now - qint64(5) * 24 * 60 * 60 * 1000LL;
+            m.subject      = QStringLiteral("fresh");
+            m.bodyText     = QStringLiteral("fresh body");
+            m.labelIds     = {QStringLiteral("INBOX")};
+            fc::cache::MessageRepository::upsert(id, m);
+        }
+
+        // Drop messages older than 30 days. The 45-day-old one goes;
+        // the 5-day-old stays.
+        const int n = mgr.clearMessagesOlderThan(id, 30);
+        QCOMPARE(n, 1);
+
+        QVERIFY(fc::cache::MessageRepository::byId(id,
+            QStringLiteral("old-msg")).id.isEmpty());
+        QCOMPARE(fc::cache::MessageRepository::byId(id,
+            QStringLiteral("fresh-msg")).id, QStringLiteral("fresh-msg"));
     }
 };
 
