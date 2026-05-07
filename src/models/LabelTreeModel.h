@@ -38,12 +38,18 @@ public:
 
     void reload();
 
+    // Multi-account: switches which account's labels populate the tree.
+    // Calling this triggers a reload(). v1: empty string clears the tree.
+    void setAccountId(const QString& accountId);
+    QString accountId() const;
+
     QString labelIdAt(const QModelIndex& idx) const;
 
 private:
     struct Node;
     using NodePtr = std::unique_ptr<Node>;
     Node* root_;
+    QString accountId_;
 };
 
 }  // namespace fc

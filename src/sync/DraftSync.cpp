@@ -49,7 +49,7 @@ void DraftSync::stop() { if (d_->timer) d_->timer->stop(); }
 
 void DraftSync::flush() {
     if (d_->busy) return;
-    auto drafts = fc::cache::DraftRepository::dirtyDrafts();
+    auto drafts = fc::cache::DraftRepository::dirtyDraftsAllAccounts();
     if (drafts.empty()) return;
     d_->busy = true;
 
@@ -62,15 +62,19 @@ void DraftSync::flush() {
     for (const auto& draft : drafts) {
         const QByteArray rfc = buildRfc(draft);
         const QString localId = draft.id;
+        const QString accountId = draft.accountId;
 
         if (draft.gmailDraftId.isEmpty()) {
             QPointer<DraftSync> self(this);
             d_->gmail->createDraft(rfc, draft.threadId,
-                [self, localId, onDone](QString gmailDraftId, fc::api::ApiError err) {
+                [self, localId, accountId, onDone]
+                (QString gmailDraftId, fc::api::ApiError err) {
                     if (err) {
                         if (self) emit self->draftFailed(localId, err.message);
                     } else {
-                        fc::cache::DraftRepository::markSynced(localId, gmailDraftId);
+                        fc::cache::DraftRepository::markSynced(accountId,
+                                                                localId,
+                                                                gmailDraftId);
                         if (self) emit self->draftPushed(localId, gmailDraftId);
                     }
                     onDone();
@@ -82,7 +86,7 @@ void DraftSync::flush() {
             // (Avoids duplicate drafts cluttering the user's mailbox.)
             auto row = draft;
             row.dirty = false;
-            fc::cache::DraftRepository::upsert(row);
+            fc::cache::DraftRepository::upsert(accountId, row);
             emit draftPushed(localId, draft.gmailDraftId);
             onDone();
         }

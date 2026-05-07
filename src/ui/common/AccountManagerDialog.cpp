@@ -1,6 +1,7 @@
 #include "AccountManagerDialog.h"
 
 #include "auth/OAuthClient.h"
+#include "cache/Database.h"
 #include "cache/MetaRepository.h"
 #include "ui/common/IconLoader.h"
 
@@ -83,8 +84,17 @@ void AccountManagerDialog::rebuild() {
     }
 
     QString email = auth_->accountEmail();
-    if (email.isEmpty()) email = fc::cache::MetaRepository::get(
-                                     QStringLiteral("email"));
+    if (email.isEmpty()) {
+        // Fall back to the active account's persisted email. We resolve
+        // the accountId via Database::defaultAccountId — AccountContext
+        // (step 4) will own the in-memory current-account selector that
+        // makes this lookup explicit.
+        const QString aid = fc::cache::Database::defaultAccountId();
+        if (!aid.isEmpty()) {
+            email = fc::cache::MetaRepository::get(aid,
+                                                   QStringLiteral("email"));
+        }
+    }
     const bool signedIn = auth_->isAuthorized();
 
     if (!signedIn) {

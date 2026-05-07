@@ -1,5 +1,7 @@
 #include "LabelTreeModel.h"
 
+#include "cache/Database.h"
+
 #include <QHash>
 #include <QStringList>
 
@@ -40,16 +42,31 @@ constexpr SystemEntry kSystem[] = {
 
 LabelTreeModel::LabelTreeModel(QObject* parent)
     : QAbstractItemModel(parent), root_(new Node{}) {
+    // Default to the active account so existing single-account flows
+    // (and tests that construct a bare model) keep working without
+    // wiring AccountManager. MainWindow overrides this on every account
+    // switch via setAccountId.
+    accountId_ = fc::cache::Database::defaultAccountId();
     reload();
 }
 
 LabelTreeModel::~LabelTreeModel() { delete root_; }
 
+void LabelTreeModel::setAccountId(const QString& accountId) {
+    if (accountId_ == accountId) return;
+    accountId_ = accountId;
+    reload();
+}
+
+QString LabelTreeModel::accountId() const { return accountId_; }
+
 void LabelTreeModel::reload() {
     beginResetModel();
     root_->children.clear();
 
-    auto rows = fc::cache::LabelRepository::all();
+    auto rows = accountId_.isEmpty()
+        ? std::vector<fc::cache::LabelRow>{}
+        : fc::cache::LabelRepository::all(accountId_);
 
     // Two synthetic section nodes at the top — "Folders" wraps the
     // canonical Gmail system labels, "Labels" wraps everything the user

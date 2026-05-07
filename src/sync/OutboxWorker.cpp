@@ -44,7 +44,10 @@ void OutboxWorker::stop() { if (d_->timer) d_->timer->stop(); }
 
 void OutboxWorker::flush() {
     if (d_->busy) return;
-    auto items = fc::cache::OutboxRepository::dueForSend();
+    // Pull due rows across every account; each row carries the
+    // account_id it was enqueued against. Step 6 wires AccountContext
+    // and turns this into a per-account GmailClient dispatch.
+    auto items = fc::cache::OutboxRepository::dueForSendAllAccounts();
     if (items.empty()) return;
     d_->busy = true;
 

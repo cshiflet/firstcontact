@@ -19,6 +19,15 @@ public:
 
     SyncService(fc::api::GmailClient* gmail, QObject* parent = nullptr);
 
+    // Switches the per-account context the service operates on. Until
+    // AccountContext lands in step 4, MainWindow calls this whenever the
+    // active account changes; SyncService scopes every cache write to
+    // this id and reads/writes its history_id from account_meta scoped
+    // to it. The accountId may be the empty string before sign-in, in
+    // which case runOnce() short-circuits.
+    void setAccountId(const QString& accountId);
+    QString accountId() const;
+
     State state() const;
     QString lastError() const;
 

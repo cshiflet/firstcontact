@@ -41,7 +41,7 @@ void PendingOpsWorker::flush() {
     // Without this gate, an op enqueued before the flag was set could
     // still hit Gmail on the next scheduler tick.
     if (fc::util::DryRun::block(QStringLiteral("pending-ops-flush"))) return;
-    auto ops = fc::cache::PendingOpsRepository::due();
+    auto ops = fc::cache::PendingOpsRepository::dueAllAccounts();
     if (ops.empty()) return;
     d_->busy = true;
 

@@ -191,6 +191,13 @@ private:
     QString                  currentSearchQuery_;
     fc::Message              currentMessage_;
     int                      currentRow_ = -1;
+
+    // Multi-account: id of the account whose data the three panes
+    // currently display. Seeded from Database::defaultAccountId() at
+    // construction; replaced on user action via the toolbar account
+    // menu (step 8) and the AccountManagerDialog (step 9). Empty
+    // before sign-in / after the last account is removed.
+    QString                  currentAccountId_;
 };
 
 }  // namespace fc::ui

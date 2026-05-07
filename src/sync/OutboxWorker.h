@@ -17,7 +17,10 @@ public:
     void start(int intervalMs = 30'000);
     void stop();
 
-    // Triggers a one-shot drain attempt.
+    // Triggers a one-shot drain attempt across every account. v1 has a
+    // single GmailClient instance; the worker still iterates per-account
+    // due rows because each row carries the account id its API path will
+    // be charged against once AccountContext lands.
     void flush();
 
 signals:

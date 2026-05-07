@@ -94,6 +94,12 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     resize(1200, 760);
     fc::cache::Database::initialize();
 
+    // Seed the active account from the schema's default account row.
+    // The toolbar account menu and the AccountManagerDialog (steps 8-9)
+    // replace this when the user picks a different account.
+    currentAccountId_ = fc::cache::Database::defaultAccountId();
+    sync_->setAccountId(currentAccountId_);
+
     buildLayout();
     buildToolBar();
 
@@ -610,8 +616,14 @@ void MainWindow::wireSignals() {
     // pill delegate) in sync with the freshly-synced labels table.
     // labelsUpdated runs in the UI thread (queued from the sync
     // thread), so invalidate() is safe to call here.
+    // Lambda to disambiguate the now-overloaded LabelStyleCache::invalidate
+    // (per-account vs zero-arg). We re-read the cache for whichever
+    // account is currently active in MainWindow, so account switches
+    // immediately surface their labels' colours in the message list.
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
-            &LabelStyleCache::instance(), &LabelStyleCache::invalidate);
+            this, [this] {
+                LabelStyleCache::instance().invalidate(currentAccountId_);
+            });
     connect(&LabelStyleCache::instance(), &LabelStyleCache::changed, this,
             [this] {
                 if (list_) list_->viewport()->update();
@@ -826,7 +838,10 @@ void MainWindow::refreshAccountMenu() {
     // on the very first sign-in (token exchange completes before profile
     // fetch) — the fallback keeps the menu honest in that window.
     QString email = auth_->accountEmail();
-    if (email.isEmpty()) email = fc::cache::MetaRepository::get(QStringLiteral("email"));
+    if (email.isEmpty()) {
+        email = fc::cache::MetaRepository::get(currentAccountId_,
+                                               QStringLiteral("email"));
+    }
     const bool signedIn = auth_->isAuthorized();
 
     accountButton_->setText(tr("Accounts"));
@@ -875,14 +890,18 @@ void MainWindow::onSignIn() {
 }
 
 void MainWindow::onSignOut() {
+    // Step 9 expands this to a "drop cache?" yes/no/cancel prompt and
+    // the AccountManager-driven multi-account semantics. For now the
+    // single-account path is preserved: sign out, clear the cached
+    // email under the active account, stop the workers.
     if (QMessageBox::question(this, tr("Sign out"),
                               tr("Sign out and clear cached credentials?"))
             == QMessageBox::Yes) {
         auth_->signOut();
-        // Clear the cached profile email so the next sign-in's account
-        // menu doesn't briefly show the previous user's address before
-        // the new initial sync completes.
-        fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
+        if (!currentAccountId_.isEmpty()) {
+            fc::cache::MetaRepository::set(currentAccountId_,
+                                           QStringLiteral("email"), QString());
+        }
         sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
@@ -899,7 +918,10 @@ void MainWindow::onSwitchAccount() {
     // click in a row asking the same question.
     if (auth_->isAuthorized()) {
         auth_->signOut();
-        fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
+        if (!currentAccountId_.isEmpty()) {
+            fc::cache::MetaRepository::set(currentAccountId_,
+                                           QStringLiteral("email"), QString());
+        }
         sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
@@ -940,11 +962,11 @@ void MainWindow::reloadCurrentLabel() {
 
     auto rows = currentSearchQuery_.isEmpty()
         ? (conv
-            ? fc::cache::MessageRepository::listThreadsByLabel(currentLabelId_, kPageSize, 0)
-            : fc::cache::MessageRepository::listByLabel(currentLabelId_, kPageSize, 0))
+            ? fc::cache::MessageRepository::listThreadsByLabel(currentAccountId_, currentLabelId_, kPageSize, 0)
+            : fc::cache::MessageRepository::listByLabel(currentAccountId_, currentLabelId_, kPageSize, 0))
         : (conv
-            ? fc::cache::MessageRepository::searchFtsThreads(currentSearchQuery_, kPageSize)
-            : fc::cache::MessageRepository::searchFts(currentSearchQuery_, kPageSize));
+            ? fc::cache::MessageRepository::searchFtsThreads(currentAccountId_, currentSearchQuery_, kPageSize)
+            : fc::cache::MessageRepository::searchFts(currentAccountId_, currentSearchQuery_, kPageSize));
     listModel_->replaceAll(std::move(rows));
 
     // Try to restore the selection: first by exact message id, then by
@@ -991,17 +1013,20 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
     if (messageId.isEmpty()) return;
     currentRow_ = row;
 
-    fc::Message cached = fc::cache::MessageRepository::byId(messageId);
+    fc::Message cached = fc::cache::MessageRepository::byId(currentAccountId_,
+                                                              messageId);
 
     auto renderThread = [this](const fc::Message& selected) {
         currentMessage_ = selected;
-        auto thread = fc::cache::MessageRepository::byThread(selected.threadId);
+        auto thread = fc::cache::MessageRepository::byThread(currentAccountId_,
+                                                              selected.threadId);
         if (thread.size() > 1) {
             reader_->showThread(thread);
         } else {
             reader_->showMessage(selected);
         }
-        fc::cache::MessageRepository::markAccessed(selected.id);
+        fc::cache::MessageRepository::markAccessed(currentAccountId_,
+                                                    selected.id);
 
         // Auto-mark-as-read on open. Mirrors Gmail web — opening a
         // conversation marks every message in it as read on the
@@ -1048,14 +1073,17 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
 
     reader_->showLoading();
     QPointer<MainWindow> self(this);
+    const QString accountForFetch = currentAccountId_;
     gmail_->getMessage(messageId,
-        [self, messageId, renderThread](fc::Message m, fc::api::ApiError err) {
+        [self, messageId, renderThread, accountForFetch]
+        (fc::Message m, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 self->reader_->showEmpty(tr("Failed to load: %1").arg(err.message));
                 return;
             }
-            fc::cache::MessageRepository::upsert(m);
+            m.accountId = accountForFetch;
+            fc::cache::MessageRepository::upsert(accountForFetch, m);
             renderThread(m);
         });
 }
@@ -1073,9 +1101,10 @@ void MainWindow::onSearchSubmit() {
     if (q.isEmpty() || !auth_->isAuthorized()) return;
     statusBar()->showMessage(tr("Searching server: %1").arg(q));
     QPointer<MainWindow> self(this);
+    const QString accountForSearch = currentAccountId_;
     gmail_->listMessages({}, q, {}, kPageSize,
-        [self, gmail = gmail_, q](fc::api::GmailClient::ListPage page,
-                                  fc::api::ApiError err) {
+        [self, gmail = gmail_, q, accountForSearch]
+        (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 self->statusBar()->showMessage(
@@ -1084,10 +1113,15 @@ void MainWindow::onSearchSubmit() {
             }
             // Hydrate any missing ids; the cache will then surface them.
             for (const auto& id : page.ids) {
-                if (fc::cache::MessageRepository::exists(id)) continue;
+                if (fc::cache::MessageRepository::exists(accountForSearch, id))
+                    continue;
                 gmail->getMessage(id,
-                    [](fc::Message m, fc::api::ApiError gErr) {
-                        if (!gErr) fc::cache::MessageRepository::upsert(m);
+                    [accountForSearch](fc::Message m, fc::api::ApiError gErr) {
+                        if (!gErr) {
+                            m.accountId = accountForSearch;
+                            fc::cache::MessageRepository::upsert(
+                                accountForSearch, m);
+                        }
                     });
             }
             self->statusBar()->showMessage(
@@ -1111,10 +1145,19 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
                qint64 sendAtMs) {
             const QByteArray rfc = fc::util::MimeBuilder::build(msg);
             fc::cache::OutboxItem item;
-            item.rfc5322  = rfc;
-            item.threadId = threadId;
-            item.sendAt   = sendAtMs;   // 0 → send immediately
-            fc::cache::OutboxRepository::enqueue(item);
+            item.accountId = currentAccountId_;
+            item.rfc5322   = rfc;
+            item.threadId  = threadId;
+            item.sendAt    = sendAtMs;   // 0 → send immediately
+            fc::cache::OutboxRepository::enqueue(currentAccountId_, item);
+            // Stamp last-used-from so the next compose defaults to this
+            // account. Step 10 reads this back when the user clicks the
+            // toolbar Compose button.
+            if (!currentAccountId_.isEmpty()) {
+                fc::cache::MetaRepository::set(currentAccountId_,
+                    QStringLiteral("last_used_from"),
+                    auth_->accountEmail());
+            }
             // Immediate send: poke the worker to flush right now.
             // Scheduled send: the worker's existing timer will catch
             // the row when it becomes due.
@@ -1131,6 +1174,7 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
         [this, w](const fc::util::OutgoingMessage& msg, const QString& threadId,
                   const QString& existingDraftId) {
             fc::cache::DraftRow row;
+            row.accountId          = currentAccountId_;
             row.id                 = existingDraftId;
             row.threadId           = threadId;
             row.subject            = msg.subject;
@@ -1140,7 +1184,7 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
             row.bodyText           = msg.bodyText;
             row.inReplyToMessageId = msg.rfc822InReplyTo;
             row.dirty              = true;
-            const QString id = fc::cache::DraftRepository::upsert(row);
+            const QString id = fc::cache::DraftRepository::upsert(currentAccountId_, row);
             // Thread the assigned id back into the still-open compose window
             // so the next save updates instead of creating a new draft.
             w->loadFromDraft(id, threadId, msg.subject, msg.to, msg.cc, msg.bodyText);
@@ -1175,23 +1219,27 @@ void MainWindow::onCreateLabel(const QString& parentLabelId) {
         tr("Label name:"), QLineEdit::Normal, QString(), &ok);
     if (!ok || name.isEmpty()) return;
 
-    const auto parent = fc::cache::LabelRepository::byId(parentLabelId);
+    const auto parent = fc::cache::LabelRepository::byId(currentAccountId_,
+                                                         parentLabelId);
     if (!parent.id.isEmpty() && parent.type == QLatin1String("user")) {
         name = parent.name + QLatin1Char('/') + name;
     }
     QPointer<MainWindow> self(this);
+    const QString accountForCreate = currentAccountId_;
     gmail_->createLabel(name,
-        [self](fc::api::GmailClient::Label l, fc::api::ApiError err) {
+        [self, accountForCreate]
+        (fc::api::GmailClient::Label l, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 QMessageBox::warning(self, tr("Create label"), err.message);
                 return;
             }
             fc::cache::LabelRow row;
-            row.id   = l.id;
-            row.name = l.name;
-            row.type = l.type;
-            fc::cache::LabelRepository::upsert(row);
+            row.accountId = accountForCreate;
+            row.id        = l.id;
+            row.name      = l.name;
+            row.type      = l.type;
+            fc::cache::LabelRepository::upsert(accountForCreate, row);
             self->reloadSidebar();
         });
 }
@@ -1202,7 +1250,8 @@ void MainWindow::onRenameLabel(const QString& labelId) {
             tr("Dry-run mode: label rename blocked."), 4000);
         return;
     }
-    const auto current = fc::cache::LabelRepository::byId(labelId);
+    const auto current = fc::cache::LabelRepository::byId(currentAccountId_,
+                                                          labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
 
     bool ok = false;
@@ -1211,16 +1260,18 @@ void MainWindow::onRenameLabel(const QString& labelId) {
     if (!ok || newName.isEmpty() || newName == current.name) return;
 
     QPointer<MainWindow> self(this);
+    const QString accountForRename = currentAccountId_;
     gmail_->updateLabel(labelId, newName,
-        [self, labelId, newName](fc::api::GmailClient::Label, fc::api::ApiError err) {
+        [self, labelId, newName, accountForRename]
+        (fc::api::GmailClient::Label, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 QMessageBox::warning(self, tr("Rename label"), err.message);
                 return;
             }
-            auto row = fc::cache::LabelRepository::byId(labelId);
+            auto row = fc::cache::LabelRepository::byId(accountForRename, labelId);
             row.name = newName;
-            fc::cache::LabelRepository::upsert(row);
+            fc::cache::LabelRepository::upsert(accountForRename, row);
             self->reloadSidebar();
         });
 }
@@ -1231,21 +1282,23 @@ void MainWindow::onDeleteLabel(const QString& labelId) {
             tr("Dry-run mode: label deletion blocked."), 4000);
         return;
     }
-    const auto current = fc::cache::LabelRepository::byId(labelId);
+    const auto current = fc::cache::LabelRepository::byId(currentAccountId_,
+                                                          labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
     if (QMessageBox::question(this, tr("Delete label"),
             tr("Delete the label '%1'? Messages keep their other labels.")
               .arg(current.name)) != QMessageBox::Yes) return;
 
     QPointer<MainWindow> self(this);
+    const QString accountForDelete = currentAccountId_;
     gmail_->deleteLabel(labelId,
-        [self, labelId](fc::api::ApiError err) {
+        [self, labelId, accountForDelete](fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 QMessageBox::warning(self, tr("Delete label"), err.message);
                 return;
             }
-            fc::cache::LabelRepository::remove(labelId);
+            fc::cache::LabelRepository::remove(accountForDelete, labelId);
             self->reloadSidebar();
         });
 }
@@ -1266,15 +1319,18 @@ void MainWindow::onToggleStarFor(const QString& messageId) {
     // Re-read from cache so we toggle relative to the row the user clicked,
     // not to whatever currentMessage_ happens to be (the click target may
     // not be the currently-selected row).
-    const fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    const fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_,
+                                                              messageId);
     if (m.id.isEmpty()) return;
 
     QStringList add, rem;
     if (m.isStarred) rem << QStringLiteral("STARRED");
     else             add << QStringLiteral("STARRED");
 
-    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId,
+                                                  add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId,
+                                                    add, rem);
     pending_->flush();
 
     // Keep currentMessage_ in sync if the toggle was on the currently-shown
@@ -1418,8 +1474,10 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
 
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
     QPointer<MainWindow> self(this);
+    const QString accountForSave = currentAccountId_;
     gmail_->getAttachment(messageId, attachmentId,
-        [self, attachmentId, target](QByteArray bytes, fc::api::ApiError err) {
+        [self, attachmentId, target, accountForSave]
+        (QByteArray bytes, fc::api::ApiError err) {
             if (!self) return;
             if (err) {
                 self->statusBar()->showMessage(
@@ -1432,7 +1490,9 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
                     tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
                 return;
             }
-            fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
+            fc::cache::AttachmentRepository::markDownloaded(accountForSave,
+                                                            attachmentId,
+                                                            target);
             // No auto-open here — the user explicitly chose Save as…, so
             // we respect that and don't pop a viewer afterwards.
             self->statusBar()->showMessage(tr("Saved to %1").arg(target), 8000);
@@ -1447,7 +1507,8 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
         return;
     }
 
-    const auto m = fc::cache::MessageRepository::byId(messageId);
+    const auto m = fc::cache::MessageRepository::byId(currentAccountId_,
+                                                       messageId);
     if (m.attachments.empty()) {
         statusBar()->showMessage(tr("No attachments on this message."), 4000);
         return;
@@ -1468,14 +1529,15 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
 
     int kicked = 0;
     QPointer<MainWindow> self(this);
+    const QString accountForBatch = currentAccountId_;
     for (const auto& a : m.attachments) {
         if (a.id.isEmpty()) continue;   // inline-only; not addressable
         const QString target = uniqueTargetPath(dir, a.filename);
         const QString attachmentId = a.id;
         const QString filename     = a.filename;
         gmail_->getAttachment(messageId, attachmentId,
-            [self, attachmentId, target, filename](
-                    QByteArray bytes, fc::api::ApiError err) {
+            [self, attachmentId, target, filename, accountForBatch]
+            (QByteArray bytes, fc::api::ApiError err) {
                 if (!self) return;
                 if (err) {
                     self->statusBar()->showMessage(
@@ -1489,7 +1551,9 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
                         tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
                     return;
                 }
-                fc::cache::AttachmentRepository::markDownloaded(attachmentId, target);
+                fc::cache::AttachmentRepository::markDownloaded(accountForBatch,
+                                                                attachmentId,
+                                                                target);
                 self->statusBar()->showMessage(
                     tr("Saved %1").arg(QFileInfo(target).fileName()), 4000);
             });
@@ -1525,8 +1589,8 @@ void MainWindow::onDeleteCurrent() {
     const QString id = currentMessage_.id;
     const QStringList add{QStringLiteral("TRASH")};
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(id, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(id, add, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, id, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, id, add, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Moved to Trash."), 3000);
     reloadCurrentLabel();
@@ -1536,11 +1600,14 @@ void MainWindow::applyLabelDiffToThread(const QString& threadId,
                                          const QStringList& add,
                                          const QStringList& remove) {
     if (threadId.isEmpty()) return;
-    const auto messages = fc::cache::MessageRepository::byThread(threadId);
+    const auto messages = fc::cache::MessageRepository::byThread(currentAccountId_,
+                                                                  threadId);
     for (const auto& m : messages) {
         if (m.id.isEmpty()) continue;
-        fc::cache::MessageRepository::applyLabelDiff(m.id, add, remove);
-        fc::cache::PendingOpsRepository::enqueueModify(m.id, add, remove);
+        fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, m.id,
+                                                      add, remove);
+        fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, m.id,
+                                                        add, remove);
     }
     pending_->flush();
 }
@@ -1575,7 +1642,7 @@ void MainWindow::onToggleReadCurrent() {
     // and vice versa. Avoids the surprise of "I clicked toggle and only
     // one of three messages flipped state."
     const auto messages = fc::cache::MessageRepository::byThread(
-                              currentMessage_.threadId);
+                              currentAccountId_, currentMessage_.threadId);
     bool anyUnread = false;
     for (const auto& m : messages) if (m.isUnread) { anyUnread = true; break; }
 
@@ -1640,11 +1707,13 @@ void MainWindow::onSnoozeCurrent() {
     // the conversation gone from Inbox there too); the wake-up will
     // re-apply INBOX which restores it on Gmail web's side as well.
     const QString tid = currentMessage_.threadId;
-    const auto thread = fc::cache::MessageRepository::byThread(tid);
+    const auto thread = fc::cache::MessageRepository::byThread(currentAccountId_,
+                                                                tid);
     const qint64 wakeAt = when.toMSecsSinceEpoch();
     for (const auto& m : thread) {
         if (m.id.isEmpty()) continue;
-        fc::cache::MessageRepository::setSnoozeUntil(m.id, wakeAt);
+        fc::cache::MessageRepository::setSnoozeUntil(currentAccountId_,
+                                                      m.id, wakeAt);
     }
     applyLabelDiffToThread(tid, {}, {QStringLiteral("INBOX")});
     statusBar()->showMessage(
@@ -1657,15 +1726,17 @@ void MainWindow::onSnoozeCurrent() {
 
 void MainWindow::wakeDueSnoozedMessages() {
     if (fc::util::DryRun::enabled()) return;
-    const QStringList due = fc::cache::MessageRepository::dueSnoozeWakeups();
+    if (currentAccountId_.isEmpty()) return;
+    const QStringList due = fc::cache::MessageRepository::dueSnoozeWakeups(
+                                currentAccountId_);
     if (due.isEmpty()) return;
     QSet<QString> threads;
     for (const auto& mid : due) {
-        const auto m = fc::cache::MessageRepository::byId(mid);
+        const auto m = fc::cache::MessageRepository::byId(currentAccountId_, mid);
         if (!m.threadId.isEmpty()) threads.insert(m.threadId);
         // Clear snooze_until first so a same-tick failure doesn't
         // produce an infinite wake loop.
-        fc::cache::MessageRepository::setSnoozeUntil(mid, 0);
+        fc::cache::MessageRepository::setSnoozeUntil(currentAccountId_, mid, 0);
     }
     // Restore INBOX per thread (one diff per thread, not per message).
     for (const QString& tid : threads) {
@@ -1682,7 +1753,7 @@ void MainWindow::onNewMessages(int count) {
 
     // Pull the most recent message we just upserted to populate the toast.
     auto recent = fc::cache::MessageRepository::listByLabel(
-        QStringLiteral("INBOX"), 1, 0);
+        currentAccountId_, QStringLiteral("INBOX"), 1, 0);
     QString sender, subject, threadId;
     if (!recent.empty()) {
         sender   = recent.front().fromName.isEmpty()

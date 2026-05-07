@@ -32,8 +32,14 @@ public:
 
     static LabelStyleCache& instance();
 
-    // Replaces the cache from a fresh LabelRepository::all() read.
-    // Cheap; called from MainWindow on every labelsUpdated tick.
+    // Replaces the cache from a fresh LabelRepository::all(accountId)
+    // read. Per-account v1: callers pass the active account; the same
+    // cache is rebuilt on every account switch. v2 will add a
+    // multi-account variant that prefixes ids with the account id so
+    // pills paint correctly in the unified inbox view.
+    void invalidate(const QString& accountId);
+
+    // Legacy zero-arg overload — routes to Database::defaultAccountId.
     void invalidate();
 
     // Returns Style{} (empty / invalid) for unknown ids.

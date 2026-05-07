@@ -327,6 +327,11 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
         : m.bodyHtml;
     const QString threadIdForGmail = m.threadId;
+    // Capture the message's accountId so the "Open in Gmail" URL hints
+    // the right authuser even when the user has multiple accounts
+    // signed into the same browser. Empty for legacy rows that
+    // pre-date the multi-account migration.
+    const QString accountIdForGmail = m.accountId;
 
     auto buildBrowserRow = [&]() -> QHBoxLayout* {
         auto* row = new QHBoxLayout;
@@ -432,10 +437,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         // routes the request to the right session even if the user
         // has multiple accounts logged in.
         QObject::connect(gmailBtn, &QPushButton::clicked, card,
-            [threadIdForGmail]() {
+            [threadIdForGmail, accountIdForGmail]() {
                 if (threadIdForGmail.isEmpty()) return;
-                QString email = fc::cache::MetaRepository::get(
-                    QStringLiteral("email"));
+                QString email = accountIdForGmail.isEmpty()
+                    ? QString()
+                    : fc::cache::MetaRepository::get(accountIdForGmail,
+                                                     QStringLiteral("email"));
                 QString url = QStringLiteral("https://mail.google.com/mail/");
                 if (!email.isEmpty()) {
                     url += QStringLiteral("?authuser=")

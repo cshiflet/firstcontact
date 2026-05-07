@@ -1,5 +1,6 @@
 #include "LabelStyleCache.h"
 
+#include "cache/Database.h"
 #include "cache/LabelRepository.h"
 
 namespace fc::ui {
@@ -15,17 +16,23 @@ LabelStyleCache::LabelStyleCache() {
     invalidate();
 }
 
-void LabelStyleCache::invalidate() {
+void LabelStyleCache::invalidate(const QString& accountId) {
     cache_.clear();
-    for (const auto& l : fc::cache::LabelRepository::all()) {
-        Style s;
-        s.name = l.name;
-        s.type = l.type;
-        if (!l.colorBg.isEmpty()) s.bg = QColor(l.colorBg);
-        if (!l.colorFg.isEmpty()) s.fg = QColor(l.colorFg);
-        cache_.insert(l.id, std::move(s));
+    if (!accountId.isEmpty()) {
+        for (const auto& l : fc::cache::LabelRepository::all(accountId)) {
+            Style s;
+            s.name = l.name;
+            s.type = l.type;
+            if (!l.colorBg.isEmpty()) s.bg = QColor(l.colorBg);
+            if (!l.colorFg.isEmpty()) s.fg = QColor(l.colorFg);
+            cache_.insert(l.id, std::move(s));
+        }
     }
     emit changed();
+}
+
+void LabelStyleCache::invalidate() {
+    invalidate(fc::cache::Database::defaultAccountId());
 }
 
 LabelStyleCache::Style LabelStyleCache::get(const QString& labelId) const {

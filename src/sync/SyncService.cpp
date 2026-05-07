@@ -36,13 +36,24 @@ struct SyncService::Impl {
     State state = State::Idle;
     QString lastError;
     bool busy = false;
+    QString accountId;
 };
 
 SyncService::SyncService(fc::api::GmailClient* gmail, QObject* parent)
     : QObject(parent), d_(new Impl) {
     d_->gmail = gmail;
     fc::cache::Database::initialize();
+    // Seed from the default account so single-account flows continue to
+    // work pre-AccountContext. MainWindow / Bootstrap update this via
+    // setAccountId once the active account is selected.
+    d_->accountId = fc::cache::Database::defaultAccountId();
 }
+
+void SyncService::setAccountId(const QString& accountId) {
+    d_->accountId = accountId;
+}
+
+QString SyncService::accountId() const { return d_->accountId; }
 
 SyncService::State SyncService::state() const { return d_->state; }
 QString SyncService::lastError() const { return d_->lastError; }
@@ -55,9 +66,15 @@ void SyncService::setState(State s) {
 
 void SyncService::runOnce() {
     if (d_->busy) return;
+    if (d_->accountId.isEmpty()) {
+        // No account selected — nothing to sync. Common during the
+        // pre-sign-in state and during the brief window between sign-out
+        // and the next sign-in flow.
+        return;
+    }
     d_->busy = true;
 
-    const QString hid = fc::cache::MetaRepository::historyId();
+    const QString hid = fc::cache::MetaRepository::historyId(d_->accountId);
     if (hid.isEmpty()) {
         doInitialSync();
     } else {
@@ -89,7 +106,12 @@ void SyncService::doInitialSync() {
                 emit failed(err.message);
                 return;
             }
-            fc::cache::MetaRepository::set(QStringLiteral("email"), p.emailAddress);
+            // Persist the canonical email under the active account's
+            // account_meta sheet (account_meta replaced the global
+            // meta.email row in v6).
+            fc::cache::MetaRepository::set(d_->accountId,
+                                           QStringLiteral("email"),
+                                           p.emailAddress);
             emit profileFetched(p.emailAddress);
             // Don't record historyId yet — wait until the seed listing finishes
             // so a crash mid-init triggers a full retry rather than relying on
@@ -107,12 +129,13 @@ void SyncService::doInitialSync() {
                     }
                     for (const auto& l : labels) {
                         fc::cache::LabelRow row;
-                        row.id      = l.id;
-                        row.name    = l.name;
-                        row.type    = l.type;
-                        row.colorBg = l.colorBg;
-                        row.colorFg = l.colorFg;
-                        fc::cache::LabelRepository::upsert(row);
+                        row.accountId = d_->accountId;
+                        row.id        = l.id;
+                        row.name      = l.name;
+                        row.type      = l.type;
+                        row.colorBg   = l.colorBg;
+                        row.colorFg   = l.colorFg;
+                        fc::cache::LabelRepository::upsert(d_->accountId, row);
                     }
                     emit labelsUpdated();
 
@@ -133,17 +156,19 @@ void SyncService::doInitialSync() {
                         if (ids.size() > kInitialPerLabelCap * 2)
                             ids = ids.mid(0, kInitialPerLabelCap * 2);
                         if (ids.isEmpty()) {
-                            fc::cache::MetaRepository::setHistoryId(profileHid);
+                            fc::cache::MetaRepository::setHistoryId(d_->accountId,
+                                                                    profileHid);
                             d_->busy = false;
                             setState(State::Idle);
                             return;
                         }
                         // After fetches finish we'll commit the historyId.
                         fetchAndStoreMessages(ids, ids.size(), /*isInitial=*/true);
-                        // Save profileHid via meta now; if we crash mid-fetch
-                        // the next run does an incremental sync from this id
-                        // (Gmail's history is stable).
-                        fc::cache::MetaRepository::setHistoryId(profileHid);
+                        // Save profileHid via account_meta now; if we
+                        // crash mid-fetch the next run does an incremental
+                        // sync from this id (Gmail's history is stable).
+                        fc::cache::MetaRepository::setHistoryId(d_->accountId,
+                                                                profileHid);
                     };
 
                     for (const auto& label : seedLabels()) {
@@ -157,7 +182,7 @@ void SyncService::doInitialSync() {
 void SyncService::doIncrementalSync() {
     setState(State::IncrementalSync);
 
-    const QString startId = fc::cache::MetaRepository::historyId();
+    const QString startId = fc::cache::MetaRepository::historyId(d_->accountId);
     d_->gmail->listHistory(startId, {},
         [this](fc::api::GmailClient::HistoryPage page, fc::api::ApiError err) {
             if (err) {
@@ -168,10 +193,9 @@ void SyncService::doIncrementalSync() {
                 return;
             }
             if (page.historyTooOld) {
-                // Smart resync: clear the historyId and let next run do an
-                // initial sync. Phase 2 keeps it simple; Phase 4 diffs IDs
-                // per label rather than refetching everything.
-                fc::cache::MetaRepository::setHistoryId({});
+                // Smart resync: clear this account's historyId and let next
+                // run do an initial sync.
+                fc::cache::MetaRepository::setHistoryId(d_->accountId, {});
                 d_->busy = false;
                 setState(State::Idle);
                 runOnce();
@@ -188,7 +212,8 @@ void SyncService::doIncrementalSync() {
             // full message refetch picks up flag changes via upsert.)
 
             if (!page.historyId.isEmpty()) {
-                fc::cache::MetaRepository::setHistoryId(page.historyId);
+                fc::cache::MetaRepository::setHistoryId(d_->accountId,
+                                                        page.historyId);
             }
 
             if (added.isEmpty() && deleted.isEmpty()) {
@@ -221,11 +246,12 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     auto onOne = [this, remaining, stored, newCount, isInitial]
         (fc::Message m, fc::api::ApiError err) {
         if (!err && !m.id.isEmpty()) {
-            fc::cache::MessageRepository::upsert(m);
+            m.accountId = d_->accountId;
+            fc::cache::MessageRepository::upsert(d_->accountId, m);
             ++(*stored);
         }
         if (--(*remaining) > 0) return;
-        fc::cache::LabelRepository::recomputeCounts();
+        fc::cache::LabelRepository::recomputeCounts(d_->accountId);
         emit labelsUpdated();
         emit messagesUpdated();
         if (!isInitial && newCount > 0) emit newMessages(newCount);

@@ -112,7 +112,13 @@ void MessageListModel::toggleThreadExpand(int row) {
     // message, see MessageRepository::listThreadsByLabel). Sort newest-
     // first so children read top-to-bottom from most-recent reply
     // backwards through the conversation.
-    auto thread = fc::cache::MessageRepository::byThread(parent.threadId);
+    //
+    // We scope the lookup to the parent's accountId so a multi-account
+    // unified inbox (v2) keeps thread expansion correct.
+    auto thread = parent.accountId.isEmpty()
+        ? fc::cache::MessageRepository::byThread(parent.threadId)
+        : fc::cache::MessageRepository::byThread(parent.accountId,
+                                                  parent.threadId);
     std::sort(thread.begin(), thread.end(),
               [](const Message& a, const Message& b) {
                   return a.internalDate > b.internalDate;
