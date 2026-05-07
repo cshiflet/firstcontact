@@ -31,8 +31,11 @@ public:
                                         const QString& id);
     static void                  recomputeCounts(const QString& accountId);
 
-    // TODO(v2): cross-account label aggregation for the unified inbox /
-    // search overlay. Until then, callers stick to the per-account form.
+    // Cross-account variant. Returns every label across every account
+    // — each row carries its source accountId so the caller can route
+    // back. Used by the v2 unified search overlay so pills paint
+    // correctly even when results span accounts.
+    static std::vector<LabelRow> allAccounts();
 
     // Legacy single-account overloads. Forward to the default account
     // (Database::defaultAccountId). Once step 3 finishes, only a few

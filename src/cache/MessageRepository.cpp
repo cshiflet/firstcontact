@@ -34,7 +34,12 @@ QStringList splitJsonArray(const QString& s) {
 
 fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     fc::Message m;
-    m.accountId       = accountId;
+    // Cross-account paths pass accountId="" and let the row's
+    // account_id column drive; per-account paths pass the explicit
+    // id (faster than re-reading the column when we already know).
+    m.accountId       = accountId.isEmpty()
+        ? q.value(QStringLiteral("account_id")).toString()
+        : accountId;
     m.id              = q.value(QStringLiteral("id")).toString();
     m.threadId        = q.value(QStringLiteral("thread_id")).toString();
     m.historyId       = q.value(QStringLiteral("history_id")).toString();
@@ -90,6 +95,10 @@ void writeLabelEdges(QSqlDatabase& db, const QString& accountId,
 // Bulk-load message_labels rows for a batch of messages and stamp them
 // onto each Message's labelIds field. Single SELECT per batch keeps the
 // per-row delegate render path at one query, not N+1.
+//
+// Per-account variant: filters by a single account_id. Cross-account
+// variant (accountId is empty) keys by (account_id, message_id) so two
+// accounts' messages with coincidentally-equal ids don't bleed labels.
 void hydrateLabelIds(const QString& accountId,
                      std::vector<fc::Message>& messages) {
     if (messages.empty()) return;
@@ -103,6 +112,36 @@ void hydrateLabelIds(const QString& accountId,
     }
 
     QSqlQuery q(db);
+    if (accountId.isEmpty()) {
+        // Cross-account: select (account_id, message_id, label_id) and
+        // key the result by the composite. We'd ideally have a single
+        // IN clause covering (account_id, id) tuples; sqlite supports
+        // it via "WHERE (a, b) IN (VALUES (?, ?), …)" but binding
+        // tuples to QSqlQuery is awkward. Simpler path: pull every
+        // edge whose message_id is in the batch and post-filter by
+        // accountId in C++.
+        q.prepare(QStringLiteral(
+            "SELECT account_id, message_id, label_id FROM message_labels "
+            "WHERE message_id IN (%1)").arg(placeholders));
+        for (const auto& m : messages) q.addBindValue(m.id);
+        if (!q.exec()) {
+            qWarning("hydrateLabelIds (all-accounts): %s",
+                     qUtf8Printable(q.lastError().text()));
+            return;
+        }
+        // Composite key: "<accountId>\t<messageId>" → labelIds.
+        QHash<QString, QStringList> byMsg;
+        while (q.next()) {
+            const QString aid = q.value(0).toString();
+            const QString mid = q.value(1).toString();
+            byMsg[aid + QChar('\t') + mid] << q.value(2).toString();
+        }
+        for (auto& m : messages) {
+            m.labelIds = byMsg.value(m.accountId + QChar('\t') + m.id);
+        }
+        return;
+    }
+
     q.prepare(QStringLiteral(
         "SELECT message_id, label_id FROM message_labels "
         "WHERE account_id = ? AND message_id IN (%1)").arg(placeholders));
@@ -561,6 +600,115 @@ QStringList MessageRepository::dueSnoozeWakeups(const QString& accountId) {
     q.bindValue(QStringLiteral(":now"), QDateTime::currentMSecsSinceEpoch());
     if (!q.exec()) return out;
     while (q.next()) out << q.value(0).toString();
+    return out;
+}
+
+// ---------- Cross-account API (v2) ----------
+
+std::vector<fc::Message> MessageRepository::listByLabelAllAccounts(
+        const QString& labelId, int limit, int offset) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+
+    QSqlQuery q(db);
+    // Cross-account: don't filter by m.account_id. The composite-key
+    // join still constrains label edges to their own account so a
+    // shared label id (e.g. "INBOX") only matches edges scoped to the
+    // same row's account_id.
+    q.prepare(QStringLiteral(
+        "SELECT m.* FROM messages m "
+        "JOIN message_labels ml "
+        "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+        "WHERE ml.label_id = :l "
+        "ORDER BY m.internal_date DESC "
+        "LIMIT :lim OFFSET :off"));
+    q.bindValue(QStringLiteral(":l"),   labelId);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), offset);
+    if (!q.exec()) return out;
+    while (q.next()) out.push_back(rowToMessage(QString(), q));
+    hydrateLabelIds(QString(), out);
+    return out;
+}
+
+std::vector<fc::Message> MessageRepository::listThreadsByLabelAllAccounts(
+        const QString& labelId, int limit, int offset) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+
+    QSqlQuery q(db);
+    q.prepare(buildThreadRollupSql(QStringLiteral(
+        "JOIN message_labels ml "
+        "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+        "WHERE ml.label_id = :l")));
+    q.bindValue(QStringLiteral(":l"),   labelId);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), offset);
+    if (!q.exec()) {
+        qWarning("listThreadsByLabelAllAccounts: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) {
+        auto m = rowToMessage(QString(), q);
+        hydrateThreadAggregates(q, m);
+        out.push_back(std::move(m));
+    }
+    hydrateLabelIds(QString(), out);
+    return out;
+}
+
+std::vector<fc::Message> MessageRepository::searchFtsAllAccounts(
+        const QString& query, int limit) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    const QString fts = normaliseFtsQuery(query);
+    if (fts.isEmpty()) return out;
+
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT m.* FROM messages m "
+        "JOIN messages_fts f ON f.rowid = m.rowid "
+        "WHERE messages_fts MATCH :q "
+        "ORDER BY rank, m.internal_date DESC "
+        "LIMIT :lim"));
+    q.bindValue(QStringLiteral(":q"),   fts);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    if (!q.exec()) {
+        qWarning("FTS search (all accounts) failed: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) out.push_back(rowToMessage(QString(), q));
+    hydrateLabelIds(QString(), out);
+    return out;
+}
+
+std::vector<fc::Message> MessageRepository::searchFtsThreadsAllAccounts(
+        const QString& query, int limit) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    const QString fts = normaliseFtsQuery(query);
+    if (fts.isEmpty()) return out;
+
+    QSqlQuery q(db);
+    q.prepare(buildThreadRollupSql(QStringLiteral(
+        "JOIN messages_fts f ON f.rowid = m.rowid "
+        "WHERE messages_fts MATCH :q")));
+    q.bindValue(QStringLiteral(":q"),   fts);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), 0);
+    if (!q.exec()) {
+        qWarning("FTS thread search (all accounts) failed: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) {
+        auto m = rowToMessage(QString(), q);
+        hydrateThreadAggregates(q, m);
+        out.push_back(std::move(m));
+    }
+    hydrateLabelIds(QString(), out);
     return out;
 }
 

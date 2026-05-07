@@ -65,10 +65,15 @@ private slots:
 
     void buildsSystemLabelsUnderFoldersSectionInOrder() {
         fc::LabelTreeModel m;
-        // Top level is now exactly the two synthetic section parents,
-        // "Folders" and "Labels", each with TypeRole == "section".
-        QCOMPARE(m.rowCount(), 2);
-        const auto folders = m.index(0, 0);
+        // v2 added an "All Inboxes" synthetic node at the top, ahead of
+        // the per-account "Folders" / "Labels" sections.
+        QCOMPARE(m.rowCount(), 3);
+        const auto all = m.index(0, 0);
+        QCOMPARE(all.data(fc::LabelTreeModel::TypeRole).toString(),
+                 QStringLiteral("synthetic"));
+        QCOMPARE(all.data(fc::LabelTreeModel::IdRole).toString(),
+                 QStringLiteral("__all_inboxes"));
+        const auto folders = m.index(1, 0);
         QCOMPARE(folders.data(fc::LabelTreeModel::TypeRole).toString(),
                  QStringLiteral("section"));
         QCOMPARE(folders.data(fc::LabelTreeModel::NameRole).toString(),

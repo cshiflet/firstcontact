@@ -38,6 +38,28 @@ public:
     static std::vector<fc::Message> searchFtsThreads(const QString& accountId,
                                                      const QString& query,
                                                      int limit);
+
+    // ---------- Cross-account API (v2 unified inbox) ----------
+
+    // Returns messages across every account that carries the given
+    // label id (e.g. "INBOX"). Ordered newest-first across accounts.
+    // Used by the "All Inboxes" sidebar entry.
+    static std::vector<fc::Message> listByLabelAllAccounts(
+        const QString& labelId, int limit, int offset);
+
+    // Conversation-view variant. Threads are partitioned by
+    // (account_id, thread_id) so a coincidence of thread ids across
+    // accounts (rare; possible for shared aliases) doesn't fold.
+    static std::vector<fc::Message> listThreadsByLabelAllAccounts(
+        const QString& labelId, int limit, int offset);
+
+    // Cross-account FTS5 search. The MATCH expression covers every
+    // account; results carry the source accountId so the caller can
+    // route a click back to the right context.
+    static std::vector<fc::Message> searchFtsAllAccounts(
+        const QString& query, int limit);
+    static std::vector<fc::Message> searchFtsThreadsAllAccounts(
+        const QString& query, int limit);
     static fc::Message              byId(const QString& accountId,
                                          const QString& id);
     static bool                     exists(const QString& accountId,

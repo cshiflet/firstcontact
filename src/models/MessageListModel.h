@@ -17,6 +17,9 @@ class MessageListModel : public QAbstractListModel {
 public:
     enum Roles {
         IdRole = Qt::UserRole + 1,
+        // v2: row's source accountId. Used by the unified inbox / cross-
+        // account search view so a click can route to the right context.
+        AccountIdRole,
         ThreadIdRole,
         FromRole,         // pretty: "Name" or addr
         SubjectRole,

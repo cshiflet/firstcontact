@@ -25,6 +25,7 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
 
     switch (role) {
         case IdRole:            return m.id;
+        case AccountIdRole:     return m.accountId;
         case ThreadIdRole:      return m.threadId;
         case FromRole:          return decode(
                                      m.fromName.isEmpty() ? m.fromAddr : m.fromName);
@@ -51,6 +52,7 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
 QHash<int, QByteArray> MessageListModel::roleNames() const {
     return {
         {IdRole,            "id"},
+        {AccountIdRole,     "accountId"},
         {ThreadIdRole,      "threadId"},
         {FromRole,          "from"},
         {SubjectRole,       "subject"},

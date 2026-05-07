@@ -211,6 +211,12 @@ private:
     // menu (step 8) and the AccountManagerDialog (step 9). Empty
     // before sign-in / after the last account is removed.
     QString                  currentAccountId_;
+
+    // v2: when the user clicks "All Inboxes" in the sidebar, the
+    // message list switches to a cross-account view. Selecting any
+    // per-account label flips it back to per-account mode and pins
+    // currentAccountId_.
+    bool                     crossAccountView_ = false;
 };
 
 }  // namespace fc::ui

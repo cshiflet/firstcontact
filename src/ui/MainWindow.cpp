@@ -1164,8 +1164,18 @@ void MainWindow::onRefresh() {
 }
 
 void MainWindow::onLabelSelected(const QString& id) {
-    if (id.isEmpty() || id == currentLabelId_) return;
-    currentLabelId_ = id;
+    if (id.isEmpty()) return;
+    // v2 unified inbox: clicking "__all_inboxes" flips to cross-
+    // account view. Any other label flips back to per-account.
+    const bool wasCross = crossAccountView_;
+    if (id == QStringLiteral("__all_inboxes")) {
+        crossAccountView_ = true;
+        currentLabelId_   = QStringLiteral("INBOX");   // implicit
+    } else {
+        crossAccountView_ = false;
+        currentLabelId_   = id;
+    }
+    if (!wasCross && !crossAccountView_ && id == currentLabelId_) return;
     reloadCurrentLabel();
 }
 
@@ -1184,13 +1194,24 @@ void MainWindow::reloadCurrentLabel() {
     const QString preservedId       = currentMessage_.id;
     const QString preservedThreadId = currentMessage_.threadId;
 
-    auto rows = currentSearchQuery_.isEmpty()
-        ? (conv
-            ? fc::cache::MessageRepository::listThreadsByLabel(currentAccountId_, currentLabelId_, kPageSize, 0)
-            : fc::cache::MessageRepository::listByLabel(currentAccountId_, currentLabelId_, kPageSize, 0))
-        : (conv
-            ? fc::cache::MessageRepository::searchFtsThreads(currentAccountId_, currentSearchQuery_, kPageSize)
-            : fc::cache::MessageRepository::searchFts(currentAccountId_, currentSearchQuery_, kPageSize));
+    // v2: cross-account view uses the *AllAccounts variants. Each
+    // returned row carries its source accountId so a click can route
+    // back to the right context.
+    auto rows = crossAccountView_
+        ? (currentSearchQuery_.isEmpty()
+            ? (conv
+                ? fc::cache::MessageRepository::listThreadsByLabelAllAccounts(currentLabelId_, kPageSize, 0)
+                : fc::cache::MessageRepository::listByLabelAllAccounts(currentLabelId_, kPageSize, 0))
+            : (conv
+                ? fc::cache::MessageRepository::searchFtsThreadsAllAccounts(currentSearchQuery_, kPageSize)
+                : fc::cache::MessageRepository::searchFtsAllAccounts(currentSearchQuery_, kPageSize)))
+        : (currentSearchQuery_.isEmpty()
+            ? (conv
+                ? fc::cache::MessageRepository::listThreadsByLabel(currentAccountId_, currentLabelId_, kPageSize, 0)
+                : fc::cache::MessageRepository::listByLabel(currentAccountId_, currentLabelId_, kPageSize, 0))
+            : (conv
+                ? fc::cache::MessageRepository::searchFtsThreads(currentAccountId_, currentSearchQuery_, kPageSize)
+                : fc::cache::MessageRepository::searchFts(currentAccountId_, currentSearchQuery_, kPageSize)));
     listModel_->replaceAll(std::move(rows));
 
     // Try to restore the selection: first by exact message id, then by
@@ -1237,19 +1258,29 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
     if (messageId.isEmpty()) return;
     currentRow_ = row;
 
-    fc::Message cached = fc::cache::MessageRepository::byId(currentAccountId_,
+    // v2: in cross-account mode, the row carries its source accountId.
+    // Resolve the lookup against that account so we don't fall back to
+    // currentAccountId_ (which is the toolbar selection, not the row's
+    // owner).
+    QString lookupAccount = currentAccountId_;
+    if (crossAccountView_ && currentRow_ >= 0) {
+        const auto idx = listModel_->index(currentRow_, 0);
+        const auto rowAcc = idx.data(fc::MessageListModel::AccountIdRole).toString();
+        if (!rowAcc.isEmpty()) lookupAccount = rowAcc;
+    }
+    fc::Message cached = fc::cache::MessageRepository::byId(lookupAccount,
                                                               messageId);
 
-    auto renderThread = [this](const fc::Message& selected) {
+    auto renderThread = [this, lookupAccount](const fc::Message& selected) {
         currentMessage_ = selected;
-        auto thread = fc::cache::MessageRepository::byThread(currentAccountId_,
+        auto thread = fc::cache::MessageRepository::byThread(lookupAccount,
                                                               selected.threadId);
         if (thread.size() > 1) {
             reader_->showThread(thread);
         } else {
             reader_->showMessage(selected);
         }
-        fc::cache::MessageRepository::markAccessed(currentAccountId_,
+        fc::cache::MessageRepository::markAccessed(lookupAccount,
                                                     selected.id);
 
         // Auto-mark-as-read on open. Mirrors Gmail web — opening a

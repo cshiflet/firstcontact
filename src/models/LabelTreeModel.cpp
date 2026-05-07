@@ -68,6 +68,21 @@ void LabelTreeModel::reload() {
         ? std::vector<fc::cache::LabelRow>{}
         : fc::cache::LabelRepository::all(accountId_);
 
+    // v2: a synthetic "All Inboxes" node at the top of the tree when
+    // there's at least one signed-in account (i.e. the legacy seed
+    // doesn't count — but the seed is always present, so we just
+    // unconditionally render it; clicking it asks MainWindow to
+    // switch to the cross-account view).
+    {
+        auto allInboxes = std::make_unique<Node>();
+        allInboxes->id       = QStringLiteral("__all_inboxes");
+        allInboxes->name     = QStringLiteral("All Inboxes");
+        allInboxes->fullName = QStringLiteral("__all_inboxes");
+        allInboxes->type     = QStringLiteral("synthetic");
+        allInboxes->parent   = root_;
+        root_->children.push_back(std::move(allInboxes));
+    }
+
     // Two synthetic section nodes at the top — "Folders" wraps the
     // canonical Gmail system labels, "Labels" wraps everything the user
     // created. Modeling them as real tree nodes (instead of painting

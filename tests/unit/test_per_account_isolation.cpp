@@ -106,6 +106,48 @@ private slots:
         for (const auto& r : allB) QCOMPARE(r.accountId, kAccountB);
     }
 
+    void crossAccountListByLabelReturnsAllRows() {
+        // Pre-req from messagesAreNotSharedAcrossAccounts: both
+        // accounts have INBOX labels and one message each.
+        auto inboxA = makeLabel(kAccountA, QStringLiteral("INBOX"),
+                                 QStringLiteral("Inbox"));
+        fc::cache::LabelRepository::upsert(kAccountA, inboxA);
+        auto inboxB = makeLabel(kAccountB, QStringLiteral("INBOX"),
+                                 QStringLiteral("Inbox"));
+        fc::cache::LabelRepository::upsert(kAccountB, inboxB);
+
+        // Re-seed the messages so this slot's order is deterministic.
+        auto mA = makeMessage(kAccountA, QStringLiteral("msg-A"),
+                              QStringLiteral("thr-A"), QStringLiteral("Hello A"));
+        mA.labelIds = {QStringLiteral("INBOX")};
+        fc::cache::MessageRepository::upsert(kAccountA, mA);
+
+        auto mB = makeMessage(kAccountB, QStringLiteral("msg-B"),
+                              QStringLiteral("thr-B"), QStringLiteral("Hello B"));
+        mB.labelIds = {QStringLiteral("INBOX")};
+        fc::cache::MessageRepository::upsert(kAccountB, mB);
+
+        const auto all = fc::cache::MessageRepository::listByLabelAllAccounts(
+            QStringLiteral("INBOX"), 100, 0);
+        bool sawA = false, sawB = false;
+        for (const auto& m : all) {
+            if (m.id == QStringLiteral("msg-A")) {
+                sawA = true;
+                QCOMPARE(m.accountId, kAccountA);
+            }
+            if (m.id == QStringLiteral("msg-B")) {
+                sawB = true;
+                QCOMPARE(m.accountId, kAccountB);
+            }
+        }
+        QVERIFY(sawA);
+        QVERIFY(sawB);
+
+        const auto fts = fc::cache::MessageRepository::searchFtsAllAccounts(
+            QStringLiteral("Hello"), 100);
+        QVERIFY(fts.size() >= 2);
+    }
+
     void messagesAreNotSharedAcrossAccounts() {
         // Pre-req: each account needs INBOX in labels (FK from
         // message_labels). seedLabels above did that for account A and

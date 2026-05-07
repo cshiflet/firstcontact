@@ -65,6 +65,30 @@ void LabelRepository::upsert(const QString& accountId, const LabelRow& l) {
                             qUtf8Printable(q.lastError().text()));
 }
 
+std::vector<LabelRow> LabelRepository::allAccounts() {
+    auto db = databaseHandle();
+    std::vector<LabelRow> out;
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT account_id, id, name, type, parent_id, color_bg, "
+            "       color_fg, unread_count, total_count "
+            "FROM labels ORDER BY account_id, name"))) return out;
+    while (q.next()) {
+        LabelRow l;
+        l.accountId   = q.value(0).toString();
+        l.id          = q.value(1).toString();
+        l.name        = q.value(2).toString();
+        l.type        = q.value(3).toString();
+        l.parentId    = q.value(4).toString();
+        l.colorBg     = q.value(5).toString();
+        l.colorFg     = q.value(6).toString();
+        l.unreadCount = q.value(7).toInt();
+        l.totalCount  = q.value(8).toInt();
+        out.push_back(std::move(l));
+    }
+    return out;
+}
+
 std::vector<LabelRow> LabelRepository::all(const QString& accountId) {
     auto db = databaseHandle();
     std::vector<LabelRow> out;
