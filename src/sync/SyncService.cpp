@@ -236,6 +236,8 @@ void SyncService::topUpLabel(const QString& labelId) {
         if (seed == labelId) return;
     }
 
+    emit topUpStarted(labelId);
+
     const QString tokenKey = topUpTokenKey(labelId);
     const QString pageToken = fc::cache::MetaRepository::get(tokenKey);
 
@@ -246,6 +248,7 @@ void SyncService::topUpLabel(const QString& labelId) {
             if (err) {
                 // Don't escalate — top-up is best-effort. The user
                 // still sees whatever's in the cache.
+                emit topUpFinished(labelId, 0);
                 return;
             }
             // Save the next page token (or clear it when we ran off
@@ -266,31 +269,43 @@ void SyncService::topUpLabel(const QString& labelId) {
                 // UI can refresh in case prior async writes have
                 // landed since the last reload.
                 emit messagesUpdated();
+                emit topUpFinished(labelId, 0);
                 return;
             }
             // fetchAndStoreMessages flips d_->busy and the FSM state
             // — fine: top-up doubles as a small sync pass and
             // benefits from the same guard against overlapping work.
+            // The completion callback fires AFTER all per-message
+            // getMessage round-trips have settled, so the
+            // topUpFinished signal lines up with the moment the user
+            // actually has the new rows.
             d_->busy = true;
             setState(State::IncrementalSync);
-            fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false);
+            const int storeCount = static_cast<int>(missing.size());
+            fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
+                [this, labelId, storeCount] {
+                    emit topUpFinished(labelId, storeCount);
+                });
         });
 }
 
 void SyncService::fetchAndStoreMessages(const QStringList& ids,
                                         int newCount,
-                                        bool isInitial) {
+                                        bool isInitial,
+                                        std::function<void()> done) {
     if (ids.isEmpty()) {
         d_->busy = false;
         setState(State::Idle);
         if (newCount > 0 && !isInitial) emit newMessages(newCount);
+        if (done) done();
         return;
     }
 
     auto remaining = std::make_shared<int>(ids.size());
     auto stored    = std::make_shared<int>(0);
 
-    auto onOne = [this, remaining, stored, newCount, isInitial]
+    auto onOne = [this, remaining, stored, newCount, isInitial,
+                   done = std::move(done)]
         (fc::Message m, fc::api::ApiError err) {
         if (!err && !m.id.isEmpty()) {
             fc::cache::MessageRepository::upsert(m);
@@ -303,6 +318,7 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         if (!isInitial && newCount > 0) emit newMessages(newCount);
         d_->busy = false;
         setState(State::Idle);
+        if (done) done();
     };
 
     // Concurrency limiter: kick off kSerialGetBatch and queue the rest.

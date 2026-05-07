@@ -672,6 +672,28 @@ void MainWindow::wireSignals() {
             this,        [this](const QString& labelId) {
                 if (sync_) sync_->topUpLabel(labelId);
             });
+
+    // Label-scoped progress messages for top-up. Generic stateChanged
+    // already shows "Syncing…" / "Syncing… Done" for INITIAL +
+    // INCREMENTAL passes; these layer on top with a label name when
+    // the top-up is for the visible label, so the user can tell
+    // "Syncing Receipts…" apart from a global background pass.
+    connect(sync_, &fc::sync::SyncService::topUpStarted, this,
+            [this](const QString& labelId) {
+                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+                statusBar()->showMessage(name.isEmpty()
+                    ? tr("Syncing…")
+                    : tr("Syncing %1…").arg(name));
+            });
+    connect(sync_, &fc::sync::SyncService::topUpFinished, this,
+            [this](const QString& labelId, int newRows) {
+                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+                if (name.isEmpty()) return;
+                const QString msg = newRows > 0
+                    ? tr("%1: %n new", "", newRows).arg(name)
+                    : tr("%1: up to date").arg(name);
+                statusBar()->showMessage(msg, 30000);
+            });
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
                 lastSyncFailed_ = true;

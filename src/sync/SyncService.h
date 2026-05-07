@@ -56,12 +56,20 @@ signals:
     // OAuth token response). Wired up in MainWindow.
     void profileFetched(const QString& email);
 
+    // Per-label top-up bracket: emitted around topUpLabel so the UI
+    // can show a label-specific "Syncing <name>…" / "<name>: Done"
+    // status instead of the generic stateChanged message. Fire-and-
+    // forget — listening is optional.
+    void topUpStarted(const QString& labelId);
+    void topUpFinished(const QString& labelId, int newRowsStored);
+
 private:
     void doInitialSync();
     void doIncrementalSync();
     void fetchAndStoreMessages(const QStringList& ids,
                                int newCount,
-                               bool isInitial);
+                               bool isInitial,
+                               std::function<void()> done = {});
     void setState(State s);
 
     struct Impl;
