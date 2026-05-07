@@ -124,6 +124,32 @@ private slots:
         QCOMPARE(spy.count(), 0);
     }
 
+    void accentColorRoundTrips() {
+        fc::account::AccountManager mgr;
+        const QString id = mgr.add(QStringLiteral("ac@example.test"));
+        QVERIFY(!id.isEmpty());
+
+        // Palette has the eight known slugs.
+        const auto palette = fc::account::AccountManager::accentPalette();
+        QCOMPARE(palette.size(), 8);
+        QVERIFY(palette.contains(QStringLiteral("blue")));
+
+        // Each slug maps to a valid colour; an unknown slug returns
+        // an invalid sentinel so the UI knows to fall back.
+        QVERIFY(fc::account::AccountManager::accentColorFor(
+            QStringLiteral("blue")).isValid());
+        QVERIFY(!fc::account::AccountManager::accentColorFor(
+            QStringLiteral("not-a-slug")).isValid());
+
+        // Setting + reading round-trips through the cache.
+        mgr.setAccentColor(id, QStringLiteral("teal"));
+        QCOMPARE(mgr.accountById(id).colorHint, QStringLiteral("teal"));
+
+        // Clearing (empty slug) writes NULL.
+        mgr.setAccentColor(id, QString());
+        QCOMPARE(mgr.accountById(id).colorHint, QString());
+    }
+
     void dropCacheWipesPerAccountTablesButKeepsAccountsRow() {
         fc::account::AccountManager mgr;
         const QString id = mgr.add(QStringLiteral("dc@example.test"));

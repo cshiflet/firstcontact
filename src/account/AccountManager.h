@@ -1,9 +1,11 @@
 #pragma once
 
+#include <QColor>
 #include <QHash>
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 namespace fc::auth { class ClientConfig; class TokenStore; }
 
@@ -83,6 +85,14 @@ public:
     // time setCurrentAccountId promotes a different account, so that
     // the next launch resumes on the most-recently-active one.
     void markUsed(const QString& id);
+
+    // v3 — per-account accent palette. Eight fixed slots ("blue",
+    // "green", "red", "purple", "orange", "teal", "pink", "yellow")
+    // mirror Gmail's label palette. Stored verbatim in accounts.color_hint;
+    // the UI maps the slug to a QColor via accentColorFor().
+    static QStringList accentPalette();
+    void setAccentColor(const QString& id, const QString& accentSlug);
+    static QColor accentColorFor(const QString& accentSlug);
 
     // Wipes every cache row scoped to the given account (messages,
     // threads, labels, message_labels, attachments, drafts, outbox,

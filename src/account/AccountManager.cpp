@@ -299,6 +299,53 @@ bool AccountManager::dropCache(const QString& id) {
     return true;
 }
 
+QStringList AccountManager::accentPalette() {
+    // 8 fixed slots, named by their dominant hue. Must stay stable —
+    // accounts.color_hint stores the slug verbatim, and a rename
+    // would orphan existing settings.
+    return {
+        QStringLiteral("blue"),
+        QStringLiteral("green"),
+        QStringLiteral("red"),
+        QStringLiteral("purple"),
+        QStringLiteral("orange"),
+        QStringLiteral("teal"),
+        QStringLiteral("pink"),
+        QStringLiteral("yellow"),
+    };
+}
+
+QColor AccountManager::accentColorFor(const QString& accentSlug) {
+    // Tones picked to be readable on both light and dark backgrounds
+    // — same palette spirit as Gmail's label colours.
+    if (accentSlug == QStringLiteral("blue"))   return QColor(0x42, 0x85, 0xf4);
+    if (accentSlug == QStringLiteral("green"))  return QColor(0x34, 0xa8, 0x53);
+    if (accentSlug == QStringLiteral("red"))    return QColor(0xea, 0x43, 0x35);
+    if (accentSlug == QStringLiteral("purple")) return QColor(0xa1, 0x42, 0xf4);
+    if (accentSlug == QStringLiteral("orange")) return QColor(0xf2, 0x8b, 0x30);
+    if (accentSlug == QStringLiteral("teal"))   return QColor(0x00, 0xa3, 0xa3);
+    if (accentSlug == QStringLiteral("pink"))   return QColor(0xe9, 0x42, 0x95);
+    if (accentSlug == QStringLiteral("yellow")) return QColor(0xfa, 0xb9, 0x00);
+    return QColor();   // invalid — caller paints the default chrome
+}
+
+void AccountManager::setAccentColor(const QString& id,
+                                     const QString& accentSlug) {
+    if (id.isEmpty()) return;
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "UPDATE accounts SET color_hint = :h WHERE id = :id"));
+    if (accentSlug.isEmpty()) {
+        q.bindValue(QStringLiteral(":h"),
+                    QVariant(QMetaType(QMetaType::QString)));
+    } else {
+        q.bindValue(QStringLiteral(":h"), accentSlug);
+    }
+    q.bindValue(QStringLiteral(":id"), id);
+    if (q.exec()) reload();
+}
+
 AccountInfo AccountManager::accountById(const QString& id) const {
     for (const auto& a : accounts_) {
         if (a.id == id) return a;

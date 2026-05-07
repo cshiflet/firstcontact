@@ -7,10 +7,13 @@
 #include "ui/common/IconLoader.h"
 
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QVBoxLayout>
@@ -116,6 +119,20 @@ void AccountManagerDialog::rebuild() {
         rowLayout->setContentsMargins(14, 10, 14, 10);
         rowLayout->setSpacing(10);
 
+        // v3: per-account accent stripe along the left edge of each
+        // row. Hidden when no accent is assigned (default state).
+        const QColor accent = fc::account::AccountManager::accentColorFor(
+            a.colorHint);
+        if (accent.isValid()) {
+            auto* stripe = new QFrame(row);
+            stripe->setFixedWidth(4);
+            stripe->setAutoFillBackground(true);
+            QPalette pal = stripe->palette();
+            pal.setColor(QPalette::Window, accent);
+            stripe->setPalette(pal);
+            rowLayout->addWidget(stripe, 0, Qt::AlignVCenter);
+        }
+
         auto* avatar = new QLabel(row);
         avatar->setPixmap(IconLoader::themed(QStringLiteral("user.svg"))
                               .pixmap(28, 28));
@@ -148,6 +165,40 @@ void AccountManagerDialog::rebuild() {
             if (accounts_) accounts_->setDefault(accountId);
         });
         rowLayout->addWidget(defaultRadio, 0, Qt::AlignVCenter);
+
+        // v3: accent colour picker. A small QComboBox of palette slots,
+        // each rendered as a coloured swatch. The first entry is "None"
+        // (clears the accent).
+        auto* accentCombo = new QComboBox(row);
+        {
+            auto makeSwatch = [](const QColor& c) {
+                QPixmap pm(16, 16);
+                pm.fill(Qt::transparent);
+                if (c.isValid()) {
+                    QPainter p(&pm);
+                    p.setRenderHint(QPainter::Antialiasing);
+                    p.setBrush(c);
+                    p.setPen(Qt::NoPen);
+                    p.drawEllipse(2, 2, 12, 12);
+                }
+                return QIcon(pm);
+            };
+            accentCombo->addItem(makeSwatch(QColor()), tr("None"), QString());
+            for (const QString& slug
+                 : fc::account::AccountManager::accentPalette()) {
+                accentCombo->addItem(
+                    makeSwatch(fc::account::AccountManager::accentColorFor(slug)),
+                    slug, slug);
+            }
+            const int idx = accentCombo->findData(a.colorHint);
+            if (idx >= 0) accentCombo->setCurrentIndex(idx);
+        }
+        connect(accentCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+                this, [this, accountId, accentCombo](int) {
+            const QString slug = accentCombo->currentData().toString();
+            if (accounts_) accounts_->setAccentColor(accountId, slug);
+        });
+        rowLayout->addWidget(accentCombo, 0, Qt::AlignVCenter);
 
         auto* signOutBtn = new QPushButton(
             IconLoader::themed(QStringLiteral("logout.svg")),

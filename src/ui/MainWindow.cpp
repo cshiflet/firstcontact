@@ -59,6 +59,8 @@
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QSize>
@@ -974,12 +976,31 @@ void MainWindow::refreshAccountMenu() {
     // AccountManager::setCurrentAccountId, which retargets sidebar /
     // list / reader. Accounts without a persisted email show as
     // "Unknown account" until the next initial sync runs.
+    //
+    // v3: each entry's icon is a small filled circle in the account's
+    // accent colour (or a transparent placeholder when no accent is
+    // assigned, so the menu rows stay aligned).
     const auto allAccounts = accounts_->accounts();
     if (!allAccounts.isEmpty()) {
         for (const auto& a : allAccounts) {
             QString label = a.email.isEmpty() ? tr("Unknown account") : a.email;
             if (a.isDefault) label += tr(" (default)");
-            auto* act = accountMenu_->addAction(label);
+            QIcon chip;
+            {
+                QPixmap pm(16, 16);
+                pm.fill(Qt::transparent);
+                const QColor c = fc::account::AccountManager::accentColorFor(
+                    a.colorHint);
+                if (c.isValid()) {
+                    QPainter p(&pm);
+                    p.setRenderHint(QPainter::Antialiasing);
+                    p.setBrush(c);
+                    p.setPen(Qt::NoPen);
+                    p.drawEllipse(2, 2, 12, 12);
+                }
+                chip = QIcon(pm);
+            }
+            auto* act = accountMenu_->addAction(chip, label);
             act->setCheckable(true);
             act->setChecked(a.id == currentAccountId_);
             const QString id = a.id;
