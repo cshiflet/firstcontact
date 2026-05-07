@@ -102,6 +102,14 @@ private slots:
     // Gmail-web `g i / s / t / d`: jump the sidebar selection to a
     // system label without leaving the keyboard.
     void onGoToLabel(const QString& labelId);
+    // Gmail-web `l` (Apply labels…): pop the LabelChooserDialog in
+    // multi-select mode pre-filled with the thread's current label
+    // set; on accept, push the diff through applyLabelDiffToThread.
+    void onApplyLabelsCurrent();
+    // Gmail-web `v` (Move to label…): single-select picker; on accept,
+    // add the chosen label and drop the active sidebar label (so the
+    // conversation moves rather than gains a label).
+    void onMoveToLabelCurrent();
     // Snooze the current thread: pop a time-picker, drop INBOX, stamp
     // every message's snooze_until. A periodic wake-up timer in
     // MainWindow re-applies INBOX once the snooze window lapses.

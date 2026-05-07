@@ -14,6 +14,7 @@
 #include "cache/PendingOpsRepository.h"
 #include "common/AccountManagerDialog.h"
 #include "common/IconLoader.h"
+#include "common/LabelChooserDialog.h"
 #include "common/LabelStyleCache.h"
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
@@ -776,10 +777,8 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::backToList,     this, &MainWindow::onBackToList);
     connect(shortcuts_, &Shortcuts::openCurrent,    this, &MainWindow::onOpenCurrent);
     connect(shortcuts_, &Shortcuts::goToLabel,      this, &MainWindow::onGoToLabel);
-    // Shortcuts::applyLabels (`l`) and moveToLabel (`v`) are wired in
-    // Phase 2 once the LabelChooserDialog lands. Until then the
-    // keybinds are no-ops so muscle memory built in Phase 2 doesn't
-    // conflict with anything.
+    connect(shortcuts_, &Shortcuts::applyLabels,    this, &MainWindow::onApplyLabelsCurrent);
+    connect(shortcuts_, &Shortcuts::moveToLabel,    this, &MainWindow::onMoveToLabelCurrent);
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
         const int n = listModel_->rowCount();
         if (n == 0) return;
@@ -1752,6 +1751,78 @@ void MainWindow::onMarkNotImportant() {
 void MainWindow::onGoToLabel(const QString& labelId) {
     if (!sidebar_) return;
     sidebar_->selectLabel(labelId);
+}
+
+void MainWindow::onApplyLabelsCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("apply-labels"))) {
+        statusBar()->showMessage(tr("Dry-run mode: label edit blocked."), 4000);
+        return;
+    }
+
+    // Union of label ids across every message in the thread — that's
+    // the set the dialog should pre-check. Using a thread-level union
+    // matches what the user sees in the message-list row badges and
+    // avoids the surprise of "I checked Work but only one of three
+    // messages had it; now the others are missing it."
+    const auto messages = fc::cache::MessageRepository::byThread(
+                              currentMessage_.threadId);
+    QSet<QString> applied;
+    for (const auto& m : messages) {
+        for (const auto& id : m.labelIds) applied.insert(id);
+    }
+
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, applied, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QStringList add = dlg.added();
+    const QStringList rem = dlg.removed();
+    if (add.isEmpty() && rem.isEmpty()) return;
+
+    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    statusBar()->showMessage(tr("Labels updated."), 3000);
+    reloadCurrentLabel();
+    reloadSidebar();
+}
+
+void MainWindow::onMoveToLabelCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("move-to-label"))) {
+        statusBar()->showMessage(tr("Dry-run mode: move blocked."), 4000);
+        return;
+    }
+
+    const auto messages = fc::cache::MessageRepository::byThread(
+                              currentMessage_.threadId);
+    QSet<QString> applied;
+    for (const auto& m : messages) {
+        for (const auto& id : m.labelIds) applied.insert(id);
+    }
+
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, applied, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString chosen = dlg.chosen();
+    if (chosen.isEmpty()) return;  // nothing picked
+
+    // "Move" semantics: add the chosen label, drop the active sidebar
+    // label. The sidebar label is what the user is currently looking
+    // at (e.g. INBOX, or some user label). For system pseudo-labels
+    // ("STARRED", "SENT", "DRAFT") moving doesn't really make sense
+    // — the action there degrades gracefully to a plain "add label",
+    // which is the right thing to do.
+    QStringList rem;
+    if (!currentLabelId_.isEmpty() && currentLabelId_ != chosen) {
+        rem << currentLabelId_;
+    }
+    QStringList add;
+    if (!applied.contains(chosen)) add << chosen;
+
+    if (add.isEmpty() && rem.isEmpty()) return;
+    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    statusBar()->showMessage(tr("Moved."), 3000);
+    reloadCurrentLabel();
+    reloadSidebar();
 }
 
 void MainWindow::onShowShortcutsHelp() {
