@@ -5,6 +5,7 @@
 #include "auth/TokenStore.h"
 #include "cache/Database.h"
 #include "cache/Migrations.h"
+#include "sync/SyncService.h"
 
 #include <QDateTime>
 #include <QSqlDatabase>
@@ -50,8 +51,24 @@ void AccountManager::buildContextsForAllAccounts() {
     if (!config_ || !tokenStore_) return;
     for (const auto& a : accounts_) {
         if (contexts_.contains(a.id)) continue;
-        contexts_.insert(a.id,
-            new AccountContext(a.id, config_, tokenStore_, this));
+        auto* ctx = new AccountContext(a.id, config_, tokenStore_, this);
+        contexts_.insert(a.id, ctx);
+        // Re-emit each context's per-account sync signals tagged with
+        // the account id so a single connection point in MainWindow
+        // reaches every account.
+        if (auto* s = ctx->sync()) {
+            const QString aid = a.id;
+            connect(s, &fc::sync::SyncService::labelsUpdated, this,
+                    [this, aid] { emit labelsUpdated(aid); });
+            connect(s, &fc::sync::SyncService::messagesUpdated, this,
+                    [this, aid] { emit messagesUpdated(aid); });
+            connect(s, &fc::sync::SyncService::newMessages, this,
+                    [this, aid](int count) { emit newMessages(aid, count); });
+            connect(s, &fc::sync::SyncService::failed, this,
+                    [this, aid](const QString& reason) {
+                        emit syncFailed(aid, reason);
+                    });
+        }
     }
 }
 
@@ -61,6 +78,13 @@ AccountContext* AccountManager::contextFor(const QString& id) const {
 
 AccountContext* AccountManager::currentContext() const {
     return contextFor(currentId_);
+}
+
+QList<AccountContext*> AccountManager::allContexts() const {
+    QList<AccountContext*> out;
+    out.reserve(contexts_.size());
+    for (auto* c : contexts_) out << c;
+    return out;
 }
 
 AccountContext* AccountManager::ensureContext(const QString& id) {

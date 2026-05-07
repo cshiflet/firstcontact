@@ -93,6 +93,9 @@ public:
     // context (account not yet signed in).
     AccountContext* contextFor(const QString& id) const;
     AccountContext* currentContext() const;
+    // List every active context. Used by MainWindow to start one
+    // sync scheduler per signed-in account, and by the workers.
+    QList<AccountContext*> allContexts() const;
 
     // Wires (or rebuilds) an AccountContext for the given account id.
     // Idempotent: a second call returns the same context. Returns
@@ -103,9 +106,15 @@ public:
 signals:
     void accountsChanged();              // accounts list mutated (add/remove/default)
     void currentAccountChanged(const QString& id);
-    // Step 6 will fire this after a sync ticks an account-scoped
-    // signal; for now it's plumbed but unused.
+    // Cross-account aggregated sync signals. Each per-account
+    // SyncService emits its own signals; AccountManager re-emits them
+    // tagged with the source accountId so MainWindow can react
+    // appropriately (e.g. only repaint the message list when the
+    // current account is the one that ticked).
+    void labelsUpdated(const QString& accountId);
     void messagesUpdated(const QString& accountId);
+    void newMessages(const QString& accountId, int count);
+    void syncFailed(const QString& accountId, const QString& reason);
 
 private:
     void selectInitialCurrent();

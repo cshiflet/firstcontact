@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "account/AccountContext.h"
 #include "account/AccountManager.h"
 #include "api/GmailClient.h"
 #include "api/SessionTransfer.h"
@@ -195,10 +196,24 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         snoozeTimer->start();
     }
 
-    // If we have credentials already, kick off background sync.
+    // If we have credentials already, kick off background sync. With
+    // per-account contexts (step 6+), each account runs its own
+    // SyncService timer so a stuck account doesn't starve others; the
+    // workers stay shared because their drain queries run cross-account
+    // and dispatch via the GmailResolver.
     if (auth_->isAuthorized()) {
-        sync_->runOnce();
-        sync_->startScheduler();
+        for (auto* ctx : accounts_->allContexts()) {
+            if (auto* s = ctx->sync()) {
+                s->runOnce();
+                s->startScheduler();
+            }
+        }
+        // If no contexts (anonymous fallback) fire the legacy sync
+        // path so the sign-in flow still completes.
+        if (accounts_->allContexts().isEmpty() && sync_) {
+            sync_->runOnce();
+            sync_->startScheduler();
+        }
         outbox_->start();
         pending_->start();
         drafts_->start();
@@ -520,8 +535,19 @@ void MainWindow::wireSignals() {
 
     connect(auth_, &fc::auth::OAuthClient::granted, this, [this] {
         refreshAccountIndicator();
-        sync_->runOnce();
-        sync_->startScheduler();
+        // Start every per-account scheduler. New contexts that arrive
+        // mid-session (Add account flow) are caught by the
+        // accountsChanged hook below.
+        for (auto* ctx : accounts_->allContexts()) {
+            if (auto* s = ctx->sync()) {
+                s->runOnce();
+                s->startScheduler();
+            }
+        }
+        if (accounts_->allContexts().isEmpty() && sync_) {
+            sync_->runOnce();
+            sync_->startScheduler();
+        }
         outbox_->start();
         pending_->start();
         drafts_->start();
@@ -627,6 +653,27 @@ void MainWindow::wireSignals() {
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this, [this] {
                 LabelStyleCache::instance().invalidate(currentAccountId_);
+            });
+    // Aggregated per-account signals from AccountManager: any signed-in
+    // account's sync ticks land here. We only repaint when the source
+    // is the active account; other accounts' messagesUpdated still
+    // tick the workers (Outbox / PendingOps / DraftSync) without
+    // clobbering the UI.
+    connect(accounts_, &fc::account::AccountManager::labelsUpdated, this,
+            [this](const QString& aid) {
+                if (aid != currentAccountId_) return;
+                LabelStyleCache::instance().invalidate(currentAccountId_);
+                reloadSidebar();
+            });
+    connect(accounts_, &fc::account::AccountManager::messagesUpdated, this,
+            [this](const QString& aid) {
+                if (aid == currentAccountId_) reloadCurrentLabel();
+            });
+    connect(accounts_, &fc::account::AccountManager::newMessages, this,
+            [this](const QString& aid, int count) {
+                if (aid == currentAccountId_) onNewMessages(count);
+                // TODO(step 11): per-account tray attribution for non-
+                // current accounts ("New mail in chris@example.com").
             });
     connect(&LabelStyleCache::instance(), &LabelStyleCache::changed, this,
             [this] {
@@ -906,7 +953,13 @@ void MainWindow::onSignOut() {
             fc::cache::MetaRepository::set(currentAccountId_,
                                            QStringLiteral("email"), QString());
         }
-        sync_->stopScheduler();
+        // Stop every per-account scheduler. Step 9 distinguishes
+        // "sign out this account" from "sign out everything"; for now
+        // we treat sign-out as global.
+        for (auto* ctx : accounts_->allContexts()) {
+            if (auto* s = ctx->sync()) s->stopScheduler();
+        }
+        if (sync_) sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
         drafts_->stop();
@@ -926,7 +979,10 @@ void MainWindow::onSwitchAccount() {
             fc::cache::MetaRepository::set(currentAccountId_,
                                            QStringLiteral("email"), QString());
         }
-        sync_->stopScheduler();
+        for (auto* ctx : accounts_->allContexts()) {
+            if (auto* s = ctx->sync()) s->stopScheduler();
+        }
+        if (sync_) sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
         drafts_->stop();
