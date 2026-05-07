@@ -45,6 +45,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
@@ -234,10 +235,16 @@ void MainWindow::buildToolBar() {
     //   1 Settings, 2 Forward, 3 Delete, 4 Refresh,
     //   5 Reply all, 6 Reply, 7 Compose, 8 Account
     // Search itself is exempt — it shrinks in place down to ~120 px.
+    //
+    // Shortcut hint: appended to the tooltip in parens. Empty string
+    // means the action has no associated keybind.
     auto withIcon = [this, tb](const QString& svgName, const QString& label,
-                                int priority) {
+                                int priority,
+                                const QString& shortcutHint = QString()) {
         auto* a = tb->addAction(IconLoader::themed(svgName), label);
-        a->setToolTip(label);
+        a->setToolTip(shortcutHint.isEmpty()
+            ? label
+            : QStringLiteral("%1 (%2)").arg(label, shortcutHint));
         iconActions_.append({a, svgName});
         if (priority > 0) {
             overflowEntries_.push_back({a, /*before=*/nullptr, label, priority, {}, {}});
@@ -245,14 +252,22 @@ void MainWindow::buildToolBar() {
         return a;
     };
 
-    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    7);
-    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6);
-    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5);
-    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2);
-    auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3);
-    auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2);
-    auto* snoozeAct  = withIcon(QStringLiteral("snooze.svg"),    tr("Snooze"),     2);
-    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2);
+    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    7,
+                                 QStringLiteral("c"));
+    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6,
+                                 QStringLiteral("r"));
+    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5,
+                                 QStringLiteral("a"));
+    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2,
+                                 QStringLiteral("f"));
+    auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3,
+                                 QStringLiteral("e"));
+    auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2,
+                                 tr("Shift+I / Shift+U"));
+    auto* snoozeAct  = withIcon(QStringLiteral("snooze.svg"),    tr("Snooze"),     2,
+                                 QStringLiteral("b"));
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2,
+                                 QStringLiteral("#"));
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -291,6 +306,12 @@ void MainWindow::buildToolBar() {
 
     auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
     auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 1);
+    // Search bar's leading-icon tooltip — same pattern: pressing `/`
+    // anywhere in the window pops focus back into the search box.
+    if (searchIconAction_) {
+        searchIconAction_->setToolTip(tr("Search (/)"));
+    }
+    searchEdit_->setToolTip(tr("Search mail — Gmail syntax. Press / to focus."));
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
@@ -743,7 +764,13 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
     connect(shortcuts_, &Shortcuts::deleteCurrent,  this, &MainWindow::onDeleteCurrent);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
-    connect(shortcuts_, &Shortcuts::toggleRead,     this, &MainWindow::onToggleReadCurrent);
+    connect(shortcuts_, &Shortcuts::markRead,       this, &MainWindow::onMarkReadCurrent);
+    connect(shortcuts_, &Shortcuts::markUnread,     this, &MainWindow::onMarkUnreadCurrent);
+    connect(shortcuts_, &Shortcuts::snoozeCurrent,  this, &MainWindow::onSnoozeCurrent);
+    connect(shortcuts_, &Shortcuts::backToList,     this, &MainWindow::onBackToList);
+    // Shortcuts::applyLabels (`l`) is wired in Phase 2 once the
+    // LabelChooserDialog lands. Until then the keybind is a no-op so
+    // muscle memory built in Phase 2 doesn't conflict with anything.
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
         const int n = listModel_->rowCount();
         if (n == 0) return;
@@ -759,13 +786,7 @@ void MainWindow::wireSignals() {
         onMessageActivated(listModel_->index(row, 0)
                               .data(fc::MessageListModel::IdRole).toString(), row);
     });
-    connect(shortcuts_, &Shortcuts::showHelp, this, [this] {
-        QMessageBox::information(this, tr("Keyboard shortcuts"),
-            tr("/  focus search\n"
-               "j  next message\nk  previous message\n"
-               "c  compose\nr  reply\nShift+R  reply all\nf  forward\n"
-               "e  archive\n#  delete\ns  toggle star\n?  this help"));
-    });
+    connect(shortcuts_, &Shortcuts::showHelp, this, &MainWindow::onShowShortcutsHelp);
 }
 
 namespace {
@@ -1579,17 +1600,125 @@ void MainWindow::onToggleReadCurrent() {
     bool anyUnread = false;
     for (const auto& m : messages) if (m.isUnread) { anyUnread = true; break; }
 
-    QStringList add, rem;
-    if (anyUnread) rem << QStringLiteral("UNREAD");
-    else           add << QStringLiteral("UNREAD");
+    if (anyUnread) onMarkReadCurrent();
+    else           onMarkUnreadCurrent();
+}
 
-    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
-    currentMessage_.isUnread = !anyUnread;
-    statusBar()->showMessage(anyUnread ? tr("Marked as read.")
-                                       : tr("Marked as unread."),
-                              3000);
+void MainWindow::onMarkReadCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-read"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-read blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {}, {QStringLiteral("UNREAD")});
+    currentMessage_.isUnread = false;
+    statusBar()->showMessage(tr("Marked as read."), 3000);
     reloadCurrentLabel();
     reloadSidebar();
+}
+
+void MainWindow::onMarkUnreadCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-unread"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-unread blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {QStringLiteral("UNREAD")}, {});
+    currentMessage_.isUnread = true;
+    statusBar()->showMessage(tr("Marked as unread."), 3000);
+    reloadCurrentLabel();
+    reloadSidebar();
+}
+
+void MainWindow::onBackToList() {
+    // Gmail-web `u`: yank focus from the reader pane back to the
+    // threadlist. Doesn't change selection — pressing j/k from there
+    // continues to navigate from where you were.
+    if (!list_) return;
+    list_->setFocus(Qt::ShortcutFocusReason);
+    if (currentRow_ >= 0 && currentRow_ < listModel_->rowCount()) {
+        list_->setCurrentIndex(listModel_->index(currentRow_, 0));
+    }
+}
+
+void MainWindow::onShowShortcutsHelp() {
+    // Grouped reference modeled on Gmail-web's own "?" overlay.
+    // We render via a QDialog with a QGridLayout so the shortcut keys
+    // stay right-aligned in their own column and the descriptions stay
+    // left-aligned in another, regardless of translation length.
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Keyboard shortcuts"));
+    dlg.setModal(true);
+
+    auto* outer = new QVBoxLayout(&dlg);
+
+    struct Group { QString title; QList<QPair<QString, QString>> rows; };
+    const QList<Group> groups = {
+        { tr("Navigation"), {
+            { QStringLiteral("/"),       tr("Focus search") },
+            { QStringLiteral("j"),       tr("Next message") },
+            { QStringLiteral("k"),       tr("Previous message") },
+            { QStringLiteral("u"),       tr("Back to threadlist") },
+        }},
+        { tr("Compose"), {
+            { QStringLiteral("c"),                 tr("New message") },
+            { QStringLiteral("r"),                 tr("Reply") },
+            { tr("a or Shift+R"),                  tr("Reply all") },
+            { QStringLiteral("f"),                 tr("Forward") },
+        }},
+        { tr("Read state"), {
+            { QStringLiteral("Shift+I"), tr("Mark as read") },
+            { QStringLiteral("Shift+U"), tr("Mark as unread") },
+            { QStringLiteral("s"),       tr("Toggle star") },
+        }},
+        { tr("Organize"), {
+            { QStringLiteral("e"),       tr("Archive conversation") },
+            { QStringLiteral("#"),       tr("Delete conversation") },
+            { QStringLiteral("b"),       tr("Snooze conversation") },
+            { QStringLiteral("l"),       tr("Apply labels") },
+        }},
+        { tr("Help"), {
+            { QStringLiteral("?"),       tr("Show this dialog") },
+        }},
+    };
+
+    for (const Group& g : groups) {
+        auto* heading = new QLabel(QStringLiteral("<b>%1</b>").arg(g.title), &dlg);
+        outer->addWidget(heading);
+
+        auto* grid = new QGridLayout;
+        grid->setContentsMargins(16, 0, 0, 0);
+        grid->setHorizontalSpacing(18);
+        grid->setVerticalSpacing(4);
+
+        int row = 0;
+        for (const auto& kv : g.rows) {
+            auto* keyLabel = new QLabel(QStringLiteral("<code>%1</code>").arg(kv.first), &dlg);
+            keyLabel->setTextFormat(Qt::RichText);
+            keyLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            keyLabel->setMinimumWidth(110);
+            grid->addWidget(keyLabel, row, 0);
+
+            auto* descLabel = new QLabel(kv.second, &dlg);
+            descLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            grid->addWidget(descLabel, row, 1);
+            ++row;
+        }
+        outer->addLayout(grid);
+        outer->addSpacing(6);
+    }
+
+    auto* closeBtn = new QPushButton(tr("Close"), &dlg);
+    closeBtn->setDefault(true);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    btnRow->addWidget(closeBtn);
+    outer->addLayout(btnRow);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
 }
 
 void MainWindow::onSnoozeCurrent() {

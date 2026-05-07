@@ -72,6 +72,16 @@ private slots:
     // message in the thread carries UNREAD we drop UNREAD from every
     // message; otherwise we add UNREAD to every message.
     void onToggleReadCurrent();
+    // Explicit Gmail-web bindings: Shift+I always marks the current
+    // thread as read, Shift+U always marks it unread (no toggle).
+    void onMarkReadCurrent();
+    void onMarkUnreadCurrent();
+    // Gmail-web `u`: return focus to the threadlist. Doesn't change
+    // selection or read state — just yanks keyboard focus away from
+    // whatever child widget had it (typically the reader pane).
+    void onBackToList();
+    // Gmail-web `?`: show a proper grouped keyboard shortcuts dialog.
+    void onShowShortcutsHelp();
     // Snooze the current thread: pop a time-picker, drop INBOX, stamp
     // every message's snooze_until. A periodic wake-up timer in
     // MainWindow re-applies INBOX once the snooze window lapses.
