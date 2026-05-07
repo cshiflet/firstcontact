@@ -14,6 +14,11 @@ struct OutgoingMessage {
     QStringList bcc;
     QString subject;
     QString bodyText;
+    // When non-empty, MimeBuilder emits a multipart/alternative body
+    // with bodyText as the text/plain part and bodyHtml as the
+    // text/html part. Empty → plain-text-only message (preserving
+    // every existing call site's behavior).
+    QString bodyHtml;
     QString inReplyToMessageId;     // Gmail message id for reply (used to lookup Message-ID)
     QString rfc822InReplyTo;        // Message-ID header value (with <…>) of the parent
     QStringList rfc822References;   // accumulated References thread chain

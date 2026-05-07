@@ -88,6 +88,53 @@ private slots:
         QVERIFY(rfc.contains("In-Reply-To: <orig@y.test>"));
         QVERIFY(rfc.contains("References: <grand@z.test> <orig@y.test>"));
     }
+
+    void buildsMultipartAlternativeWhenHtmlPresent() {
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("rich");
+        m.bodyText = QStringLiteral("plain hi");
+        m.bodyHtml = QStringLiteral("<p>plain <b>hi</b></p>");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Top-level Content-Type flips to multipart/alternative with a
+        // boundary parameter — and there's no top-level CTE header.
+        const auto headers = rfc.left(rfc.indexOf("\r\n\r\n"));
+        QVERIFY(headers.contains("Content-Type: multipart/alternative;"));
+        QVERIFY(headers.contains("boundary=\"fc--"));
+        QVERIFY(!headers.contains("Content-Transfer-Encoding:"));
+
+        // RFC 2046 §5.1.4: plain BEFORE html so conformant clients pick
+        // html (last understood part wins).
+        const int plainPos = rfc.indexOf("Content-Type: text/plain");
+        const int htmlPos  = rfc.indexOf("Content-Type: text/html");
+        QVERIFY(plainPos > 0);
+        QVERIFY(htmlPos  > plainPos);
+
+        // Each alternative part is base64-encoded.
+        QVERIFY(rfc.contains("Content-Transfer-Encoding: base64"));
+
+        // The body has a closing "--<boundary>--" terminator.
+        // (We can't assert the exact boundary token without parsing it
+        // out — settle for the trailing closing-marker pattern.)
+        QVERIFY(rfc.contains("--\r\n"));
+    }
+
+    void plainTextOnlyPathSkipsMultipartHeaders() {
+        // Regression guard: with an empty bodyHtml, the legacy text/plain
+        // path stays exactly the way callers expect it.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("flat");
+        m.bodyText = QStringLiteral("hi");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        QVERIFY(rfc.contains("Content-Type: text/plain; charset=UTF-8"));
+        QVERIFY(rfc.contains("Content-Transfer-Encoding: 8bit"));
+        QVERIFY(!rfc.contains("multipart/alternative"));
+    }
 };
 
 QTEST_APPLESS_MAIN(TestMimeBuilder)
