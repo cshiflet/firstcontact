@@ -14,9 +14,21 @@ namespace fc::ui {
 class Notifier : public QObject {
     Q_OBJECT
 public:
+    enum class NewMailMode {
+        ArrivalOnly,    // "New mail in chris@example.com" — privacy default
+        Preview,        // "New message from <sender>" / subject body
+    };
+
     Notifier(QSystemTrayIcon* tray, QObject* parent = nullptr);
 
-    void notifyNewMail(int count, const QString& latestSender,
+    // accountEmail is always rendered so the user can tell which
+    // account a multi-account toast belongs to. Pre-multi-account
+    // call sites can pass an empty accountEmail; the toast then
+    // omits the account suffix.
+    void notifyNewMail(NewMailMode mode,
+                       const QString& accountEmail,
+                       int count,
+                       const QString& latestSender,
                        const QString& latestSubject,
                        const QString& threadIdToOpen);
 

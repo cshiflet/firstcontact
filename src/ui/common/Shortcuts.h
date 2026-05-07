@@ -30,6 +30,10 @@ signals:
     void toggleStar();
     void toggleRead();
     void showHelp();
+    // Switch to the Nth account in the toolbar account menu (1-indexed,
+    // Ctrl+1 through Ctrl+9). MainWindow indexes into
+    // AccountManager::accounts() and calls setCurrentAccountId.
+    void switchToAccountSlot(int slot);
 };
 
 }  // namespace fc::ui

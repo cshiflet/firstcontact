@@ -16,17 +16,41 @@ Notifier::Notifier(QSystemTrayIcon* tray, QObject* parent)
     }
 }
 
-void Notifier::notifyNewMail(int count, const QString& latestSender,
-                             const QString& latestSubject,
-                             const QString& threadIdToOpen) {
+void Notifier::notifyNewMail(NewMailMode mode,
+                              const QString& accountEmail,
+                              int count, const QString& latestSender,
+                              const QString& latestSubject,
+                              const QString& threadIdToOpen) {
     if (!tray_ || !QSystemTrayIcon::supportsMessages()) return;
 
     pendingThreadId_ = threadIdToOpen;
 
-    const QString title = count == 1
-        ? tr("New message from %1").arg(latestSender)
-        : tr("%1 new messages").arg(count);
-    const QString body = count == 1 ? latestSubject : latestSender;
+    QString title;
+    QString body;
+    switch (mode) {
+        case NewMailMode::ArrivalOnly:
+            title = accountEmail.isEmpty()
+                ? (count == 1 ? tr("New mail")
+                              : tr("%1 new messages").arg(count))
+                : (count == 1 ? tr("New mail in %1").arg(accountEmail)
+                              : tr("%1 new messages in %2")
+                                    .arg(count).arg(accountEmail));
+            body = QString();   // intentionally blank
+            break;
+
+        case NewMailMode::Preview: {
+            const QString senderTitle = count == 1
+                ? tr("New message from %1").arg(latestSender)
+                : tr("%1 new messages").arg(count);
+            // Append the account email so multi-account toasts are
+            // attributable. "(chris@example.com)" trails the title.
+            title = accountEmail.isEmpty()
+                ? senderTitle
+                : senderTitle + QStringLiteral(" (") + accountEmail + QStringLiteral(")");
+            body = count == 1 ? latestSubject : latestSender;
+            break;
+        }
+    }
 
     tray_->showMessage(title, body, QSystemTrayIcon::Information, 4000);
 }

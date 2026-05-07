@@ -38,6 +38,18 @@ Shortcuts::Shortcuts(QMainWindow* main) : QObject(main) {
             &QShortcut::activated, this, &Shortcuts::toggleRead);
     connect(make(main, QKeySequence(QStringLiteral("?"))),
             &QShortcut::activated, this, &Shortcuts::showHelp);
+
+    // Ctrl+1 .. Ctrl+9 switch among the first nine signed-in accounts.
+    // The number maps to the row order rendered in the toolbar
+    // account menu — same convention as Slack / Discord workspace
+    // switchers. Slots beyond the available account count are no-ops.
+    for (int slot = 1; slot <= 9; ++slot) {
+        const QKeySequence seq(QStringLiteral("Ctrl+%1").arg(slot));
+        auto* s = make(main, seq);
+        connect(s, &QShortcut::activated, this, [this, slot] {
+            emit switchToAccountSlot(slot);
+        });
+    }
 }
 
 }  // namespace fc::ui

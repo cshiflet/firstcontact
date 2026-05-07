@@ -724,9 +724,13 @@ void MainWindow::wireSignals() {
             });
     connect(accounts_, &fc::account::AccountManager::newMessages, this,
             [this](const QString& aid, int count) {
-                if (aid == currentAccountId_) onNewMessages(count);
-                // TODO(step 11): per-account tray attribution for non-
-                // current accounts ("New mail in chris@example.com").
+                // Per-account tray attribution: every signed-in account's
+                // new-mail event triggers a toast tagged with the
+                // account email so multi-account users can tell which
+                // mailbox the toast belongs to. The privacy setting
+                // (notification_mode = "preview" vs default
+                // arrival-only) is per-account.
+                onNewMessagesForAccount(aid, count);
             });
     connect(&LabelStyleCache::instance(), &LabelStyleCache::changed, this,
             [this] {
@@ -754,8 +758,13 @@ void MainWindow::wireSignals() {
                         tr("FirstContact — sync failed"), reason);
                 }
             });
-    connect(sync_, &fc::sync::SyncService::newMessages,
-            this,  &MainWindow::onNewMessages);
+    // newMessages is now routed via AccountManager::newMessages above
+    // (which re-emits the per-account context's signals). The legacy
+    // single-instance sync_'s direct signal would double-fire under
+    // multi-account, so we don't connect it here. The anonymous
+    // fallback path (no contexts yet, fresh install) doesn't tick a
+    // newMessages signal until the first profile fetch lands and the
+    // AccountManager add() rebuilds the contexts.
 
     // Sync indicator on the main status-bar slot. SyncService emits
     // stateChanged(Idle) BEFORE emit failed (synchronously), so we
@@ -880,7 +889,14 @@ void MainWindow::wireSignals() {
             tr("/  focus search\n"
                "j  next message\nk  previous message\n"
                "c  compose\nr  reply\nShift+R  reply all\nf  forward\n"
-               "e  archive\n#  delete\ns  toggle star\n?  this help"));
+               "e  archive\n#  delete\ns  toggle star\n?  this help\n"
+               "Ctrl+1..9  switch to account N"));
+    });
+    connect(shortcuts_, &Shortcuts::switchToAccountSlot, this,
+            [this](int slot) {
+        const auto list = accounts_->accounts();
+        if (slot < 1 || slot > list.size()) return;
+        accounts_->setCurrentAccountId(list.at(slot - 1).id);
     });
 }
 
@@ -2026,11 +2042,19 @@ void MainWindow::wakeDueSnoozedMessages() {
 }
 
 void MainWindow::onNewMessages(int count) {
+    // Legacy single-account hook: forward to the per-account form
+    // pinned to the current account.
+    onNewMessagesForAccount(currentAccountId_, count);
+}
+
+void MainWindow::onNewMessagesForAccount(const QString& accountId, int count) {
     if (count <= 0 || !tray_ || !tray_->notifier()) return;
 
-    // Pull the most recent message we just upserted to populate the toast.
+    // Pull the most recent message we just upserted from the source
+    // account so the toast reflects it correctly even when the user is
+    // looking at a different account.
     auto recent = fc::cache::MessageRepository::listByLabel(
-        currentAccountId_, QStringLiteral("INBOX"), 1, 0);
+        accountId, QStringLiteral("INBOX"), 1, 0);
     QString sender, subject, threadId;
     if (!recent.empty()) {
         sender   = recent.front().fromName.isEmpty()
@@ -2039,7 +2063,23 @@ void MainWindow::onNewMessages(int count) {
         subject  = recent.front().subject;
         threadId = recent.front().threadId;
     }
-    tray_->notifier()->notifyNewMail(count, sender, subject, threadId);
+
+    const QString accountEmail = fc::cache::MetaRepository::get(
+        accountId, QStringLiteral("email"));
+
+    // Per-account notification preference. v1 default is ArrivalOnly
+    // (privacy + multi-account hygiene); the user can flip to Preview
+    // via the per-account preferences (settings dialog work — see
+    // Preferences). We read the cache row directly so the setting
+    // doesn't need an in-memory cache.
+    const QString modeStr = fc::cache::MetaRepository::get(
+        accountId, QStringLiteral("notification_mode"));
+    Notifier::NewMailMode mode = (modeStr == QStringLiteral("preview"))
+        ? Notifier::NewMailMode::Preview
+        : Notifier::NewMailMode::ArrivalOnly;
+
+    tray_->notifier()->notifyNewMail(mode, accountEmail, count,
+                                      sender, subject, threadId);
 }
 
 }  // namespace fc::ui

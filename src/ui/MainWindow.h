@@ -99,6 +99,10 @@ private slots:
     void reloadCurrentLabel();
     void reloadSidebar();
     void onNewMessages(int count);
+    // Multi-account notify path: routes to Notifier with the
+    // account's email + per-account notification_mode pref. Wired to
+    // AccountManager::newMessages.
+    void onNewMessagesForAccount(const QString& accountId, int count);
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
