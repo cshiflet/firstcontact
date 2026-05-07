@@ -1,6 +1,7 @@
 #include "ComposeWindow.h"
 
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDateTimeEdit>
 #include <QDialog>
@@ -26,11 +27,10 @@ QStringList splitAddresses(const QString& raw) {
 
 }  // namespace
 
-ComposeWindow::ComposeWindow(const QString& fromAddr,
-                             const QString& fromName,
-                             QWidget* parent)
-    : QWidget(parent, Qt::Window),
-      fromAddr_(fromAddr), fromName_(fromName) {
+ComposeWindow::ComposeWindow(const QList<AccountChoice>& choices,
+                              const QString& selectedAccountId,
+                              QWidget* parent)
+    : QWidget(parent, Qt::Window), choices_(choices) {
     setWindowTitle(tr("New message"));
     resize(720, 580);
 
@@ -45,8 +45,33 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
     ccEdit_      = new QLineEdit(this);
     subjectEdit_ = new QLineEdit(this);
 
-    form->addRow(tr("From:"),    new QLabel(QStringLiteral("%1 <%2>")
-                                              .arg(fromName, fromAddr), this));
+    // Render the From row as a QComboBox when there are multiple
+    // accounts to choose from; otherwise stay with a static label so
+    // single-account users see no UI churn.
+    if (choices_.size() > 1) {
+        fromCombo_ = new QComboBox(this);
+        for (const auto& c : choices_) {
+            const QString display = c.displayName.isEmpty()
+                ? c.email
+                : QStringLiteral("%1 <%2>").arg(c.displayName, c.email);
+            fromCombo_->addItem(display, c.id);
+        }
+        const int idx = fromCombo_->findData(selectedAccountId);
+        if (idx >= 0) fromCombo_->setCurrentIndex(idx);
+        connect(fromCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
+                this, [this](int) { dirty_ = true; });
+        form->addRow(tr("From:"), fromCombo_);
+    } else {
+        const QString text = choices_.isEmpty()
+            ? tr("(no account)")
+            : (choices_.front().displayName.isEmpty()
+                ? choices_.front().email
+                : QStringLiteral("%1 <%2>")
+                      .arg(choices_.front().displayName,
+                           choices_.front().email));
+        fromLabel_ = new QLabel(text, this);
+        form->addRow(tr("From:"), fromLabel_);
+    }
     form->addRow(tr("To:"),      toEdit_);
     form->addRow(tr("Cc:"),      ccEdit_);
     form->addRow(tr("Subject:"), subjectEdit_);
@@ -90,10 +115,23 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
 
 QString ComposeWindow::draftId() const { return draftId_; }
 
+ComposeWindow::AccountChoice ComposeWindow::selectedChoice() const {
+    if (fromCombo_) {
+        const QString id = fromCombo_->currentData().toString();
+        for (const auto& c : choices_) if (c.id == id) return c;
+    }
+    return choices_.isEmpty() ? AccountChoice{} : choices_.front();
+}
+
+QString ComposeWindow::currentAccountId() const {
+    return selectedChoice().id;
+}
+
 fc::util::OutgoingMessage ComposeWindow::currentMessage() const {
+    const auto choice = selectedChoice();
     fc::util::OutgoingMessage msg;
-    msg.fromAddr         = fromAddr_;
-    msg.fromName         = fromName_;
+    msg.fromAddr         = choice.email;
+    msg.fromName         = choice.displayName;
     msg.subject          = subjectEdit_->text();
     msg.bodyText         = bodyEdit_->toPlainText();
     msg.to               = splitAddresses(toEdit_->text());
@@ -131,7 +169,19 @@ void ComposeWindow::prefillFrom(const fc::Message& parent, Mode mode) {
                 ? parent.fromAddr
                 : QStringLiteral("%1 <%2>").arg(parent.fromName, parent.fromAddr);
 
+    // Reply / ReplyAll: pin the From dropdown to the message's account
+    // so the user replies as the account that received the mail. This
+    // matches Gmail web semantics and avoids the surprise of "I clicked
+    // reply from chris@personal but Gmail sent it from work@x.com".
+    if ((mode == Mode::Reply || mode == Mode::ReplyAll
+         || mode == Mode::Forward)
+        && fromCombo_ && !parent.accountId.isEmpty()) {
+        const int idx = fromCombo_->findData(parent.accountId);
+        if (idx >= 0) fromCombo_->setCurrentIndex(idx);
+    }
+
     QString subjectPrefix;
+    const QString fromAddr = selectedChoice().email;
     switch (mode) {
         case Mode::Reply:
         case Mode::ReplyAll:
@@ -140,7 +190,7 @@ void ComposeWindow::prefillFrom(const fc::Message& parent, Mode mode) {
             if (mode == Mode::ReplyAll) {
                 QStringList cc = parent.toAddrs;
                 cc.append(parent.ccAddrs);
-                cc.removeAll(fromAddr_);
+                cc.removeAll(fromAddr);
                 ccEdit_->setText(cc.join(QStringLiteral(", ")));
             }
             break;
@@ -177,7 +227,7 @@ void ComposeWindow::onSend() {
         return;
     }
     suppressClosePrompt_ = true;
-    emit composeReady(msg, threadId_, /*sendAtMs=*/0);
+    emit composeReady(currentAccountId(), msg, threadId_, /*sendAtMs=*/0);
     close();
 }
 
@@ -228,12 +278,14 @@ void ComposeWindow::onScheduleSend() {
         return;
     }
     suppressClosePrompt_ = true;
-    emit composeReady(msg, threadId_, when.toMSecsSinceEpoch());
+    emit composeReady(currentAccountId(), msg, threadId_,
+                      when.toMSecsSinceEpoch());
     close();
 }
 
 void ComposeWindow::onSaveDraft() {
-    emit saveDraftRequested(currentMessage(), threadId_, draftId_);
+    emit saveDraftRequested(currentAccountId(), currentMessage(),
+                            threadId_, draftId_);
     dirty_ = false;
     statusLabel_->setText(tr("Draft saved."));
     statusLabel_->setStyleSheet(QStringLiteral("color: gray;"));
@@ -251,7 +303,8 @@ void ComposeWindow::closeEvent(QCloseEvent* e) {
         QMessageBox::Save);
     switch (answer) {
         case QMessageBox::Save:
-            emit saveDraftRequested(currentMessage(), threadId_, draftId_);
+            emit saveDraftRequested(currentAccountId(), currentMessage(),
+                                    threadId_, draftId_);
             e->accept();
             break;
         case QMessageBox::Discard:

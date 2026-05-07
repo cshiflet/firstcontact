@@ -1357,28 +1357,80 @@ void MainWindow::onSearchSubmit() {
 void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
     if (!auth_->isAuthorized()) { onSignIn(); return; }
 
-    auto* w = new ComposeWindow(auth_->accountEmail(), QString(), this);
+    // Build the From dropdown choices from every signed-in account.
+    QList<ComposeWindow::AccountChoice> choices;
+    for (const auto& a : accounts_->accounts()) {
+        if (a.email.isEmpty()) continue;
+        choices.append(ComposeWindow::AccountChoice{
+            a.id, a.email, a.displayName});
+    }
+    if (choices.isEmpty()) {
+        // Fallback for the anonymous-stack pre-sign-in path: synthesise
+        // a single choice from auth_->accountEmail.
+        const QString legacyEmail = auth_->accountEmail();
+        if (!legacyEmail.isEmpty()) {
+            choices.append(ComposeWindow::AccountChoice{
+                currentAccountId_, legacyEmail, QString()});
+        }
+    }
+
+    // Default selection rule:
+    //   1. Reply / Reply-all / Forward → the parent message's accountId
+    //      (so the reply goes from the account that received the mail).
+    //   2. New compose → most-recently-sent-from. Each send stamps
+    //      last_used_from = email under the sender account; we pick the
+    //      account whose row has the most recent value.
+    //   3. Falls back to the active sidebar account.
+    QString defaultId;
+    if (parent && !parent->accountId.isEmpty()
+        && static_cast<ComposeWindow::Mode>(mode) != ComposeWindow::Mode::New) {
+        defaultId = parent->accountId;
+    } else {
+        // most-recently-sent-from. We don't store a timestamp; we rely
+        // on the simple rule "the most recent setter wins" — overwriting
+        // last_used_from always touches account_meta(updated_at) under
+        // the hood. v1 keeps it simpler: pick the account whose
+        // last_used_from is non-empty AND whose accounts.last_used_at is
+        // most recent (already a stamp we maintain via markUsed). If no
+        // last_used_from has ever been set, fall through to the active
+        // account.
+        qint64 bestStamp = -1;
+        for (const auto& a : accounts_->accounts()) {
+            const QString hint = fc::cache::MetaRepository::get(
+                a.id, QStringLiteral("last_used_from"));
+            if (hint.isEmpty()) continue;
+            if (a.lastUsedAt > bestStamp) {
+                bestStamp = a.lastUsedAt;
+                defaultId = a.id;
+            }
+        }
+        if (defaultId.isEmpty()) defaultId = currentAccountId_;
+    }
+
+    auto* w = new ComposeWindow(choices, defaultId, this);
     w->setAttribute(Qt::WA_DeleteOnClose);
     if (parent) {
         w->prefillFrom(*parent, static_cast<ComposeWindow::Mode>(mode));
     }
     connect(w, &ComposeWindow::composeReady, this,
-        [this](const fc::util::OutgoingMessage& msg, const QString& threadId,
+        [this](const QString& accountId,
+               const fc::util::OutgoingMessage& msg, const QString& threadId,
                qint64 sendAtMs) {
+            const QString sendAccount = accountId.isEmpty()
+                ? currentAccountId_ : accountId;
             const QByteArray rfc = fc::util::MimeBuilder::build(msg);
             fc::cache::OutboxItem item;
-            item.accountId = currentAccountId_;
+            item.accountId = sendAccount;
             item.rfc5322   = rfc;
             item.threadId  = threadId;
             item.sendAt    = sendAtMs;   // 0 → send immediately
-            fc::cache::OutboxRepository::enqueue(currentAccountId_, item);
-            // Stamp last-used-from so the next compose defaults to this
-            // account. Step 10 reads this back when the user clicks the
-            // toolbar Compose button.
-            if (!currentAccountId_.isEmpty()) {
-                fc::cache::MetaRepository::set(currentAccountId_,
-                    QStringLiteral("last_used_from"),
-                    auth_->accountEmail());
+            fc::cache::OutboxRepository::enqueue(sendAccount, item);
+            // Stamp last_used_from on the sending account so the next
+            // compose defaults back to it.
+            if (!sendAccount.isEmpty()) {
+                fc::cache::MetaRepository::set(sendAccount,
+                    QStringLiteral("last_used_from"), msg.fromAddr);
+                accounts_->markUsed(sendAccount);
             }
             // Immediate send: poke the worker to flush right now.
             // Scheduled send: the worker's existing timer will catch
@@ -1393,10 +1445,13 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
             }
         });
     connect(w, &ComposeWindow::saveDraftRequested, this,
-        [this, w](const fc::util::OutgoingMessage& msg, const QString& threadId,
+        [this, w](const QString& accountId,
+                  const fc::util::OutgoingMessage& msg, const QString& threadId,
                   const QString& existingDraftId) {
+            const QString draftAccount = accountId.isEmpty()
+                ? currentAccountId_ : accountId;
             fc::cache::DraftRow row;
-            row.accountId          = currentAccountId_;
+            row.accountId          = draftAccount;
             row.id                 = existingDraftId;
             row.threadId           = threadId;
             row.subject            = msg.subject;
@@ -1406,7 +1461,7 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
             row.bodyText           = msg.bodyText;
             row.inReplyToMessageId = msg.rfc822InReplyTo;
             row.dirty              = true;
-            const QString id = fc::cache::DraftRepository::upsert(currentAccountId_, row);
+            const QString id = fc::cache::DraftRepository::upsert(draftAccount, row);
             // Thread the assigned id back into the still-open compose window
             // so the next save updates instead of creating a new draft.
             w->loadFromDraft(id, threadId, msg.subject, msg.to, msg.cc, msg.bodyText);
