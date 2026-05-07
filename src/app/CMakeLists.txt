@@ -6,7 +6,7 @@ qt_add_executable(firstcontact
 
 target_link_libraries(firstcontact
     PRIVATE Qt6::Widgets Qt6::Gui Qt6::Core
-            fc_util fc_models fc_auth fc_api fc_cache fc_sync fc_ui)
+            fc_util fc_models fc_auth fc_api fc_cache fc_account fc_sync fc_ui)
 
 set_target_properties(firstcontact PROPERTIES
     WIN32_EXECUTABLE ON

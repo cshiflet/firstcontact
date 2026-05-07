@@ -48,6 +48,6 @@ qt_add_resources(fc_ui "fc_ui_assets"
 target_include_directories(fc_ui PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_ui
     PUBLIC  Qt6::Widgets Qt6::Gui Qt6::Core Qt6::Svg Qt6::Network
-            fc_models fc_util fc_auth fc_api fc_cache fc_sync)
+            fc_models fc_util fc_auth fc_api fc_cache fc_account fc_sync)
 fc_set_warnings(fc_ui)
 fc_apply_sanitizers(fc_ui)

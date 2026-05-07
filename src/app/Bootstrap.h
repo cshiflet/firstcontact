@@ -2,11 +2,12 @@
 
 #include <QObject>
 
-namespace fc::auth { class ClientConfig; class TokenStore; class OAuthClient; }
-namespace fc::api  { class RestClient;   class GmailClient; }
-namespace fc::sync { class SyncService;  class OutboxWorker;
-                     class PendingOpsWorker; class DraftSync; }
-namespace fc::ui   { class MainWindow; }
+namespace fc::auth    { class ClientConfig; class TokenStore; class OAuthClient; }
+namespace fc::api     { class RestClient;   class GmailClient; }
+namespace fc::sync    { class SyncService;  class OutboxWorker;
+                        class PendingOpsWorker; class DraftSync; }
+namespace fc::account { class AccountManager; }
+namespace fc::ui      { class MainWindow; }
 
 namespace fc::app {
 
@@ -30,6 +31,7 @@ private:
     fc::sync::OutboxWorker*   outbox_;
     fc::sync::PendingOpsWorker* pending_;
     fc::sync::DraftSync*      drafts_;
+    fc::account::AccountManager* accounts_;
     fc::ui::MainWindow*       window_;
 };
 

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "account/AccountManager.h"
 #include "api/GmailClient.h"
 #include "api/SessionTransfer.h"
 #include "auth/ClientConfig.h"
@@ -86,18 +87,21 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
                        fc::sync::OutboxWorker* outbox,
                        fc::sync::PendingOpsWorker* pending,
                        fc::sync::DraftSync* drafts,
+                       fc::account::AccountManager* accounts,
                        QWidget* parent)
     : QMainWindow(parent),
       config_(config), auth_(auth), gmail_(gmail),
-      sync_(sync), outbox_(outbox), pending_(pending), drafts_(drafts) {
+      sync_(sync), outbox_(outbox), pending_(pending), drafts_(drafts),
+      accounts_(accounts) {
     setWindowTitle(QStringLiteral("FirstContact"));
     resize(1200, 760);
     fc::cache::Database::initialize();
 
-    // Seed the active account from the schema's default account row.
-    // The toolbar account menu and the AccountManagerDialog (steps 8-9)
-    // replace this when the user picks a different account.
-    currentAccountId_ = fc::cache::Database::defaultAccountId();
+    // Seed the active account from AccountManager's selection (which
+    // applies the same default-account rule as Database::defaultAccountId,
+    // but in-memory). Step 8 wires currentAccountChanged to UI repaints
+    // so the toolbar account menu can flip the panes between accounts.
+    currentAccountId_ = accounts_->currentAccountId();
     sync_->setAccountId(currentAccountId_);
 
     buildLayout();

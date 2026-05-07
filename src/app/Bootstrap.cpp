@@ -1,5 +1,6 @@
 #include "Bootstrap.h"
 
+#include "account/AccountManager.h"
 #include "api/GmailClient.h"
 #include "api/RestClient.h"
 #include "auth/ClientConfig.h"
@@ -26,8 +27,13 @@ Bootstrap::Bootstrap(QObject* parent) : QObject(parent) {
     outbox_     = new fc::sync::OutboxWorker(gmail_, this);
     pending_    = new fc::sync::PendingOpsWorker(gmail_, this);
     drafts_     = new fc::sync::DraftSync(gmail_, this);
+    // AccountManager: in-memory view of the `accounts` table plus the
+    // active-account selector. Step 6 plumbs per-account API clients
+    // through it; for now it just owns the account list and selection.
+    accounts_   = new fc::account::AccountManager(this);
     window_     = new fc::ui::MainWindow(config_, auth_, gmail_,
-                                         sync_, outbox_, pending_, drafts_);
+                                         sync_, outbox_, pending_, drafts_,
+                                         accounts_);
 }
 
 Bootstrap::~Bootstrap() {

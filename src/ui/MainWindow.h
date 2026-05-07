@@ -24,6 +24,7 @@ namespace fc::auth  { class OAuthClient; class ClientConfig; }
 namespace fc::api   { class GmailClient; }
 namespace fc::sync  { class SyncService; class OutboxWorker;
                       class PendingOpsWorker; class DraftSync; }
+namespace fc::account { class AccountManager; }
 
 namespace fc::ui {
 
@@ -46,6 +47,7 @@ public:
                fc::sync::OutboxWorker* outbox,
                fc::sync::PendingOpsWorker* pending,
                fc::sync::DraftSync* drafts,
+               fc::account::AccountManager* accounts,
                QWidget* parent = nullptr);
 
 private slots:
@@ -123,6 +125,7 @@ private:
     fc::sync::OutboxWorker*    outbox_;
     fc::sync::PendingOpsWorker* pending_;
     fc::sync::DraftSync*       drafts_;
+    fc::account::AccountManager* accounts_;
 
     QSplitter*               splitter_;
     SidebarWidget*           sidebar_;
