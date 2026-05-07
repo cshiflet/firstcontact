@@ -254,6 +254,51 @@ void AccountManager::markUsed(const QString& id) {
     }
 }
 
+bool AccountManager::dropCache(const QString& id) {
+    if (id.isEmpty()) return false;
+    auto db = fc::cache::databaseHandle();
+    if (!db.transaction()) {
+        qWarning("AccountManager::dropCache: BEGIN failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return false;
+    }
+
+    // Order matters: delete child tables before parents so the
+    // composite-FK enforcement (foreign_keys = ON in Database::initialize)
+    // doesn't reject any individual statement.
+    const QStringList stmts = {
+        QStringLiteral("DELETE FROM message_labels WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM attachments    WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM messages       WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM threads        WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM labels         WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM drafts         WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM outbox         WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM pending_ops    WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM account_meta   WHERE account_id = :a"),
+    };
+    for (const auto& sql : stmts) {
+        QSqlQuery q(db);
+        q.prepare(sql);
+        q.bindValue(QStringLiteral(":a"), id);
+        if (!q.exec()) {
+            qWarning("AccountManager::dropCache(%s): %s\nSQL: %s",
+                     qUtf8Printable(id),
+                     qUtf8Printable(q.lastError().text()),
+                     qUtf8Printable(sql));
+            db.rollback();
+            return false;
+        }
+    }
+    if (!db.commit()) {
+        qWarning("AccountManager::dropCache(%s): COMMIT failed: %s",
+                 qUtf8Printable(id),
+                 qUtf8Printable(db.lastError().text()));
+        return false;
+    }
+    return true;
+}
+
 AccountInfo AccountManager::accountById(const QString& id) const {
     for (const auto& a : accounts_) {
         if (a.id == id) return a;

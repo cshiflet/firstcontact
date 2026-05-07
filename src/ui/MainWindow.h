@@ -53,6 +53,11 @@ public:
 private slots:
     void onSignIn();
     void onSignOut();
+    // Multi-account variant: signs the named account out and pops a
+    // "drop cache?" yes/no/cancel prompt. yes wipes the cache rows
+    // for that accountId; no leaves them in place (re-sign-in
+    // resumes without re-syncing); cancel aborts the whole flow.
+    void onSignOutAccount(const QString& accountId);
     void onRefresh();
     void onLabelSelected(const QString& id);
     void onMessageActivated(const QString& messageId, int row);

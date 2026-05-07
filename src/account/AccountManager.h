@@ -84,6 +84,14 @@ public:
     // the next launch resumes on the most-recently-active one.
     void markUsed(const QString& id);
 
+    // Wipes every cache row scoped to the given account (messages,
+    // threads, labels, message_labels, attachments, drafts, outbox,
+    // pending_ops, account_meta) without deleting the accounts row
+    // itself. v1 surfaces this as the "drop cache?" yes branch in
+    // the sign-out prompt; v4 will reuse it under the cache-manager
+    // dialog. Returns true on success.
+    bool dropCache(const QString& id);
+
     // Convenience: lookup by id. Returns an empty-id AccountInfo when
     // the id isn't known.
     AccountInfo accountById(const QString& id) const;

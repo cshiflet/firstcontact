@@ -2,6 +2,8 @@
 
 #include "account/AccountManager.h"
 #include "cache/Database.h"
+#include "cache/MetaRepository.h"
+#include "cache/PendingOpsRepository.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -120,6 +122,33 @@ private slots:
         mgr.setCurrentAccountId(QStringLiteral("not-a-real-id"));
         QCOMPARE(mgr.currentAccountId(), prev);
         QCOMPARE(spy.count(), 0);
+    }
+
+    void dropCacheWipesPerAccountTablesButKeepsAccountsRow() {
+        fc::account::AccountManager mgr;
+        const QString id = mgr.add(QStringLiteral("dc@example.test"));
+        QVERIFY(!id.isEmpty());
+
+        // Seed something in account_meta and pending_ops to verify the
+        // wipe touches the right tables.
+        fc::cache::MetaRepository::set(id,
+            QStringLiteral("history_id"), QStringLiteral("999"));
+        fc::cache::PendingOpsRepository::enqueueModify(id,
+            QStringLiteral("msg-x"),
+            {QStringLiteral("STARRED")},
+            {});
+
+        QVERIFY(mgr.dropCache(id));
+
+        // accounts row remains.
+        QVERIFY(!mgr.accountById(id).id.isEmpty());
+
+        // account_meta row is gone.
+        QVERIFY(fc::cache::MetaRepository::historyId(id).isEmpty());
+
+        // pending_ops row is gone.
+        const auto due = fc::cache::PendingOpsRepository::due(id);
+        QVERIFY(due.empty());
     }
 };
 

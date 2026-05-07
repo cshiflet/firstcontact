@@ -1007,11 +1007,18 @@ void MainWindow::refreshAccountMenu() {
         IconLoader::themed(QStringLiteral("user.svg")),
         tr("Manage…"));
     connect(manageAct, &QAction::triggered, this, [this] {
-        AccountManagerDialog dlg(auth_, this);
+        AccountManagerDialog dlg(auth_, accounts_, this);
         connect(&dlg, &AccountManagerDialog::signOutRequested,
-                this, &MainWindow::onSignOut);
+                this, &MainWindow::onSignOutAccount);
         connect(&dlg, &AccountManagerDialog::addAccountRequested,
-                this, &MainWindow::onSwitchAccount);
+                this, [this] {
+                    // Add another → kick OAuth without signing out.
+                    if (!config_->isConfigured()) {
+                        SetupWizard wiz(config_, this);
+                        if (wiz.exec() != QDialog::Accepted) return;
+                    }
+                    auth_->authorize();
+                });
         dlg.exec();
     });
 }
@@ -1027,29 +1034,98 @@ void MainWindow::onSignIn() {
 }
 
 void MainWindow::onSignOut() {
-    // Step 9 expands this to a "drop cache?" yes/no/cancel prompt and
-    // the AccountManager-driven multi-account semantics. For now the
-    // single-account path is preserved: sign out, clear the cached
-    // email under the active account, stop the workers.
-    if (QMessageBox::question(this, tr("Sign out"),
-                              tr("Sign out and clear cached credentials?"))
-            == QMessageBox::Yes) {
+    // Legacy single-account hook: routes to the per-account form for
+    // the active account.
+    onSignOutAccount(currentAccountId_);
+}
+
+void MainWindow::onSignOutAccount(const QString& accountId) {
+    if (accountId.isEmpty()) return;
+
+    // Pop the cache-disposition prompt: yes / no / cancel. yes
+    // wipes the per-account cache rows (re-sign-in does a fresh
+    // initial sync); no keeps them; cancel aborts.
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("Sign out"));
+    const auto info = accounts_->accountById(accountId);
+    box.setText(tr("Sign out of %1?")
+                    .arg(info.email.isEmpty()
+                         ? tr("this account") : info.email));
+    box.setInformativeText(tr(
+        "Drop the local cache for this account?\n\n"
+        "Yes — wipe cached messages, drafts, outbox, and labels for this "
+        "account. The next sign-in will do a full initial sync.\n\n"
+        "No — keep the cache. The next sign-in resumes from where it "
+        "left off, no re-download.\n\n"
+        "Cancel — leave everything alone."));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No
+                           | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::No);
+    const int result = box.exec();
+    if (result == QMessageBox::Cancel) return;
+    const bool dropCache = result == QMessageBox::Yes;
+
+    // Sign out the OAuth side. The OAuthClient currently aliases the
+    // active account; signing out a non-active account via this path
+    // is uncommon but possible (Manage… → Sign out a different row).
+    // Step 12 will add per-account OAuth resolution here; for now,
+    // sign out the active stack only when the active account matches.
+    if (accountId == currentAccountId_) {
         auth_->signOut();
-        if (!currentAccountId_.isEmpty()) {
-            fc::cache::MetaRepository::set(currentAccountId_,
-                                           QStringLiteral("email"), QString());
-        }
-        // Stop every per-account scheduler. Step 9 distinguishes
-        // "sign out this account" from "sign out everything"; for now
-        // we treat sign-out as global.
-        for (auto* ctx : accounts_->allContexts()) {
-            if (auto* s = ctx->sync()) s->stopScheduler();
-        }
-        if (sync_) sync_->stopScheduler();
-        outbox_->stop();
-        pending_->stop();
-        drafts_->stop();
+    } else if (auto* ctx = accounts_->contextFor(accountId)) {
+        // Sign out the named context's OAuthClient directly.
+        if (auto* a = ctx->auth()) a->signOut();
     }
+
+    // Stop the named context's scheduler. The shared workers stay
+    // running; their drain queries simply skip rows for the now-
+    // signed-out account once its context is gone.
+    if (auto* ctx = accounts_->contextFor(accountId)) {
+        if (auto* s = ctx->sync()) s->stopScheduler();
+    }
+
+    if (dropCache) {
+        accounts_->dropCache(accountId);
+        statusBar()->showMessage(tr("Cache cleared for %1.")
+                                     .arg(info.email), 5000);
+    }
+
+    // Clear the cached email under the named account so the next
+    // sign-in's initial-sync re-populates it.
+    fc::cache::MetaRepository::set(accountId,
+                                   QStringLiteral("email"), QString());
+
+    // If we just signed out the active account and another remains,
+    // promote the most-recent. If none remain (last account signed
+    // out), reset the panes.
+    if (accountId == currentAccountId_) {
+        QString next;
+        for (const auto& a : accounts_->accounts()) {
+            if (a.id == accountId) continue;
+            // Pick the most-recently-used remaining account.
+            if (next.isEmpty()) { next = a.id; continue; }
+            // (We don't bother with full sort here — accounts() already
+            // orders by sortOrder.)
+        }
+        if (!next.isEmpty()) {
+            accounts_->setCurrentAccountId(next);
+        } else {
+            currentAccountId_.clear();
+            if (sync_) sync_->setAccountId({});
+            if (sidebar_ && sidebar_->model()) {
+                sidebar_->model()->setAccountId({});
+            }
+            listModel_->replaceAll({});
+            reader_->showEmpty();
+            currentMessage_ = {};
+            currentRow_ = -1;
+            outbox_->stop();
+            pending_->stop();
+            drafts_->stop();
+        }
+    }
+    refreshAccountIndicator();
 }
 
 void MainWindow::onSwitchAccount() {
