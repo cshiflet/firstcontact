@@ -688,11 +688,20 @@ void MainWindow::wireSignals() {
     connect(sync_, &fc::sync::SyncService::topUpFinished, this,
             [this](const QString& labelId, int newRows) {
                 const QString name = fc::cache::LabelRepository::byId(labelId).name;
-                if (name.isEmpty()) return;
-                const QString msg = newRows > 0
-                    ? tr("%1: %n new", "", newRows).arg(name)
-                    : tr("%1: up to date").arg(name);
-                statusBar()->showMessage(msg, 30000);
+                if (!name.isEmpty()) {
+                    const QString msg = newRows > 0
+                        ? tr("%1: %n new", "", newRows).arg(name)
+                        : tr("%1: up to date").arg(name);
+                    statusBar()->showMessage(msg, 30000);
+                }
+                // The cache just gained `newRows` older rows. Push them
+                // into the model so the user's scroll-to-bottom session
+                // continues seamlessly. Skip if the user has navigated
+                // away to a different label since the top-up started.
+                if (newRows > 0
+                    && labelId == listModel_->sourceLabelId()) {
+                    listModel_->resumeAfterTopUp();
+                }
             });
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {

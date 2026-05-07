@@ -73,6 +73,14 @@ public:
     // never been set.
     void refreshFromSource();
 
+    // Called when an out-of-band server top-up has filled the cache with
+    // additional rows BELOW the currently-loaded window (typically older
+    // messages). Resets the cacheDrained_ flag and invokes fetchMore
+    // synchronously so the new rows append to the model — Qt's view
+    // controllers won't ask for more rows once canFetchMore has returned
+    // false, so we have to push.
+    void resumeAfterTopUp();
+
     // Toggle inline expansion of the thread at `row`. No-op if the row
     // is already a child or represents a single-message thread. On
     // expand, the thread's older messages (latest-first) are loaded

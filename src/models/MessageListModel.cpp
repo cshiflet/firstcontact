@@ -104,14 +104,25 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
     endInsertRows();
 
     // A short page (less than pageSize) means the cache is on its last
-    // legs for this label. Mark drained so the next scroll-to-bottom
-    // round-trip exhausts cleanly and triggers the server top-up.
+    // legs for this label. Mark drained AND emit cacheExhausted so the
+    // owner kicks off a server top-up — Qt's view controllers won't ask
+    // for fetchMore again once canFetchMore goes false, so without the
+    // signal here the user would be stuck whenever the very last cache
+    // page came back short.
     if (static_cast<int>(more.size()) < pageSize()) {
         cacheDrained_ = true;
-        // Don't emit cacheExhausted here — we did append rows, so the
-        // user sees progress. The signal fires the NEXT time fetchMore
-        // is called and finds nothing.
+        emit cacheExhausted(sourceParam_);
     }
+}
+
+void MessageListModel::resumeAfterTopUp() {
+    // Top-up just finished — there should be more rows in the cache
+    // below what we already have loaded. Clear the drain flag and push
+    // a fetchMore explicitly: Qt's view doesn't poll canFetchMore on
+    // its own, so flipping the flag isn't enough.
+    if (source_ != Source::ByLabel) return;
+    cacheDrained_ = false;
+    fetchMore({});
 }
 
 void MessageListModel::setLabelSource(const QString& labelId, bool conversationView) {
