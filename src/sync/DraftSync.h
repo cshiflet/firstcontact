@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
+
+#include <functional>
 
 namespace fc::api { class GmailClient; }
 
@@ -13,7 +16,10 @@ namespace fc::sync {
 class DraftSync : public QObject {
     Q_OBJECT
 public:
+    using GmailResolver = std::function<fc::api::GmailClient*(const QString& accountId)>;
+
     DraftSync(fc::api::GmailClient* gmail, QObject* parent = nullptr);
+    DraftSync(GmailResolver resolver, QObject* parent = nullptr);
 
     void start(int intervalMs = 30'000);
     void stop();

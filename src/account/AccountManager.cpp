@@ -1,5 +1,8 @@
 #include "AccountManager.h"
 
+#include "AccountContext.h"
+#include "auth/ClientConfig.h"
+#include "auth/TokenStore.h"
 #include "cache/Database.h"
 #include "cache/Migrations.h"
 
@@ -24,6 +27,48 @@ AccountManager::AccountManager(QObject* parent) : QObject(parent) {
     fc::cache::Database::initialize();
     reload();
     selectInitialCurrent();
+}
+
+AccountManager::AccountManager(fc::auth::ClientConfig* config,
+                                fc::auth::TokenStore*   tokenStore,
+                                QObject* parent)
+    : QObject(parent), config_(config), tokenStore_(tokenStore) {
+    fc::cache::Database::initialize();
+    reload();
+    buildContextsForAllAccounts();
+    selectInitialCurrent();
+}
+
+AccountManager::~AccountManager() {
+    // QObject parenting on contexts handles cleanup, but we drop
+    // entries from the hash explicitly so a future "rebuild from
+    // scratch" path doesn't see stale pointers.
+    contexts_.clear();
+}
+
+void AccountManager::buildContextsForAllAccounts() {
+    if (!config_ || !tokenStore_) return;
+    for (const auto& a : accounts_) {
+        if (contexts_.contains(a.id)) continue;
+        contexts_.insert(a.id,
+            new AccountContext(a.id, config_, tokenStore_, this));
+    }
+}
+
+AccountContext* AccountManager::contextFor(const QString& id) const {
+    return contexts_.value(id, nullptr);
+}
+
+AccountContext* AccountManager::currentContext() const {
+    return contextFor(currentId_);
+}
+
+AccountContext* AccountManager::ensureContext(const QString& id) {
+    if (id.isEmpty() || !config_ || !tokenStore_) return nullptr;
+    if (auto* existing = contexts_.value(id, nullptr)) return existing;
+    auto* ctx = new AccountContext(id, config_, tokenStore_, this);
+    contexts_.insert(id, ctx);
+    return ctx;
 }
 
 void AccountManager::reload() {
@@ -125,6 +170,7 @@ QString AccountManager::add(const QString& email,
         return {};
     }
     reload();
+    if (config_ && tokenStore_) ensureContext(id);
     return id;
 }
 
@@ -140,11 +186,13 @@ bool AccountManager::remove(const QString& id) {
         return false;
     }
     const bool removed = q.numRowsAffected() > 0;
+    if (auto* ctx = contexts_.take(id)) ctx->deleteLater();
     if (currentId_ == id) {
         currentId_.clear();
         emit currentAccountChanged(currentId_);
     }
     reload();
+    buildContextsForAllAccounts();
     if (currentId_.isEmpty()) selectInitialCurrent();
     return removed;
 }

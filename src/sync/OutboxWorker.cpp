@@ -22,7 +22,8 @@ qint64 backoffNextRetry(int attempt) {
 }  // namespace
 
 struct OutboxWorker::Impl {
-    fc::api::GmailClient* gmail = nullptr;
+    fc::api::GmailClient* gmail = nullptr;   // legacy fallback
+    OutboxWorker::GmailResolver resolver;
     QTimer* timer = nullptr;
     bool busy = false;
 };
@@ -30,6 +31,11 @@ struct OutboxWorker::Impl {
 OutboxWorker::OutboxWorker(fc::api::GmailClient* gmail, QObject* parent)
     : QObject(parent), d_(new Impl) {
     d_->gmail = gmail;
+}
+
+OutboxWorker::OutboxWorker(GmailResolver resolver, QObject* parent)
+    : QObject(parent), d_(new Impl) {
+    d_->resolver = std::move(resolver);
 }
 
 void OutboxWorker::start(int intervalMs) {
@@ -58,8 +64,21 @@ void OutboxWorker::flush() {
     };
 
     for (const auto& it : items) {
+        fc::api::GmailClient* client = d_->resolver
+            ? d_->resolver(it.accountId)
+            : d_->gmail;
+        if (!client) {
+            // Account context isn't available — the account may be
+            // signed out or temporarily missing. Skip this row; the
+            // next tick (after sign-in / context build) picks it up.
+            qInfo("OutboxWorker: skipping row %lld (account %s has no "
+                  "active GmailClient)",
+                  it.id, qUtf8Printable(it.accountId));
+            onDone();
+            continue;
+        }
         fc::cache::OutboxRepository::markSending(it.id);
-        d_->gmail->sendRaw(it.rfc5322, it.threadId,
+        client->sendRaw(it.rfc5322, it.threadId,
             [this, id = it.id, attempt = it.attemptCount + 1, onDone]
             (QString gmailMsgId, fc::api::ApiError err) {
                 if (err) {

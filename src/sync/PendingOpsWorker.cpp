@@ -15,6 +15,7 @@ constexpr int kGiveUpAttempts = 8;   // ~ matches outbox max with backoff
 
 struct PendingOpsWorker::Impl {
     fc::api::GmailClient* gmail = nullptr;
+    PendingOpsWorker::GmailResolver resolver;
     QTimer* timer = nullptr;
     bool busy = false;
 };
@@ -22,6 +23,11 @@ struct PendingOpsWorker::Impl {
 PendingOpsWorker::PendingOpsWorker(fc::api::GmailClient* gmail, QObject* parent)
     : QObject(parent), d_(new Impl) {
     d_->gmail = gmail;
+}
+
+PendingOpsWorker::PendingOpsWorker(GmailResolver resolver, QObject* parent)
+    : QObject(parent), d_(new Impl) {
+    d_->resolver = std::move(resolver);
 }
 
 void PendingOpsWorker::start(int intervalMs) {
@@ -60,8 +66,19 @@ void PendingOpsWorker::flush() {
             continue;
         }
 
+        fc::api::GmailClient* client = d_->resolver
+            ? d_->resolver(op.accountId)
+            : d_->gmail;
+        if (!client) {
+            qInfo("PendingOpsWorker: skipping op %lld (account %s has no "
+                  "active GmailClient)",
+                  op.id, qUtf8Printable(op.accountId));
+            onDone();
+            continue;
+        }
+
         QPointer<PendingOpsWorker> self(this);
-        d_->gmail->modifyMessage(op.messageId, op.addLabels, op.removeLabels,
+        client->modifyMessage(op.messageId, op.addLabels, op.removeLabels,
             [self, id = op.id, attempts = op.attempts, onDone]
             (fc::api::ApiError err) {
                 if (!err) {

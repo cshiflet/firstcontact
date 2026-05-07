@@ -5,7 +5,11 @@
 #include <QObject>
 #include <QString>
 
+namespace fc::auth { class ClientConfig; class TokenStore; }
+
 namespace fc::account {
+
+class AccountContext;
 
 // Public read-only view of an `accounts` table row. The persistent
 // state lives in sqlite; AccountManager keeps an in-memory cache
@@ -33,7 +37,15 @@ struct AccountInfo {
 class AccountManager : public QObject {
     Q_OBJECT
 public:
+    // The basic constructor leaves the manager without per-account
+    // API stacks (AccountContext). Step 6 introduces a constructor
+    // overload that takes a ClientConfig + TokenStore so the manager
+    // can build an AccountContext per accounts row at startup.
     explicit AccountManager(QObject* parent = nullptr);
+    AccountManager(fc::auth::ClientConfig* config,
+                    fc::auth::TokenStore*   tokenStore,
+                    QObject* parent = nullptr);
+    ~AccountManager() override;
 
     // Re-reads the `accounts` table. Cheap; called after every add /
     // remove / setDefault / markUsed and from Bootstrap on launch.
@@ -76,6 +88,18 @@ public:
     // the id isn't known.
     AccountInfo accountById(const QString& id) const;
 
+    // Step 6: per-account stack lookup. Returns nullptr if the manager
+    // was constructed without a config/tokenStore, or if the id has no
+    // context (account not yet signed in).
+    AccountContext* contextFor(const QString& id) const;
+    AccountContext* currentContext() const;
+
+    // Wires (or rebuilds) an AccountContext for the given account id.
+    // Idempotent: a second call returns the same context. Returns
+    // nullptr if the manager wasn't given a config/tokenStore at
+    // construction.
+    AccountContext* ensureContext(const QString& id);
+
 signals:
     void accountsChanged();              // accounts list mutated (add/remove/default)
     void currentAccountChanged(const QString& id);
@@ -85,9 +109,14 @@ signals:
 
 private:
     void selectInitialCurrent();
+    void buildContextsForAllAccounts();
 
     QList<AccountInfo> accounts_;
     QString            currentId_;
+
+    fc::auth::ClientConfig*  config_     = nullptr;
+    fc::auth::TokenStore*    tokenStore_ = nullptr;
+    QHash<QString, AccountContext*> contexts_;
 };
 
 }  // namespace fc::account

@@ -28,6 +28,7 @@ QByteArray buildRfc(const fc::cache::DraftRow& d) {
 
 struct DraftSync::Impl {
     fc::api::GmailClient* gmail = nullptr;
+    DraftSync::GmailResolver resolver;
     QTimer* timer = nullptr;
     bool busy = false;
 };
@@ -35,6 +36,11 @@ struct DraftSync::Impl {
 DraftSync::DraftSync(fc::api::GmailClient* gmail, QObject* parent)
     : QObject(parent), d_(new Impl) {
     d_->gmail = gmail;
+}
+
+DraftSync::DraftSync(GmailResolver resolver, QObject* parent)
+    : QObject(parent), d_(new Impl) {
+    d_->resolver = std::move(resolver);
 }
 
 void DraftSync::start(int intervalMs) {
@@ -64,9 +70,20 @@ void DraftSync::flush() {
         const QString localId = draft.id;
         const QString accountId = draft.accountId;
 
+        fc::api::GmailClient* client = d_->resolver
+            ? d_->resolver(accountId)
+            : d_->gmail;
+        if (!client) {
+            qInfo("DraftSync: skipping draft %s (account %s has no active "
+                  "GmailClient)", qUtf8Printable(localId),
+                  qUtf8Printable(accountId));
+            onDone();
+            continue;
+        }
+
         if (draft.gmailDraftId.isEmpty()) {
             QPointer<DraftSync> self(this);
-            d_->gmail->createDraft(rfc, draft.threadId,
+            client->createDraft(rfc, draft.threadId,
                 [self, localId, accountId, onDone]
                 (QString gmailDraftId, fc::api::ApiError err) {
                     if (err) {
