@@ -13,6 +13,9 @@ constexpr char kConversationKey[]     = "ui/conversationView";
 constexpr char kToolbarShowTextKey[]  = "ui/toolbarShowText";
 constexpr char kSidebarColorsKey[]    = "ui/sidebarLabelColors";
 constexpr char kMessageListPillsKey[] = "ui/messageListLabelPills";
+constexpr char kImageProxyKey[]       = "html/imageProxyUrlPattern";
+constexpr char kStripPixelsKey[]      = "html/stripTrackingPixels";
+constexpr char kDefaultImageProxy[]   = "https://wsrv.nl/?url={url}";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -106,6 +109,35 @@ bool Preferences::messageListLabelPills() {
 void Preferences::setMessageListLabelPills(bool on) {
     QSettings s;
     s.setValue(QLatin1String(kMessageListPillsKey), on);
+    s.sync();
+}
+
+QString Preferences::imageProxyUrlPattern() {
+    QSettings s;
+    const QString stored = s.value(QLatin1String(kImageProxyKey),
+                                    QLatin1String(kDefaultImageProxy))
+                              .toString();
+    return stored;
+}
+
+void Preferences::setImageProxyUrlPattern(const QString& pattern) {
+    QSettings s;
+    if (pattern.trimmed().isEmpty()) {
+        s.remove(QLatin1String(kImageProxyKey));
+    } else {
+        s.setValue(QLatin1String(kImageProxyKey), pattern.trimmed());
+    }
+    s.sync();
+}
+
+bool Preferences::stripTrackingPixels() {
+    QSettings s;
+    return s.value(QLatin1String(kStripPixelsKey), false).toBool();
+}
+
+void Preferences::setStripTrackingPixels(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kStripPixelsKey), on);
     s.sync();
 }
 

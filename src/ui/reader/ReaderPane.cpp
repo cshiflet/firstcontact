@@ -1,6 +1,8 @@
 #include "ReaderPane.h"
 
 #include "LocalHtmlServer.h"
+#include "cache/MetaRepository.h"
+#include "util/ImageProxy.h"
 #include "ui/common/IconLoader.h"
 #include "ui/common/Preferences.h"
 #include "ui/common/Theme.h"
@@ -303,16 +305,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     body->setHtml(bodyHtml(m));
     body->setVisible(initiallyExpanded);
 
-    // "Open in browser" rows. We render TWO copies — one above the body
-    // and one below — so the link is reachable without scrolling whether
-    // the email is short and the user wants to dismiss it quickly, or
-    // long and the user has scrolled down to the bottom. Each row carries
-    // two buttons:
-    //   - "Open in browser"          (strict CSP, no remote loads)
-    //   - "Open with images"         (CSP widened to img-src: http(s);
-    //                                  scripts / iframes / forms still off)
-    // Both share LocalHtmlServer holders captured by the lambdas so a
-    // re-click reuses the same server / URL token.
+    // "Open in browser" rows. We render TWO copies — above and below the
+    // body — so the link is reachable on long messages without scrolling.
+    // Each row carries three buttons:
+    //   - "Open in browser"   strict CSP, no remote loads
+    //   - "Open with images"  proxy-rewritten <img>, CSP locked to the
+    //                          proxy host only — neither marketer's CDN
+    //                          nor any other host can be reached
+    //   - "Open in Gmail"     mail.google.com URL for the same thread,
+    //                          a clean fallback if our render misbehaves
+    // Strict and proxy modes share LocalHtmlServer holders so a re-click
+    // reuses the same server / URL token.
     const auto previewMode = Preferences::htmlPreview();
     const bool offerBrowserButtons =
         initiallyExpanded
@@ -323,6 +326,7 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     auto htmlForServer = m.bodyHtml.isEmpty()
         ? QStringLiteral("<p><i>(no HTML body cached)</i></p>")
         : m.bodyHtml;
+    const QString threadIdForGmail = m.threadId;
 
     auto buildBrowserRow = [&]() -> QHBoxLayout* {
         auto* row = new QHBoxLayout;
@@ -332,49 +336,116 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         strictBtn->setObjectName(QStringLiteral("link"));
         strictBtn->setCursor(Qt::PointingHandCursor);
         strictBtn->setToolTip(QObject::tr(
-            "Render in your system browser with strict policy "
-            "(no remote images / scripts)."));
+            "Render in your system browser. Strict CSP — no remote "
+            "images, no scripts, no iframes."));
         row->addWidget(strictBtn);
 
         auto* imagesBtn = new QPushButton(QObject::tr("Open with images"), card);
         imagesBtn->setObjectName(QStringLiteral("link"));
         imagesBtn->setCursor(Qt::PointingHandCursor);
         imagesBtn->setToolTip(QObject::tr(
-            "Render in your system browser and allow remote images "
-            "(scripts / iframes / forms still blocked)."));
+            "Same as 'Open in browser' but image URLs are routed through "
+            "the configured image proxy (Settings → HTML preview) so the "
+            "marketer's CDN never sees your IP. Scripts / iframes / forms "
+            "still blocked."));
         row->addWidget(imagesBtn);
 
-        // Click handlers reuse the per-mode holder if its server is
-        // still listening; otherwise spin a fresh one.
-        auto makeOpener = [card, htmlForServer]
-            (QPushButton* btn,
-             std::shared_ptr<QPointer<LocalHtmlServer>> holder,
-             bool allowImages) {
-            QObject::connect(btn, &QPushButton::clicked, card,
-                [card, btn, htmlForServer, holder, allowImages]() {
-                    LocalHtmlServer* srv = holder->data();
-                    if (!srv) {
-                        srv = new LocalHtmlServer(htmlForServer.toUtf8(),
-                                                   allowImages, card);
-                        if (!srv->start()) {
-                            btn->setText(QObject::tr("Couldn't start local server"));
-                            srv->deleteLater();
-                            return;
-                        }
-                        *holder = srv;
-                        QObject::connect(srv, &LocalHtmlServer::expired,
-                                         card, [holder] { holder->clear(); });
+        auto* gmailBtn = new QPushButton(QObject::tr("Open in Gmail"), card);
+        gmailBtn->setObjectName(QStringLiteral("link"));
+        gmailBtn->setCursor(Qt::PointingHandCursor);
+        gmailBtn->setToolTip(QObject::tr(
+            "Open this conversation directly on mail.google.com. Useful "
+            "when our local rendering doesn't agree with the email."));
+        row->addWidget(gmailBtn);
+
+        // Strict-mode opener: serves m.bodyHtml as-is with no img-src
+        // additions, so the browser can't fetch any remote resource.
+        QObject::connect(strictBtn, &QPushButton::clicked, card,
+            [card, strictBtn, htmlForServer, srvHolderStrict]() {
+                LocalHtmlServer* srv = srvHolderStrict->data();
+                if (!srv) {
+                    srv = new LocalHtmlServer(htmlForServer.toUtf8(),
+                                               /*imgSrcAdditions=*/QString(),
+                                               card);
+                    if (!srv->start()) {
+                        strictBtn->setText(
+                            QObject::tr("Couldn't start local server"));
+                        srv->deleteLater();
+                        return;
                     }
-                    const QUrl u = srv->url();
-                    qInfo("LocalHtmlServer: serving HTML at %s "
-                          "(allowRemoteImages=%s)",
-                          qUtf8Printable(u.toString()),
-                          allowImages ? "true" : "false");
-                    fc::util::launchBrowser(u);
-                });
-        };
-        makeOpener(strictBtn, srvHolderStrict, /*allowImages=*/false);
-        makeOpener(imagesBtn, srvHolderImages, /*allowImages=*/true);
+                    *srvHolderStrict = srv;
+                    QObject::connect(srv, &LocalHtmlServer::expired, card,
+                        [srvHolderStrict] { srvHolderStrict->clear(); });
+                }
+                qInfo("LocalHtmlServer (strict): %s",
+                      qUtf8Printable(srv->url().toString()));
+                fc::util::launchBrowser(srv->url());
+            });
+
+        // Image-proxy opener: rewrite every <img src> to route through
+        // the user-configured proxy, then lock CSP to that proxy's
+        // origin so a stray un-rewritten URL still can't leak.
+        QObject::connect(imagesBtn, &QPushButton::clicked, card,
+            [card, imagesBtn, htmlForServer, srvHolderImages]() {
+                LocalHtmlServer* srv = srvHolderImages->data();
+                if (!srv) {
+                    const QString pattern = Preferences::imageProxyUrlPattern();
+                    const bool stripPx = Preferences::stripTrackingPixels();
+                    const QString rewritten = fc::util::rewriteImagesForBrowser(
+                        htmlForServer, pattern, stripPx);
+
+                    // Compute the CSP addition: scheme + host of the
+                    // proxy URL. If the pattern is malformed we fall
+                    // back to allowing https: in general — degrades
+                    // privacy a hair but keeps the page readable.
+                    QString cspAdd;
+                    QString proxySample = pattern;
+                    proxySample.replace(QStringLiteral("{url}"),
+                                         QStringLiteral("about:blank"));
+                    const QUrl proxyUrl(proxySample);
+                    if (proxyUrl.isValid() && !proxyUrl.host().isEmpty()) {
+                        cspAdd = proxyUrl.scheme() + QStringLiteral("://")
+                               + proxyUrl.host() + QStringLiteral("/");
+                    } else {
+                        cspAdd = QStringLiteral("https:");
+                    }
+
+                    srv = new LocalHtmlServer(rewritten.toUtf8(),
+                                               cspAdd, card);
+                    if (!srv->start()) {
+                        imagesBtn->setText(
+                            QObject::tr("Couldn't start local server"));
+                        srv->deleteLater();
+                        return;
+                    }
+                    *srvHolderImages = srv;
+                    QObject::connect(srv, &LocalHtmlServer::expired, card,
+                        [srvHolderImages] { srvHolderImages->clear(); });
+                }
+                qInfo("LocalHtmlServer (proxy): %s",
+                      qUtf8Printable(srv->url().toString()));
+                fc::util::launchBrowser(srv->url());
+            });
+
+        // Gmail-web opener: build the mail.google.com URL. Uses the
+        // signed-in account's email as the authuser hint so Google
+        // routes the request to the right session even if the user
+        // has multiple accounts logged in.
+        QObject::connect(gmailBtn, &QPushButton::clicked, card,
+            [threadIdForGmail]() {
+                if (threadIdForGmail.isEmpty()) return;
+                QString email = fc::cache::MetaRepository::get(
+                    QStringLiteral("email"));
+                QString url = QStringLiteral("https://mail.google.com/mail/");
+                if (!email.isEmpty()) {
+                    url += QStringLiteral("?authuser=")
+                         + QString::fromLatin1(QUrl::toPercentEncoding(email));
+                }
+                url += QStringLiteral("#all/") + threadIdForGmail;
+                qInfo("Opening Gmail web: %s", qUtf8Printable(url));
+                fc::util::launchBrowser(QUrl(url));
+            });
+
         return row;
     };
 

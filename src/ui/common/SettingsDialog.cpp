@@ -119,6 +119,56 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     htmlHint->setWordWrap(true);
     htmlHint->setTextFormat(Qt::RichText);
     htmlForm->addRow(QString(), htmlHint);
+
+    // Image proxy URL — for the "Open with images" path in the reader.
+    // Editable so users can swap in another no-log image proxy if they
+    // distrust wsrv.nl, leave blank to disable rewriting (then the
+    // browser fetches images directly from the marketer's CDN, leaking
+    // IP/UA — discouraged), or restore the default at any time.
+    auto* proxyEdit = new QLineEdit(Preferences::imageProxyUrlPattern(), content);
+    proxyEdit->setMinimumWidth(420);
+    proxyEdit->setPlaceholderText(QStringLiteral("https://wsrv.nl/?url={url}"));
+    connect(proxyEdit, &QLineEdit::editingFinished, this, [proxyEdit] {
+        Preferences::setImageProxyUrlPattern(proxyEdit->text());
+    });
+    htmlForm->addRow(tr("Image proxy:"), proxyEdit);
+
+    auto* proxyHint = new QLabel(tr(
+        "<b>{url}</b> is replaced with the percent-encoded source URL. "
+        "Default uses <b>wsrv.nl</b> (a public Cloudflare-fronted image "
+        "proxy with a stated no-log policy). With a proxy configured, "
+        "the marketer's CDN sees only the proxy's egress IP — never "
+        "yours. Leave blank to disable proxying (images load directly, "
+        "which leaks your IP and User-Agent)."), content);
+    proxyHint->setObjectName(QStringLiteral("FormHint"));
+    proxyHint->setWordWrap(true);
+    proxyHint->setTextFormat(Qt::RichText);
+    htmlForm->addRow(QString(), proxyHint);
+
+    auto* stripPixelsBox = new QCheckBox(
+        tr("Strip likely tracking pixels (1×1 / 2×2 images)"), content);
+    stripPixelsBox->setChecked(Preferences::stripTrackingPixels());
+    connect(stripPixelsBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setStripTrackingPixels(on);
+    });
+    htmlForm->addRow(QString(), stripPixelsBox);
+
+    auto* stripHint = new QLabel(tr(
+        "Tracking pixels are tiny (typically 1×1) images marketers use "
+        "to detect when you open their email. With this on, those "
+        "<img> tags are removed before the page reaches your browser, "
+        "so even the proxy never fetches them — the 'opened' signal is "
+        "fully suppressed. <b>Off by default:</b> some legitimate emails "
+        "use small spacer images for layout, and stripping them can "
+        "subtly distort the result. The image proxy alone already "
+        "prevents IP / fingerprint correlation; this checkbox is only "
+        "for users who also want to suppress the open-tracking signal."),
+        content);
+    stripHint->setObjectName(QStringLiteral("FormHint"));
+    stripHint->setWordWrap(true);
+    stripHint->setTextFormat(Qt::RichText);
+    htmlForm->addRow(QString(), stripHint);
+
     contentLayout->addLayout(htmlForm);
 
     // ---------------------------------------------------------- Attachments

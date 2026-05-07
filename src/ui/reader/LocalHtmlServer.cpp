@@ -74,12 +74,12 @@ void sendAndClose(QTcpSocket* sock, const QByteArray& response,
 }  // namespace
 
 LocalHtmlServer::LocalHtmlServer(const QByteArray& html,
-                                  bool allowRemoteImages,
+                                  const QString& imgSrcAdditions,
                                   QObject* parent)
     : QObject(parent),
       html_(html),
       token_(makeToken()),
-      allowRemoteImages_(allowRemoteImages) {
+      imgSrcAdditions_(imgSrcAdditions.trimmed().toUtf8()) {
     server_ = new QTcpServer(this);
     connect(server_, &QTcpServer::newConnection,
             this,    &LocalHtmlServer::onNewConnection);
@@ -175,16 +175,19 @@ void LocalHtmlServer::onNewConnection() {
                 return;
             }
 
-            // CSP: scripts / iframes / forms / beacons stay locked down
-            // regardless. The only thing allowRemoteImages_ widens is
-            // img-src — equivalent to Gmail web's "Show images" toggle.
-            const char* imgSrc = allowRemoteImages_
-                ? "data: blob: https: http:"
-                : "data: blob:";
+            // CSP: scripts / iframes / forms / beacons stay locked
+            // down regardless. img-src starts at data:/blob: and is
+            // optionally widened by imgSrcAdditions_ — typically a
+            // single proxy host like "https://wsrv.nl/" so the only
+            // remote endpoint the browser may contact is the trusted
+            // image proxy our HTML rewriter routes through.
             QByteArray extra;
             extra.append("Content-Security-Policy: default-src 'none'; ");
-            extra.append("img-src ");
-            extra.append(imgSrc);
+            extra.append("img-src data: blob:");
+            if (!imgSrcAdditions_.isEmpty()) {
+                extra.append(' ');
+                extra.append(imgSrcAdditions_);
+            }
             extra.append("; ");
             extra.append("style-src 'unsafe-inline'; "
                          "font-src data:; "

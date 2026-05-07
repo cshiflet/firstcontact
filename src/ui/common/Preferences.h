@@ -68,6 +68,26 @@ public:
     // visual noise.
     static bool messageListLabelPills();
     static void setMessageListLabelPills(bool on);
+
+    // URL pattern used to proxy remote images on the "Open with images"
+    // path. {url} is the placeholder replaced by the percent-encoded
+    // source URL. Default uses wsrv.nl (a no-log public image proxy
+    // fronted by Cloudflare): the user's browser only ever connects
+    // to the proxy, the marketer's CDN sees the proxy's egress IP,
+    // not the user's. Set to empty to skip rewriting (dangerous —
+    // images load directly from the marketer's CDN).
+    static QString imageProxyUrlPattern();
+    static void    setImageProxyUrlPattern(const QString& pattern);
+
+    // When true, strip 1×1 / 2×2 (likely tracking-pixel) <img> tags
+    // before serving HTML to the browser. Off by default — some
+    // legitimate emails use small spacer images and stripping them
+    // can subtly break layout. The proxy already eliminates IP / UA
+    // fingerprint correlation; pixel stripping additionally suppresses
+    // the "this email was opened" signal at the cost of layout
+    // robustness.
+    static bool stripTrackingPixels();
+    static void setStripTrackingPixels(bool on);
 };
 
 }  // namespace fc::ui

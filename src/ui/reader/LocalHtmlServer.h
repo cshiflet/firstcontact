@@ -38,13 +38,15 @@ namespace fc::ui {
 class LocalHtmlServer : public QObject {
     Q_OBJECT
 public:
-    // allowRemoteImages widens the served Content-Security-Policy so the
-    // browser may fetch http(s) image URLs in the email body. Scripts,
-    // iframes, fonts, and beacons stay blocked either way; this is
-    // strictly an "I trust this sender's images" knob, equivalent to the
-    // "Show images" affordance in Gmail web. Default off.
+    // imgSrcAdditions is appended verbatim to the served
+    // Content-Security-Policy's `img-src` directive (which already
+    // allows `data:` and `blob:`). Pass "" for the strictest mode
+    // (no remote images at all); pass "https://wsrv.nl/" or similar
+    // when the HTML has been pre-rewritten to route through a proxy
+    // host the browser is allowed to contact. Scripts, iframes, fonts,
+    // beacons, and forms stay blocked regardless.
     explicit LocalHtmlServer(const QByteArray& html,
-                              bool allowRemoteImages = false,
+                              const QString& imgSrcAdditions = QString(),
                               QObject* parent = nullptr);
 
     // Binds the loopback socket. Returns false on bind failure.
@@ -67,7 +69,7 @@ private:
     QString     token_;
     QTimer*     lifetime_          = nullptr;
     bool        firstServed_       = false;
-    bool        allowRemoteImages_ = false;
+    QByteArray  imgSrcAdditions_;
 };
 
 }  // namespace fc::ui
