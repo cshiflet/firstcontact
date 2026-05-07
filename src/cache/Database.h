@@ -18,6 +18,18 @@ public:
     static void   initialize();
     static QString connectionName();
     static QString filePath();
+
+    // Returns the active account's id. v1 uses this as the implicit
+    // account for repository methods that don't take an accountId. The
+    // selection rule is:
+    //   1. accounts.is_default = 1, if any
+    //   2. otherwise the row with the most recent last_used_at,
+    //   3. otherwise the row with the lowest sort_order then email.
+    // If the accounts table is empty (e.g. fresh install before first
+    // sign-in), returns an empty string. AccountManager (step 4) will
+    // own the in-memory current-account selection; until then the
+    // legacy zero-arg repository overloads route through this helper.
+    static QString defaultAccountId();
 };
 
 }  // namespace fc::cache

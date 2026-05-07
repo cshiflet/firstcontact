@@ -8,6 +8,7 @@
 namespace fc::cache {
 
 struct DraftRow {
+    QString accountId;
     QString id;                        // local id ("tmp-…") until first sync, then Gmail draftId
     QString gmailDraftId;              // empty until synced
     QString messageId;                 // populated after first sync
@@ -24,12 +25,31 @@ struct DraftRow {
 
 class DraftRepository {
 public:
-    static QString upsert(const DraftRow& d);  // returns the row's id
+    // Per-account API.
+    static QString               upsert(const QString& accountId, const DraftRow& d);
+    static std::vector<DraftRow> listLocal(const QString& accountId);
+    static DraftRow              byId(const QString& accountId, const QString& id);
+    static std::vector<DraftRow> dirtyDrafts(const QString& accountId);
+    static void                  markSynced(const QString& accountId,
+                                            const QString& localId,
+                                            const QString& gmailDraftId);
+    static void                  remove(const QString& accountId,
+                                        const QString& id);
+
+    // Cross-account helper used by DraftSync — pulls dirty drafts across
+    // every signed-in account so a single worker iteration can flush them
+    // all. Returns rows hydrated with accountId so the worker knows
+    // which AccountContext.gmail to dispatch each draft through.
+    static std::vector<DraftRow> dirtyDraftsAllAccounts();
+
+    // Legacy zero-arg overloads (route through default account).
+    static QString               upsert(const DraftRow& d);
     static std::vector<DraftRow> listLocal();
-    static DraftRow byId(const QString& id);
+    static DraftRow              byId(const QString& id);
     static std::vector<DraftRow> dirtyDrafts();
-    static void   markSynced(const QString& localId, const QString& gmailDraftId);
-    static void   remove(const QString& id);
+    static void                  markSynced(const QString& localId,
+                                             const QString& gmailDraftId);
+    static void                  remove(const QString& id);
 };
 
 }  // namespace fc::cache

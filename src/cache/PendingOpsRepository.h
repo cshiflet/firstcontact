@@ -9,6 +9,7 @@ namespace fc::cache {
 
 struct PendingOp {
     qint64      id = 0;
+    QString     accountId;
     QString     opType;            // "modify"
     QString     messageId;
     QStringList addLabels;
@@ -20,14 +21,26 @@ struct PendingOp {
 
 class PendingOpsRepository {
 public:
-    static qint64 enqueueModify(const QString& messageId,
-                                const QStringList& addLabels,
-                                const QStringList& removeLabels);
+    // Per-account API.
+    static qint64                 enqueueModify(const QString& accountId,
+                                                 const QString& messageId,
+                                                 const QStringList& addLabels,
+                                                 const QStringList& removeLabels);
+    static std::vector<PendingOp> due(const QString& accountId);
 
-    static std::vector<PendingOp> due();
+    // Cross-account variant for PendingOpsWorker — drains every account's
+    // backlog from a single tick.
+    static std::vector<PendingOp> dueAllAccounts();
 
+    // markAttempt/remove key off the autoincrement row id.
     static void markAttempt(qint64 id, const QString& err);
     static void remove(qint64 id);
+
+    // Legacy zero-arg overloads.
+    static qint64                 enqueueModify(const QString& messageId,
+                                                 const QStringList& addLabels,
+                                                 const QStringList& removeLabels);
+    static std::vector<PendingOp> due();
 };
 
 }  // namespace fc::cache

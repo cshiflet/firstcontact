@@ -1,12 +1,14 @@
 #include "MessageRepository.h"
 
 #include "AttachmentRepository.h"
+#include "Database.h"
 #include "Migrations.h"
 
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -30,8 +32,9 @@ QStringList splitJsonArray(const QString& s) {
     return out;
 }
 
-fc::Message rowToMessage(const QSqlQuery& q) {
+fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     fc::Message m;
+    m.accountId       = accountId;
     m.id              = q.value(QStringLiteral("id")).toString();
     m.threadId        = q.value(QStringLiteral("thread_id")).toString();
     m.historyId       = q.value(QStringLiteral("history_id")).toString();
@@ -55,28 +58,29 @@ fc::Message rowToMessage(const QSqlQuery& q) {
     return m;
 }
 
-void writeLabelEdges(QSqlDatabase& db, const QString& messageId,
-                     const QStringList& labelIds) {
+void writeLabelEdges(QSqlDatabase& db, const QString& accountId,
+                     const QString& messageId, const QStringList& labelIds) {
     QSqlQuery del(db);
     del.prepare(QStringLiteral(
-        "DELETE FROM message_labels WHERE message_id = :m"));
+        "DELETE FROM message_labels "
+        "WHERE account_id = :a AND message_id = :m"));
+    del.bindValue(QStringLiteral(":a"), accountId);
     del.bindValue(QStringLiteral(":m"), messageId);
     del.exec();
 
-    // Sub-select guards against FK violations: only insert when the label
-    // actually exists in our labels table. Gmail can return label_ids we
-    // haven't synced yet (e.g. CHAT, labels created on another client
-    // between our syncs) and we'd rather drop the edge than have a missing
-    // label fail the whole message upsert.
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
-        "INSERT OR IGNORE INTO message_labels(message_id, label_id) "
-        "SELECT :m, :l WHERE EXISTS (SELECT 1 FROM labels WHERE id = :l)"));
+        "INSERT OR IGNORE INTO message_labels(account_id, message_id, label_id) "
+        "SELECT :a, :m, :l "
+        "WHERE EXISTS (SELECT 1 FROM labels "
+        "              WHERE account_id = :a AND id = :l)"));
     for (const auto& l : labelIds) {
+        ins.bindValue(QStringLiteral(":a"), accountId);
         ins.bindValue(QStringLiteral(":m"), messageId);
         ins.bindValue(QStringLiteral(":l"), l);
         if (!ins.exec()) {
-            qWarning("writeLabelEdges (msg=%s, label=%s): %s",
+            qWarning("writeLabelEdges (acc=%s, msg=%s, label=%s): %s",
+                     qUtf8Printable(accountId),
                      qUtf8Printable(messageId), qUtf8Printable(l),
                      qUtf8Printable(ins.lastError().text()));
         }
@@ -84,11 +88,10 @@ void writeLabelEdges(QSqlDatabase& db, const QString& messageId,
 }
 
 // Bulk-load message_labels rows for a batch of messages and stamp them
-// onto each Message's labelIds field. Done as a single SELECT with an
-// IN clause rather than N+1 per-message queries — the message-list
-// delegate's per-row label-pill rendering would otherwise fan out into
-// ~100 SQL queries per scroll repaint.
-void hydrateLabelIds(std::vector<fc::Message>& messages) {
+// onto each Message's labelIds field. Single SELECT per batch keeps the
+// per-row delegate render path at one query, not N+1.
+void hydrateLabelIds(const QString& accountId,
+                     std::vector<fc::Message>& messages) {
     if (messages.empty()) return;
     auto db = fc::cache::databaseHandle();
 
@@ -102,10 +105,12 @@ void hydrateLabelIds(std::vector<fc::Message>& messages) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "SELECT message_id, label_id FROM message_labels "
-        "WHERE message_id IN (%1)").arg(placeholders));
+        "WHERE account_id = ? AND message_id IN (%1)").arg(placeholders));
+    q.addBindValue(accountId);
     for (const auto& m : messages) q.addBindValue(m.id);
     if (!q.exec()) {
-        qWarning("hydrateLabelIds: %s", qUtf8Printable(q.lastError().text()));
+        qWarning("hydrateLabelIds: %s",
+                 qUtf8Printable(q.lastError().text()));
         return;
     }
 
@@ -116,29 +121,94 @@ void hydrateLabelIds(std::vector<fc::Message>& messages) {
     for (auto& m : messages) m.labelIds = byMsg.value(m.id);
 }
 
+// Splits a user-typed query into whitespace-separated terms, double-quotes
+// each one (escaping embedded quotes), and joins them with " AND ". Returns
+// a syntactically-valid FTS5 expression for any user input.
+QString normaliseFtsQuery(const QString& raw) {
+    const QString trimmed = raw.trimmed();
+    if (trimmed.isEmpty()) return {};
+    QStringList terms = trimmed.split(QRegularExpression(QStringLiteral("\\s+")),
+                                      Qt::SkipEmptyParts);
+    QStringList quoted;
+    quoted.reserve(terms.size());
+    for (QString t : terms) {
+        t.remove(QChar('"'));
+        if (t.isEmpty()) continue;
+        quoted << QStringLiteral("\"%1\"").arg(t);
+    }
+    if (quoted.isEmpty()) return {};
+    return quoted.join(QStringLiteral(" AND "));
+}
+
+// Collapses a per-message ranked CTE into one row per thread, hydrated
+// with the LATEST message's fields (rn=1) plus whole-thread aggregates.
+// PARTITION BY now includes account_id so a thread that exists in two
+// accounts (rare but possible — same Gmail conversation across an alias
+// + delegate) doesn't collapse across them.
+QString buildThreadRollupSql(const QString& innerWhere) {
+    return QStringLiteral(
+        "WITH ranked AS ("
+        "  SELECT m.*, "
+        "    ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id "
+        "                        ORDER BY m.internal_date DESC) AS rn, "
+        "    COUNT(*)   OVER (PARTITION BY m.account_id, m.thread_id) AS t_count, "
+        "    SUM(m.is_unread)      OVER (PARTITION BY m.account_id, m.thread_id) AS t_unread, "
+        "    MAX(m.is_starred)     OVER (PARTITION BY m.account_id, m.thread_id) AS t_starred, "
+        "    MAX(m.has_attachment) OVER (PARTITION BY m.account_id, m.thread_id) AS t_attach "
+        "  FROM messages m "
+        "  %1"
+        ") "
+        "SELECT account_id, id, thread_id, history_id, internal_date, "
+        "       size_estimate, from_addr, from_name, to_addrs, cc_addrs, "
+        "       bcc_addrs, reply_to, subject, snippet, body_text, body_html, "
+        "       body_html_present, is_unread, is_starred, is_important, "
+        "       has_attachment, t_count, t_unread, t_starred, t_attach "
+        "FROM ranked "
+        "WHERE rn = 1 "
+        "ORDER BY internal_date DESC "
+        "LIMIT :lim OFFSET :off").arg(innerWhere);
+}
+
+void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
+    m.threadCount          = q.value(QStringLiteral("t_count")).toInt();
+    const int unread       = q.value(QStringLiteral("t_unread")).toInt();
+    const int starred      = q.value(QStringLiteral("t_starred")).toInt();
+    const int hasAttach    = q.value(QStringLiteral("t_attach")).toInt();
+    m.threadHasUnread      = unread > 0;
+    m.threadHasStarred     = starred > 0;
+    m.threadHasAttachment  = hasAttach > 0;
+    m.isUnread       = m.threadHasUnread;
+    m.isStarred      = m.threadHasStarred;
+    m.hasAttachment  = m.threadHasAttachment;
+}
+
 }  // namespace
 
-qint64 MessageRepository::upsert(const fc::Message& m) {
+qint64 MessageRepository::upsert(const QString& accountId, const fc::Message& m) {
+    if (accountId.isEmpty()) {
+        qWarning("MessageRepository::upsert called without an accountId; "
+                 "msg %s dropped", qUtf8Printable(m.id));
+        return 0;
+    }
     auto db = databaseHandle();
 
-    // Atomic 3-step write: thread row first (the message FK requires it),
-    // then the message itself, then the label edges. Wrapped in a transaction
-    // so a failure in any step leaves the cache untouched.
+    // Atomic 3-step write: thread row → message → label edges → attachments.
+    // Wrapped in a transaction so a failure leaves the cache untouched.
     db.transaction();
 
-    // 1. Thread upsert. messages.thread_id REFERENCES threads(id), so this
-    //    has to land before the message INSERT or PRAGMA foreign_keys = ON
-    //    rejects the message with "FOREIGN KEY constraint failed".
+    // 1. Thread upsert (composite PK on account_id + id).
     {
         QSqlQuery threadUp(db);
         threadUp.prepare(QStringLiteral(
-            "INSERT INTO threads(id, history_id, snippet, last_message_internal_date) "
-            "VALUES(:id, :h, :s, :d) "
-            "ON CONFLICT(id) DO UPDATE SET "
+            "INSERT INTO threads(account_id, id, history_id, snippet, "
+            "                     last_message_internal_date) "
+            "VALUES(:a, :id, :h, :s, :d) "
+            "ON CONFLICT(account_id, id) DO UPDATE SET "
             "  history_id = excluded.history_id, "
             "  snippet    = excluded.snippet, "
             "  last_message_internal_date = MAX(threads.last_message_internal_date, "
             "                                   excluded.last_message_internal_date)"));
+        threadUp.bindValue(QStringLiteral(":a"),  accountId);
         threadUp.bindValue(QStringLiteral(":id"), m.threadId);
         threadUp.bindValue(QStringLiteral(":h"),  m.historyId);
         threadUp.bindValue(QStringLiteral(":s"),  m.snippet);
@@ -154,17 +224,19 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
     // 2. Message upsert.
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "INSERT INTO messages(id, thread_id, history_id, internal_date, "
-        "  size_estimate, from_addr, from_name, to_addrs, cc_addrs, bcc_addrs, "
-        "  reply_to, subject, snippet, is_unread, is_starred, is_important, "
-        "  has_attachment, body_text, body_html, body_html_present, "
-        "  fetched_format, bytes_cached, last_accessed_at, created_at) "
-        "VALUES(:id, :thread_id, :history_id, :internal_date, :size_estimate, "
-        "  :from_addr, :from_name, :to_addrs, :cc_addrs, :bcc_addrs, :reply_to, "
-        "  :subject, :snippet, :is_unread, :is_starred, :is_important, "
-        "  :has_attachment, :body_text, :body_html, :body_html_present, "
-        "  :fetched_format, :bytes_cached, :last_accessed_at, :created_at) "
-        "ON CONFLICT(id) DO UPDATE SET "
+        "INSERT INTO messages(account_id, id, thread_id, history_id, "
+        "  internal_date, size_estimate, from_addr, from_name, to_addrs, "
+        "  cc_addrs, bcc_addrs, reply_to, subject, snippet, is_unread, "
+        "  is_starred, is_important, has_attachment, body_text, body_html, "
+        "  body_html_present, fetched_format, bytes_cached, last_accessed_at, "
+        "  created_at) "
+        "VALUES(:a, :id, :thread_id, :history_id, :internal_date, "
+        "  :size_estimate, :from_addr, :from_name, :to_addrs, :cc_addrs, "
+        "  :bcc_addrs, :reply_to, :subject, :snippet, :is_unread, :is_starred, "
+        "  :is_important, :has_attachment, :body_text, :body_html, "
+        "  :body_html_present, :fetched_format, :bytes_cached, "
+        "  :last_accessed_at, :created_at) "
+        "ON CONFLICT(account_id, id) DO UPDATE SET "
         "  history_id     = excluded.history_id, "
         "  internal_date  = excluded.internal_date, "
         "  from_addr      = excluded.from_addr, "
@@ -186,6 +258,7 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
+    q.bindValue(QStringLiteral(":a"),                 accountId);
     q.bindValue(QStringLiteral(":id"),                m.id);
     q.bindValue(QStringLiteral(":thread_id"),         m.threadId);
     q.bindValue(QStringLiteral(":history_id"),        m.historyId);
@@ -221,104 +294,54 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
         return 0;
     }
 
-    // 3. Label edges. Skip any label_id that doesn't exist in the labels
-    //    table — Gmail can return labels we haven't synced yet (e.g.
-    //    CHAT, or labels created on another client between syncs) and we
-    //    don't want a single missing label to fail the whole upsert.
-    writeLabelEdges(db, m.id, m.labelIds);
+    // 3. Label edges (per-account scoped).
+    writeLabelEdges(db, accountId, m.id, m.labelIds);
 
-    // 4. Attachments. The FK on attachments.message_id requires the message
-    //    row to already exist (step 2). MessageParser populates m.attachments
-    //    from the MIME parts of full-format fetches; metadata-only fetches
-    //    leave it empty, in which case replaceForMessage clears any stale
-    //    rows from a prior fetch.
-    AttachmentRepository::replaceForMessage(m.id, m.attachments);
+    // 4. Attachments.
+    AttachmentRepository::replaceForMessage(accountId, m.id, m.attachments);
 
     db.commit();
     return q.lastInsertId().toLongLong();
 }
 
-std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
-                                                        int limit, int offset) {
+std::vector<fc::Message> MessageRepository::listByLabel(
+        const QString& accountId, const QString& labelId,
+        int limit, int offset) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
 
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "SELECT m.* FROM messages m "
-        "JOIN message_labels ml ON ml.message_id = m.id "
-        "WHERE ml.label_id = :l "
+        "JOIN message_labels ml "
+        "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+        "WHERE m.account_id = :a AND ml.label_id = :l "
         "ORDER BY m.internal_date DESC "
         "LIMIT :lim OFFSET :off"));
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":l"),   labelId);
     q.bindValue(QStringLiteral(":lim"), limit);
     q.bindValue(QStringLiteral(":off"), offset);
     if (!q.exec()) return out;
-    while (q.next()) out.push_back(rowToMessage(q));
-    hydrateLabelIds(out);
+    while (q.next()) out.push_back(rowToMessage(accountId, q));
+    hydrateLabelIds(accountId, out);
     return out;
 }
 
-namespace {
-
-// Collapses a per-message ranked CTE into one row per thread, hydrated
-// with the LATEST message's fields (rn=1) plus whole-thread aggregates.
-// Returns the SELECT statement built around an arbitrary CTE name and an
-// inner WHERE clause that selects which messages enter the partition.
-//
-// Window functions need SQLite ≥ 3.25 (Ubuntu 24.04 ships 3.45+); fall
-// back if we ever build against an older sqlite.
-QString buildThreadRollupSql(const QString& innerWhere) {
-    return QStringLiteral(
-        "WITH ranked AS ("
-        "  SELECT m.*, "
-        "    ROW_NUMBER() OVER (PARTITION BY m.thread_id "
-        "                        ORDER BY m.internal_date DESC) AS rn, "
-        "    COUNT(*)   OVER (PARTITION BY m.thread_id) AS t_count, "
-        "    SUM(m.is_unread)      OVER (PARTITION BY m.thread_id) AS t_unread, "
-        "    MAX(m.is_starred)     OVER (PARTITION BY m.thread_id) AS t_starred, "
-        "    MAX(m.has_attachment) OVER (PARTITION BY m.thread_id) AS t_attach "
-        "  FROM messages m "
-        "  %1"
-        ") "
-        "SELECT id, thread_id, history_id, internal_date, size_estimate, "
-        "       from_addr, from_name, to_addrs, cc_addrs, bcc_addrs, reply_to, "
-        "       subject, snippet, body_text, body_html, body_html_present, "
-        "       is_unread, is_starred, is_important, has_attachment, "
-        "       t_count, t_unread, t_starred, t_attach "
-        "FROM ranked "
-        "WHERE rn = 1 "
-        "ORDER BY internal_date DESC "
-        "LIMIT :lim OFFSET :off").arg(innerWhere);
-}
-
-void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
-    m.threadCount          = q.value(QStringLiteral("t_count")).toInt();
-    const int unread       = q.value(QStringLiteral("t_unread")).toInt();
-    const int starred      = q.value(QStringLiteral("t_starred")).toInt();
-    const int hasAttach    = q.value(QStringLiteral("t_attach")).toInt();
-    m.threadHasUnread      = unread > 0;
-    m.threadHasStarred     = starred > 0;
-    m.threadHasAttachment  = hasAttach > 0;
-    // For display, override the per-message flags with the thread-level
-    // ones so the row-level icons in the message list reflect the whole
-    // conversation rather than just the latest message.
-    m.isUnread       = m.threadHasUnread;
-    m.isStarred      = m.threadHasStarred;
-    m.hasAttachment  = m.threadHasAttachment;
-}
-
-}  // namespace
-
 std::vector<fc::Message> MessageRepository::listThreadsByLabel(
-        const QString& labelId, int limit, int offset) {
+        const QString& accountId, const QString& labelId,
+        int limit, int offset) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
 
     QSqlQuery q(db);
     q.prepare(buildThreadRollupSql(QStringLiteral(
-        "JOIN message_labels ml ON ml.message_id = m.id "
-        "WHERE ml.label_id = :l")));
+        "JOIN message_labels ml "
+        "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+        "WHERE m.account_id = :a AND ml.label_id = :l")));
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":l"),   labelId);
     q.bindValue(QStringLiteral(":lim"), limit);
     q.bindValue(QStringLiteral(":off"), offset);
@@ -328,84 +351,65 @@ std::vector<fc::Message> MessageRepository::listThreadsByLabel(
         return out;
     }
     while (q.next()) {
-        auto m = rowToMessage(q);
+        auto m = rowToMessage(accountId, q);
         hydrateThreadAggregates(q, m);
         out.push_back(std::move(m));
     }
-    hydrateLabelIds(out);
+    hydrateLabelIds(accountId, out);
     int multi = 0;
     for (const auto& m : out) if (m.threadCount > 1) ++multi;
-    qInfo("listThreadsByLabel(label=%s, limit=%d, offset=%d): %zu threads "
-          "(%d with >1 message)",
-          qUtf8Printable(labelId), limit, offset, out.size(), multi);
+    qInfo("listThreadsByLabel(acc=%s, label=%s, limit=%d, offset=%d): "
+          "%zu threads (%d with >1 message)",
+          qUtf8Printable(accountId), qUtf8Printable(labelId),
+          limit, offset, out.size(), multi);
     return out;
 }
 
-namespace {
-
-// Splits a user-typed query into whitespace-separated terms, double-quotes
-// each one (escaping embedded quotes), and joins them with " AND ". This
-// gives FTS5 a syntactically-valid expression regardless of the operators,
-// punctuation, or unbalanced quotes the user typed.
-QString normaliseFtsQuery(const QString& raw) {
-    const QString trimmed = raw.trimmed();
-    if (trimmed.isEmpty()) return {};
-    QStringList terms = trimmed.split(QRegularExpression(QStringLiteral("\\s+")),
-                                      Qt::SkipEmptyParts);
-    QStringList quoted;
-    quoted.reserve(terms.size());
-    for (QString t : terms) {
-        // Drop tokens that contain no FTS-meaningful characters.
-        t.remove(QChar('"'));
-        if (t.isEmpty()) continue;
-        quoted << QStringLiteral("\"%1\"").arg(t);
-    }
-    if (quoted.isEmpty()) return {};
-    return quoted.join(QStringLiteral(" AND "));
-}
-
-}  // namespace
-
-std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int limit) {
+std::vector<fc::Message> MessageRepository::searchFts(
+        const QString& accountId, const QString& query, int limit) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
     const QString fts = normaliseFtsQuery(query);
     if (fts.isEmpty()) return out;
 
     QSqlQuery q(db);
+    // FTS5 exposes account_id via the UNINDEXED column added in 0006. We
+    // could pre-filter inside MATCH, but the more obvious form (filter on
+    // m.account_id after the join) reads cleanly and lets the planner use
+    // the FTS rank for ordering.
     q.prepare(QStringLiteral(
         "SELECT m.* FROM messages m "
         "JOIN messages_fts f ON f.rowid = m.rowid "
-        "WHERE messages_fts MATCH :q "
+        "WHERE messages_fts MATCH :q AND m.account_id = :a "
         "ORDER BY rank, m.internal_date DESC "
         "LIMIT :lim"));
     q.bindValue(QStringLiteral(":q"),   fts);
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":lim"), limit);
     if (!q.exec()) {
         qWarning("FTS search failed: %s", qUtf8Printable(q.lastError().text()));
         return out;
     }
-    while (q.next()) out.push_back(rowToMessage(q));
-    hydrateLabelIds(out);
+    while (q.next()) out.push_back(rowToMessage(accountId, q));
+    hydrateLabelIds(accountId, out);
     return out;
 }
 
 std::vector<fc::Message> MessageRepository::searchFtsThreads(
-        const QString& query, int limit) {
+        const QString& accountId, const QString& query, int limit) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
     const QString fts = normaliseFtsQuery(query);
     if (fts.isEmpty()) return out;
 
-    // Collapse FTS hits into per-thread rows the same way listThreadsByLabel
-    // does for label browsing. The CTE filters down to messages that match
-    // the FTS query; window functions then pick the latest per thread and
-    // fold in the aggregates.
     QSqlQuery q(db);
     q.prepare(buildThreadRollupSql(QStringLiteral(
         "JOIN messages_fts f ON f.rowid = m.rowid "
-        "WHERE messages_fts MATCH :q")));
+        "WHERE messages_fts MATCH :q AND m.account_id = :a")));
     q.bindValue(QStringLiteral(":q"),   fts);
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":lim"), limit);
     q.bindValue(QStringLiteral(":off"), 0);
     if (!q.exec()) {
@@ -414,65 +418,74 @@ std::vector<fc::Message> MessageRepository::searchFtsThreads(
         return out;
     }
     while (q.next()) {
-        auto m = rowToMessage(q);
+        auto m = rowToMessage(accountId, q);
         hydrateThreadAggregates(q, m);
         out.push_back(std::move(m));
     }
-    hydrateLabelIds(out);
+    hydrateLabelIds(accountId, out);
     return out;
 }
 
-fc::Message MessageRepository::byId(const QString& id) {
+fc::Message MessageRepository::byId(const QString& accountId, const QString& id) {
     auto db = databaseHandle();
+    if (accountId.isEmpty()) return {};
     QSqlQuery q(db);
-    q.prepare(QStringLiteral("SELECT * FROM messages WHERE id = :id"));
+    q.prepare(QStringLiteral(
+        "SELECT * FROM messages WHERE account_id = :a AND id = :id"));
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     if (q.exec() && q.next()) {
-        auto m = rowToMessage(q);
-        m.attachments = AttachmentRepository::byMessage(m.id);
+        auto m = rowToMessage(accountId, q);
+        m.attachments = AttachmentRepository::byMessage(accountId, m.id);
         return m;
     }
     return {};
 }
 
-std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
+std::vector<fc::Message> MessageRepository::byThread(
+        const QString& accountId, const QString& threadId) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
-    if (threadId.isEmpty()) return out;
+    if (threadId.isEmpty() || accountId.isEmpty()) return out;
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "SELECT * FROM messages WHERE thread_id = :t "
+        "SELECT * FROM messages WHERE account_id = :a AND thread_id = :t "
         "ORDER BY internal_date ASC"));
+    q.bindValue(QStringLiteral(":a"), accountId);
     q.bindValue(QStringLiteral(":t"), threadId);
     if (!q.exec()) return out;
-    while (q.next()) out.push_back(rowToMessage(q));
-    // Attachments live in their own table; pull them in a second pass rather
-    // than trying to JOIN+aggregate. ReaderPane displays them per card.
+    while (q.next()) out.push_back(rowToMessage(accountId, q));
     for (auto& m : out) {
-        m.attachments = AttachmentRepository::byMessage(m.id);
+        m.attachments = AttachmentRepository::byMessage(accountId, m.id);
     }
-    hydrateLabelIds(out);
+    hydrateLabelIds(accountId, out);
     return out;
 }
 
-bool MessageRepository::exists(const QString& id) {
+bool MessageRepository::exists(const QString& accountId, const QString& id) {
     auto db = databaseHandle();
+    if (accountId.isEmpty()) return false;
     QSqlQuery q(db);
-    q.prepare(QStringLiteral("SELECT 1 FROM messages WHERE id = :id"));
+    q.prepare(QStringLiteral(
+        "SELECT 1 FROM messages WHERE account_id = :a AND id = :id"));
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     return q.exec() && q.next();
 }
 
-void MessageRepository::applyLabelDiff(const QString& messageId,
+void MessageRepository::applyLabelDiff(const QString& accountId,
+                                       const QString& messageId,
                                        const QStringList& added,
                                        const QStringList& removed) {
+    if (accountId.isEmpty()) return;
     auto db = databaseHandle();
 
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
-        "INSERT OR IGNORE INTO message_labels(message_id, label_id) "
-        "VALUES(:m, :l)"));
+        "INSERT OR IGNORE INTO message_labels(account_id, message_id, label_id) "
+        "VALUES(:a, :m, :l)"));
     for (const auto& l : added) {
+        ins.bindValue(QStringLiteral(":a"), accountId);
         ins.bindValue(QStringLiteral(":m"), messageId);
         ins.bindValue(QStringLiteral(":l"), l);
         ins.exec();
@@ -480,8 +493,10 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
 
     QSqlQuery del(db);
     del.prepare(QStringLiteral(
-        "DELETE FROM message_labels WHERE message_id = :m AND label_id = :l"));
+        "DELETE FROM message_labels "
+        "WHERE account_id = :a AND message_id = :m AND label_id = :l"));
     for (const auto& l : removed) {
+        del.bindValue(QStringLiteral(":a"), accountId);
         del.bindValue(QStringLiteral(":m"), messageId);
         del.bindValue(QStringLiteral(":l"), l);
         del.exec();
@@ -490,49 +505,109 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
     QSqlQuery flags(db);
     flags.prepare(QStringLiteral(
         "UPDATE messages SET "
-        "  is_unread  = (SELECT COUNT(*) FROM message_labels WHERE message_id = :m AND label_id = 'UNREAD')  > 0, "
-        "  is_starred = (SELECT COUNT(*) FROM message_labels WHERE message_id = :m AND label_id = 'STARRED') > 0 "
-        "WHERE id = :m"));
+        "  is_unread  = (SELECT COUNT(*) FROM message_labels "
+        "                 WHERE account_id = :a AND message_id = :m AND label_id = 'UNREAD')  > 0, "
+        "  is_starred = (SELECT COUNT(*) FROM message_labels "
+        "                 WHERE account_id = :a AND message_id = :m AND label_id = 'STARRED') > 0 "
+        "WHERE account_id = :a AND id = :m"));
+    flags.bindValue(QStringLiteral(":a"), accountId);
     flags.bindValue(QStringLiteral(":m"), messageId);
     flags.exec();
 }
 
-void MessageRepository::markAccessed(const QString& id) {
+void MessageRepository::markAccessed(const QString& accountId, const QString& id) {
+    if (accountId.isEmpty()) return;
     auto db = databaseHandle();
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "UPDATE messages SET last_accessed_at = :t WHERE id = :id"));
+        "UPDATE messages SET last_accessed_at = :t "
+        "WHERE account_id = :a AND id = :id"));
     q.bindValue(QStringLiteral(":t"),  QDateTime::currentMSecsSinceEpoch());
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     q.exec();
 }
 
-void MessageRepository::setSnoozeUntil(const QString& id, qint64 wakeAtMs) {
+void MessageRepository::setSnoozeUntil(const QString& accountId,
+                                       const QString& id, qint64 wakeAtMs) {
+    if (accountId.isEmpty()) return;
     auto db = databaseHandle();
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "UPDATE messages SET snooze_until = :t WHERE id = :id"));
+        "UPDATE messages SET snooze_until = :t "
+        "WHERE account_id = :a AND id = :id"));
     if (wakeAtMs > 0) {
         q.bindValue(QStringLiteral(":t"), wakeAtMs);
     } else {
         q.bindValue(QStringLiteral(":t"),
                     QVariant(QMetaType(QMetaType::LongLong)));
     }
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     q.exec();
 }
 
-QStringList MessageRepository::dueSnoozeWakeups() {
+QStringList MessageRepository::dueSnoozeWakeups(const QString& accountId) {
     auto db = databaseHandle();
     QStringList out;
+    if (accountId.isEmpty()) return out;
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "SELECT id FROM messages "
-        "WHERE snooze_until IS NOT NULL AND snooze_until <= :now"));
+        "WHERE account_id = :a "
+        "  AND snooze_until IS NOT NULL "
+        "  AND snooze_until <= :now"));
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":now"), QDateTime::currentMSecsSinceEpoch());
     if (!q.exec()) return out;
     while (q.next()) out << q.value(0).toString();
     return out;
+}
+
+// ---------- Legacy zero-arg overloads ----------
+
+qint64 MessageRepository::upsert(const fc::Message& m) {
+    const QString aid = m.accountId.isEmpty()
+        ? Database::defaultAccountId()
+        : m.accountId;
+    return upsert(aid, m);
+}
+std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
+                                                        int limit, int offset) {
+    return listByLabel(Database::defaultAccountId(), labelId, limit, offset);
+}
+std::vector<fc::Message> MessageRepository::listThreadsByLabel(
+        const QString& labelId, int limit, int offset) {
+    return listThreadsByLabel(Database::defaultAccountId(), labelId, limit, offset);
+}
+std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int limit) {
+    return searchFts(Database::defaultAccountId(), query, limit);
+}
+std::vector<fc::Message> MessageRepository::searchFtsThreads(const QString& query, int limit) {
+    return searchFtsThreads(Database::defaultAccountId(), query, limit);
+}
+fc::Message MessageRepository::byId(const QString& id) {
+    return byId(Database::defaultAccountId(), id);
+}
+bool MessageRepository::exists(const QString& id) {
+    return exists(Database::defaultAccountId(), id);
+}
+std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
+    return byThread(Database::defaultAccountId(), threadId);
+}
+void MessageRepository::applyLabelDiff(const QString& messageId,
+                                       const QStringList& added,
+                                       const QStringList& removed) {
+    applyLabelDiff(Database::defaultAccountId(), messageId, added, removed);
+}
+void MessageRepository::markAccessed(const QString& id) {
+    markAccessed(Database::defaultAccountId(), id);
+}
+void MessageRepository::setSnoozeUntil(const QString& id, qint64 wakeAtMs) {
+    setSnoozeUntil(Database::defaultAccountId(), id, wakeAtMs);
+}
+QStringList MessageRepository::dueSnoozeWakeups() {
+    return dueSnoozeWakeups(Database::defaultAccountId());
 }
 
 }  // namespace fc::cache

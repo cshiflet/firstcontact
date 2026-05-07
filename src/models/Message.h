@@ -17,6 +17,12 @@ struct Attachment {
 
 struct Message {
     QString id;
+    // The account this message belongs to. Cache row's account_id, set
+    // by every repository read. Outgoing upserts must populate this so
+    // the row lands under the right account; SyncService stamps it from
+    // its AccountContext, MainWindow stamps it from the active account
+    // when composing locally.
+    QString accountId;
     QString threadId;
     QString historyId;
     qint64  internalDate = 0;     // ms since epoch

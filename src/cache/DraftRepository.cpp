@@ -1,5 +1,6 @@
 #include "DraftRepository.h"
 
+#include "Database.h"
 #include "Migrations.h"
 
 #include <QDateTime>
@@ -28,6 +29,7 @@ QStringList splitJsonArray(const QString& s) {
 
 DraftRow rowFromQuery(const QSqlQuery& q) {
     DraftRow d;
+    d.accountId           = q.value(QStringLiteral("account_id")).toString();
     d.id                  = q.value(QStringLiteral("id")).toString();
     d.messageId           = q.value(QStringLiteral("message_id")).toString();
     d.threadId            = q.value(QStringLiteral("thread_id")).toString();
@@ -39,17 +41,20 @@ DraftRow rowFromQuery(const QSqlQuery& q) {
     d.bodyText            = q.value(QStringLiteral("body_text")).toString();
     d.updatedAt           = q.value(QStringLiteral("updated_at")).toLongLong();
     d.dirty               = q.value(QStringLiteral("dirty")).toBool();
-    // Heuristic: id is the Gmail draftId once the row has been synced. Until
-    // then it begins with "tmp-".
     if (!d.id.startsWith(QStringLiteral("tmp-"))) d.gmailDraftId = d.id;
     return d;
 }
 
 }  // namespace
 
-QString DraftRepository::upsert(const DraftRow& d) {
+QString DraftRepository::upsert(const QString& accountId, const DraftRow& d) {
+    if (accountId.isEmpty()) {
+        qWarning("DraftRepository::upsert called without an accountId; dropped");
+        return {};
+    }
     auto db = databaseHandle();
     DraftRow row = d;
+    row.accountId = accountId;
     if (row.id.isEmpty()) {
         row.id = QStringLiteral("tmp-") +
                  QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -58,11 +63,11 @@ QString DraftRepository::upsert(const DraftRow& d) {
 
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "INSERT INTO drafts(id, message_id, thread_id, in_reply_to_msg_id, "
-        "                    subject, to_addrs, cc_addrs, bcc_addrs, body_text, "
-        "                    updated_at, dirty) "
-        "VALUES(:id, :mid, :tid, :rep, :sub, :to, :cc, :bcc, :body, :u, :dirty) "
-        "ON CONFLICT(id) DO UPDATE SET "
+        "INSERT INTO drafts(account_id, id, message_id, thread_id, "
+        "                    in_reply_to_msg_id, subject, to_addrs, cc_addrs, "
+        "                    bcc_addrs, body_text, updated_at, dirty) "
+        "VALUES(:a, :id, :mid, :tid, :rep, :sub, :to, :cc, :bcc, :body, :u, :dirty) "
+        "ON CONFLICT(account_id, id) DO UPDATE SET "
         "  message_id          = excluded.message_id, "
         "  thread_id           = excluded.thread_id, "
         "  in_reply_to_msg_id  = excluded.in_reply_to_msg_id, "
@@ -73,6 +78,7 @@ QString DraftRepository::upsert(const DraftRow& d) {
         "  body_text           = excluded.body_text, "
         "  updated_at          = excluded.updated_at, "
         "  dirty               = excluded.dirty"));
+    q.bindValue(QStringLiteral(":a"),    accountId);
     q.bindValue(QStringLiteral(":id"),   row.id);
     q.bindValue(QStringLiteral(":mid"),  row.messageId);
     q.bindValue(QStringLiteral(":tid"),  row.threadId);
@@ -91,52 +97,106 @@ QString DraftRepository::upsert(const DraftRow& d) {
     return row.id;
 }
 
-std::vector<DraftRow> DraftRepository::listLocal() {
+std::vector<DraftRow> DraftRepository::listLocal(const QString& accountId) {
     auto db = databaseHandle();
     std::vector<DraftRow> out;
+    if (accountId.isEmpty()) return out;
     QSqlQuery q(db);
-    if (!q.exec(QStringLiteral(
-            "SELECT * FROM drafts ORDER BY updated_at DESC"))) return out;
+    q.prepare(QStringLiteral(
+        "SELECT * FROM drafts WHERE account_id = :a "
+        "ORDER BY updated_at DESC"));
+    q.bindValue(QStringLiteral(":a"), accountId);
+    if (!q.exec()) return out;
     while (q.next()) out.push_back(rowFromQuery(q));
     return out;
 }
 
-DraftRow DraftRepository::byId(const QString& id) {
+DraftRow DraftRepository::byId(const QString& accountId, const QString& id) {
     auto db = databaseHandle();
+    if (accountId.isEmpty()) return {};
     QSqlQuery q(db);
-    q.prepare(QStringLiteral("SELECT * FROM drafts WHERE id = :id"));
+    q.prepare(QStringLiteral(
+        "SELECT * FROM drafts WHERE account_id = :a AND id = :id"));
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     if (q.exec() && q.next()) return rowFromQuery(q);
     return {};
 }
 
-std::vector<DraftRow> DraftRepository::dirtyDrafts() {
+std::vector<DraftRow> DraftRepository::dirtyDrafts(const QString& accountId) {
     auto db = databaseHandle();
     std::vector<DraftRow> out;
+    if (accountId.isEmpty()) return out;
     QSqlQuery q(db);
-    if (!q.exec(QStringLiteral(
-            "SELECT * FROM drafts WHERE dirty = 1 ORDER BY updated_at"))) return out;
+    q.prepare(QStringLiteral(
+        "SELECT * FROM drafts WHERE account_id = :a AND dirty = 1 "
+        "ORDER BY updated_at"));
+    q.bindValue(QStringLiteral(":a"), accountId);
+    if (!q.exec()) return out;
     while (q.next()) out.push_back(rowFromQuery(q));
     return out;
 }
 
-void DraftRepository::markSynced(const QString& localId, const QString& gmailDraftId) {
+std::vector<DraftRow> DraftRepository::dirtyDraftsAllAccounts() {
+    auto db = databaseHandle();
+    std::vector<DraftRow> out;
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT * FROM drafts WHERE dirty = 1 "
+            "ORDER BY account_id, updated_at"))) return out;
+    while (q.next()) out.push_back(rowFromQuery(q));
+    return out;
+}
+
+void DraftRepository::markSynced(const QString& accountId,
+                                  const QString& localId,
+                                  const QString& gmailDraftId) {
+    if (accountId.isEmpty()) return;
     auto db = databaseHandle();
     QSqlQuery q(db);
-    // Replace local id with the Gmail draft id so subsequent lookups match.
     q.prepare(QStringLiteral(
-        "UPDATE drafts SET id = :new, dirty = 0 WHERE id = :old"));
+        "UPDATE drafts SET id = :new, dirty = 0 "
+        "WHERE account_id = :a AND id = :old"));
     q.bindValue(QStringLiteral(":new"), gmailDraftId);
+    q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":old"), localId);
     q.exec();
 }
 
-void DraftRepository::remove(const QString& id) {
+void DraftRepository::remove(const QString& accountId, const QString& id) {
+    if (accountId.isEmpty()) return;
     auto db = databaseHandle();
     QSqlQuery q(db);
-    q.prepare(QStringLiteral("DELETE FROM drafts WHERE id = :id"));
+    q.prepare(QStringLiteral(
+        "DELETE FROM drafts WHERE account_id = :a AND id = :id"));
+    q.bindValue(QStringLiteral(":a"),  accountId);
     q.bindValue(QStringLiteral(":id"), id);
     q.exec();
+}
+
+// ---------- legacy zero-arg overloads ----------
+
+QString DraftRepository::upsert(const DraftRow& d) {
+    const QString aid = d.accountId.isEmpty()
+        ? Database::defaultAccountId()
+        : d.accountId;
+    return upsert(aid, d);
+}
+std::vector<DraftRow> DraftRepository::listLocal() {
+    return listLocal(Database::defaultAccountId());
+}
+DraftRow DraftRepository::byId(const QString& id) {
+    return byId(Database::defaultAccountId(), id);
+}
+std::vector<DraftRow> DraftRepository::dirtyDrafts() {
+    return dirtyDrafts(Database::defaultAccountId());
+}
+void DraftRepository::markSynced(const QString& localId,
+                                  const QString& gmailDraftId) {
+    markSynced(Database::defaultAccountId(), localId, gmailDraftId);
+}
+void DraftRepository::remove(const QString& id) {
+    remove(Database::defaultAccountId(), id);
 }
 
 }  // namespace fc::cache

@@ -80,6 +80,52 @@ void execAll(QSqlDatabase& db, const QString& sql) {
     }
 }
 
+// Same as execAll, but runs the whole batch inside a single transaction
+// with foreign-key enforcement temporarily disabled — required for the
+// v6 multi-account composite-FK rebuild, where each per-account table has
+// to be dropped + recreated and the in-flight intermediate states would
+// otherwise trip the FK checker against still-pointing-at-old-schema
+// child tables. PRAGMA foreign_keys must be set OUTSIDE a transaction
+// (sqlite ignores it inside), so we toggle it before/after the txn.
+//
+// Migrations 0001-0005 use plain execAll; only 0006 needs this path.
+void execAllInTransaction(QSqlDatabase& db, const QString& sql) {
+    {
+        QSqlQuery pragmaOff(db);
+        if (!pragmaOff.exec(QStringLiteral("PRAGMA foreign_keys = OFF"))) {
+            qFatal("migration: failed to disable foreign keys: %s",
+                   qUtf8Printable(pragmaOff.lastError().text()));
+        }
+    }
+    if (!db.transaction()) {
+        qFatal("migration: failed to BEGIN transaction: %s",
+               qUtf8Printable(db.lastError().text()));
+    }
+    for (const QString& stmt : splitStatements(sql)) {
+        QSqlQuery q(db);
+        if (!q.exec(stmt)) {
+            const QString msg = q.lastError().text();
+            db.rollback();
+            QSqlQuery pragmaOn(db);
+            pragmaOn.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+            qFatal("migration failed: %s\nSQL: %s",
+                   qUtf8Printable(msg),
+                   qUtf8Printable(stmt));
+        }
+    }
+    if (!db.commit()) {
+        qFatal("migration: failed to COMMIT transaction: %s",
+               qUtf8Printable(db.lastError().text()));
+    }
+    {
+        QSqlQuery pragmaOn(db);
+        if (!pragmaOn.exec(QStringLiteral("PRAGMA foreign_keys = ON"))) {
+            qWarning("migration: failed to re-enable foreign keys: %s",
+                     qUtf8Printable(pragmaOn.lastError().text()));
+        }
+    }
+}
+
 void setSchemaVersion(QSqlDatabase& db, int v) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
@@ -112,6 +158,15 @@ void Migrations::run(QSqlDatabase& db) {
     if (v < 5) {
         execAll(db, readResource(QStringLiteral(":/schema/0005_snooze.sql")));
         setSchemaVersion(db, 5);
+    }
+    if (v < 6) {
+        // Multi-account: rebuild every per-account table with a composite
+        // (account_id, …) primary key. Has to run in a transaction so the
+        // composite-FK dance (drop child, drop parent, rename _new → orig)
+        // doesn't leave half-built tables on failure.
+        execAllInTransaction(
+            db, readResource(QStringLiteral(":/schema/0006_multi_account.sql")));
+        setSchemaVersion(db, 6);
     }
 }
 

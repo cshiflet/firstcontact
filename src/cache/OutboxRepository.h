@@ -9,6 +9,7 @@ namespace fc::cache {
 
 struct OutboxItem {
     qint64      id = 0;
+    QString     accountId;
     QString     state;          // "queued" | "sending" | "sent" | "failed"
     QByteArray  rfc5322;
     QString     threadId;
@@ -24,11 +25,25 @@ struct OutboxItem {
 
 class OutboxRepository {
 public:
-    static qint64 enqueue(const OutboxItem& item);
-    static std::vector<OutboxItem> dueForSend();
+    // Per-account API.
+    static qint64                  enqueue(const QString& accountId,
+                                           const OutboxItem& item);
+    static std::vector<OutboxItem> dueForSend(const QString& accountId);
+
+    // markSending/markSent/markFailed key off the autoincrement row id
+    // (globally unique even with multi-account), so they don't need an
+    // accountId parameter.
     static void markSending(qint64 id);
     static void markSent(qint64 id);
     static void markFailed(qint64 id, const QString& err, qint64 nextRetryAt);
+
+    // Cross-account helper for OutboxWorker — pulls due rows across
+    // every account so a single tick can drain them all.
+    static std::vector<OutboxItem> dueForSendAllAccounts();
+
+    // Legacy zero-arg overloads.
+    static qint64                  enqueue(const OutboxItem& item);
+    static std::vector<OutboxItem> dueForSend();
 };
 
 }  // namespace fc::cache

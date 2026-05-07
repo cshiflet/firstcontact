@@ -48,7 +48,7 @@ private slots:
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 5);   // bump on each schema change
+            QCOMPARE(q.value(0).toInt(), 6);   // bump on each schema change
 
             // body_html column landed in v3.
             QVERIFY(q.exec(QStringLiteral(
@@ -59,6 +59,35 @@ private slots:
             // snooze_until landed in v5.
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT snooze_until FROM messages LIMIT 1")));
+
+            // v6 multi-account: every per-account table now carries an
+            // `account_id` column, and the new `accounts` table holds at
+            // least the legacy seed row.
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM messages LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM threads LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM labels LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM message_labels LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM attachments LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM drafts LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM outbox LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id FROM pending_ops LIMIT 1")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT id, email FROM accounts")));
+            QVERIFY(q.next());   // legacy seed row
+            QVERIFY(!q.value(0).toString().isEmpty());
+
+            // account_meta is the per-account key/value sheet (history_id
+            // and email migrated out of `meta`).
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT account_id, key, value FROM account_meta LIMIT 1")));
 
             // Idempotency: second run should not fail.
             fc::cache::Migrations::run(db);
