@@ -1145,26 +1145,12 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
 }
 
 void MainWindow::onSwitchAccount() {
-    // v1 is single-account: switching means signing out the current
-    // account and starting the OAuth flow against whatever account the
-    // user picks in Google's consent screen. The caller is always an
-    // explicit user gesture (Account manager → "Add another account"),
-    // so we don't pop a confirmation dialog here — that'd be the third
-    // click in a row asking the same question.
-    if (auth_->isAuthorized()) {
-        auth_->signOut();
-        if (!currentAccountId_.isEmpty()) {
-            fc::cache::MetaRepository::set(currentAccountId_,
-                                           QStringLiteral("email"), QString());
-        }
-        for (auto* ctx : accounts_->allContexts()) {
-            if (auto* s = ctx->sync()) s->stopScheduler();
-        }
-        if (sync_) sync_->stopScheduler();
-        outbox_->stop();
-        pending_->stop();
-        drafts_->stop();
-    }
+    // Multi-account: "Add another account" no longer signs out the
+    // existing account — it just kicks the OAuth flow to mint a fresh
+    // accounts row alongside the existing ones. The granted handler
+    // builds the AccountContext and the toolbar account menu picks
+    // up the new entry; the caller can switch to it via the menu or
+    // Ctrl+N once it appears.
     onSignIn();
 }
 

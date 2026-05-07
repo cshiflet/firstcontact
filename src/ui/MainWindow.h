@@ -116,7 +116,8 @@ private:
     void refreshToolbarIcons();   // re-bake icons from the active palette
     void refreshToolbarStyle();   // toggle text-beside-icon / icon-only
     void updateToolbarOverflow(); // hide/show toolbar items into hamburger
-    void onSwitchAccount();       // sign out + immediately re-authorize
+    void onSwitchAccount();       // kick OAuth flow to mint a fresh
+                                  // accounts row (no sign-out of existing)
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
 
     // Apply (add, remove) label sets to every message in a thread,
