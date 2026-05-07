@@ -32,7 +32,15 @@ public:
 
     void showLoading();
     void showMessage(const fc::Message& m);
-    void showThread(const std::vector<fc::Message>& messages);
+    // Renders a stack of message cards for an entire thread. When
+    // `focusedId` is empty (or doesn't match any message in the
+    // thread), the latest message is expanded and the rest collapsed
+    // — Gmail-web's default. When `focusedId` matches a message in
+    // the thread, THAT card is expanded instead and scrolled into
+    // view, so a click on a child row in the conversation-view
+    // threadlist lands the user on the right message.
+    void showThread(const std::vector<fc::Message>& messages,
+                     const QString& focusedId = {});
     void showEmpty(const QString& reason = {});
 
 signals:

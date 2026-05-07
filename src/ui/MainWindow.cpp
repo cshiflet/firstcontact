@@ -1087,7 +1087,12 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
         currentMessage_ = selected;
         auto thread = fc::cache::MessageRepository::byThread(selected.threadId);
         if (thread.size() > 1) {
-            reader_->showThread(thread);
+            // Pass the activated id so the reader expands + scrolls to
+            // the right card. Without this, clicking a child row in an
+            // expanded conversation always lands on the latest message
+            // (showThread's default), which means the user has to
+            // hunt for the message they actually clicked.
+            reader_->showThread(thread, selected.id);
         } else {
             reader_->showMessage(selected);
         }

@@ -23,6 +23,7 @@
 #include <QScrollArea>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -228,6 +229,11 @@ void ReaderPane::clearStack() {
 QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpanded) {
     auto* card = new QFrame(content_);
     card->setObjectName(QStringLiteral("MessageCard"));
+    // Tag the card with its message id so showThread's focus-and-scroll
+    // pass can find it after layout settles. Plain QString property —
+    // findChild walks by objectName, but we filter on this property
+    // because objectName is shared across all cards.
+    card->setProperty("messageId", m.id);
     card->setFrameShape(QFrame::NoFrame);
     auto* cardLayout = new QVBoxLayout(card);
     cardLayout->setContentsMargins(12, 10, 12, 10);
@@ -601,14 +607,42 @@ void ReaderPane::showMessage(const fc::Message& m) {
     contentLayout_->insertWidget(0, card);
 }
 
-void ReaderPane::showThread(const std::vector<fc::Message>& messages) {
+void ReaderPane::showThread(const std::vector<fc::Message>& messages,
+                              const QString& focusedId) {
     clearStack();
     if (messages.empty()) { showEmpty(); return; }
 
-    // All messages collapsed except the most recent.
+    // Pick which card starts expanded. focusedId wins when it matches
+    // one of the thread's messages; otherwise we fall back to "latest"
+    // (the last entry, since byThread sorts ascending by date).
+    int focusIdx = -1;
+    if (!focusedId.isEmpty()) {
+        for (int i = 0; i < int(messages.size()); ++i) {
+            if (messages[i].id == focusedId) { focusIdx = i; break; }
+        }
+    }
+    if (focusIdx < 0) focusIdx = int(messages.size()) - 1;
+
+    QWidget* focusedCard = nullptr;
     for (int i = 0; i < int(messages.size()); ++i) {
-        const bool isLatest = (i == int(messages.size()) - 1);
-        contentLayout_->insertWidget(i, buildMessageCard(messages[i], isLatest));
+        QWidget* card = buildMessageCard(messages[i], i == focusIdx);
+        if (i == focusIdx) focusedCard = card;
+        contentLayout_->insertWidget(i, card);
+    }
+
+    // Centre the focused card in the viewport once Qt has had a tick
+    // to lay everything out — at this synchronous point the cards'
+    // y() values are still 0. ensureWidgetVisible(card, x, y) takes
+    // a margin in pixels; we pass half the viewport height so the
+    // card lands roughly centred rather than glued to the top.
+    if (focusedCard) {
+        QPointer<QScrollArea> s = scroll_;
+        QPointer<QWidget> c = focusedCard;
+        QTimer::singleShot(0, this, [s, c] {
+            if (!s || !c) return;
+            const int margin = qMax(40, s->viewport()->height() / 2);
+            s->ensureWidgetVisible(c, /*xMargin=*/0, /*yMargin=*/margin);
+        });
     }
 }
 
