@@ -67,10 +67,128 @@ QHash<int, QByteArray> MessageListModel::roleNames() const {
     };
 }
 
+bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
+    if (parent.isValid()) return false;
+    // Search has no offset support in our FTS API (top-K only). Sticking
+    // to false for search keeps Qt from poking fetchMore in a loop the
+    // model can't actually fulfill.
+    if (source_ != Source::ByLabel) return false;
+    // The cache is drained for this source — wait for messagesUpdated /
+    // a server top-up to bring back new rows. (loadFirstPage / explicit
+    // refresh resets this flag.)
+    return !cacheDrained_;
+}
+
+void MessageListModel::fetchMore(const QModelIndex& parent) {
+    if (parent.isValid()) return;
+    if (source_ != Source::ByLabel) return;
+    if (cacheDrained_) return;
+
+    const int offset = static_cast<int>(rows_.size());
+    auto more = conversationView_
+        ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset)
+        : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset);
+
+    if (more.empty()) {
+        cacheDrained_ = true;
+        emit cacheExhausted(sourceParam_);
+        return;
+    }
+
+    const int first = static_cast<int>(rows_.size());
+    const int last  = first + static_cast<int>(more.size()) - 1;
+    beginInsertRows({}, first, last);
+    rows_.insert(rows_.end(),
+                 std::make_move_iterator(more.begin()),
+                 std::make_move_iterator(more.end()));
+    endInsertRows();
+
+    // A short page (less than pageSize) means the cache is on its last
+    // legs for this label. Mark drained so the next scroll-to-bottom
+    // round-trip exhausts cleanly and triggers the server top-up.
+    if (static_cast<int>(more.size()) < pageSize()) {
+        cacheDrained_ = true;
+        // Don't emit cacheExhausted here — we did append rows, so the
+        // user sees progress. The signal fires the NEXT time fetchMore
+        // is called and finds nothing.
+    }
+}
+
+void MessageListModel::setLabelSource(const QString& labelId, bool conversationView) {
+    source_           = Source::ByLabel;
+    sourceParam_      = labelId;
+    conversationView_ = conversationView;
+    loadFirstPage();
+}
+
+void MessageListModel::setSearchSource(const QString& query, bool conversationView) {
+    source_           = Source::BySearch;
+    sourceParam_      = query;
+    conversationView_ = conversationView;
+    loadFirstPage();
+}
+
+void MessageListModel::refreshFromSource() {
+    if (source_ == Source::None) return;
+    // Re-query offset=0 with the current loaded count so a server top-up
+    // / incremental sync surfaces without losing the user's scroll
+    // window. The loadedRows fallback to pageSize() for the case where
+    // we just initialized and rowCount is zero.
+    const int limit = qMax(static_cast<int>(rows_.size()), pageSize());
+
+    std::vector<Message> rows;
+    if (source_ == Source::ByLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, limit, 0)
+            : cache::MessageRepository::listByLabel(sourceParam_, limit, 0);
+    } else {
+        rows = conversationView_
+            ? cache::MessageRepository::searchFtsThreads(sourceParam_, limit)
+            : cache::MessageRepository::searchFts(sourceParam_, limit);
+    }
+
+    beginResetModel();
+    rows_ = std::move(rows);
+    expandedThreads_.clear();
+    cacheDrained_ = (source_ == Source::BySearch)
+        || static_cast<int>(rows_.size()) < limit;
+    endResetModel();
+}
+
+void MessageListModel::loadFirstPage() {
+    std::vector<Message> rows;
+    if (source_ == Source::ByLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), 0)
+            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), 0);
+    } else if (source_ == Source::BySearch) {
+        rows = conversationView_
+            ? cache::MessageRepository::searchFtsThreads(sourceParam_, pageSize())
+            : cache::MessageRepository::searchFts(sourceParam_, pageSize());
+    }
+
+    beginResetModel();
+    rows_ = std::move(rows);
+    expandedThreads_.clear();
+    cacheDrained_ = (source_ == Source::BySearch)
+        || static_cast<int>(rows_.size()) < pageSize();
+    endResetModel();
+}
+
+QString MessageListModel::sourceLabelId() const {
+    return source_ == Source::ByLabel ? sourceParam_ : QString();
+}
+
 void MessageListModel::replaceAll(std::vector<Message> messages) {
     beginResetModel();
     rows_ = std::move(messages);
     expandedThreads_.clear();   // expansion state doesn't survive a reload
+    // External replaceAll can't be paginated — caller is in charge of
+    // what's in the model. Keep canFetchMore happy by treating this as
+    // drained.
+    source_       = Source::None;
+    sourceParam_.clear();
+    cacheDrained_ = true;
     endResetModel();
 }
 

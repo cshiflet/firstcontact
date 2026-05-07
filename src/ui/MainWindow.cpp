@@ -64,6 +64,7 @@
 #include <QSize>
 #include <QMenu>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QSet>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -638,8 +639,39 @@ void MainWindow::wireSignals() {
             [this] {
                 if (list_) list_->viewport()->update();
             });
+    // messagesUpdated covers two unrelated triggers: incremental sync
+    // landing new rows, and our own topUpLabel finishing. Either way
+    // we want to refresh in place — refreshFromSource re-queries the
+    // same window the model already shows, so newly-cached rows
+    // surface without dropping the user back to row 0. The scroll +
+    // selection save/restore here covers the case where Qt's view
+    // reacts to beginResetModel by snapping the scrollbar; setting
+    // the value back after endResetModel keeps the user's pixel
+    // window stable.
     connect(sync_, &fc::sync::SyncService::messagesUpdated,
-            this,  &MainWindow::reloadCurrentLabel);
+            this,  [this] {
+                auto* sb = list_->verticalScrollBar();
+                const int y       = sb ? sb->value() : 0;
+                const QString sel = currentMessage_.id;
+                listModel_->refreshFromSource();
+                if (sb) sb->setValue(y);
+                if (!sel.isEmpty()) {
+                    for (int i = 0; i < listModel_->rowCount(); ++i) {
+                        const auto idx = listModel_->index(i, 0);
+                        if (idx.data(fc::MessageListModel::IdRole).toString() == sel) {
+                            list_->setCurrentIndex(idx);
+                            break;
+                        }
+                    }
+                }
+            });
+    // When the model can't fetch any more rows from the cache, fall
+    // through to the server-side top-up. Subsequent messagesUpdated
+    // brings the new rows back via refreshFromSource above.
+    connect(listModel_, &fc::MessageListModel::cacheExhausted,
+            this,        [this](const QString& labelId) {
+                if (sync_) sync_->topUpLabel(labelId);
+            });
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
                 lastSyncFailed_ = true;
@@ -970,21 +1002,18 @@ void MainWindow::reloadCurrentLabel() {
     const bool conv = Preferences::conversationView();
 
     // Capture the user's currently-viewed message + thread so we can
-    // re-select it after replaceAll. Without this, every background
+    // re-select it after the model swap. Without this, every background
     // sync (which fires messagesUpdated → reloadCurrentLabel) would
     // wipe the selection and reset the reader pane — which is jarring
     // when the user is mid-read.
     const QString preservedId       = currentMessage_.id;
     const QString preservedThreadId = currentMessage_.threadId;
 
-    auto rows = currentSearchQuery_.isEmpty()
-        ? (conv
-            ? fc::cache::MessageRepository::listThreadsByLabel(currentLabelId_, kPageSize, 0)
-            : fc::cache::MessageRepository::listByLabel(currentLabelId_, kPageSize, 0))
-        : (conv
-            ? fc::cache::MessageRepository::searchFtsThreads(currentSearchQuery_, kPageSize)
-            : fc::cache::MessageRepository::searchFts(currentSearchQuery_, kPageSize));
-    listModel_->replaceAll(std::move(rows));
+    if (currentSearchQuery_.isEmpty()) {
+        listModel_->setLabelSource(currentLabelId_, conv);
+    } else {
+        listModel_->setSearchSource(currentSearchQuery_, conv);
+    }
 
     // Try to restore the selection: first by exact message id, then by
     // thread id. The thread fallback covers conversation-view rows

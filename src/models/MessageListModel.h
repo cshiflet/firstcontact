@@ -49,8 +49,29 @@ public:
     QVariant data(const QModelIndex& index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    // Pagination hooks. Qt's view controllers call canFetchMore + fetchMore
+    // automatically as the user scrolls past the bottom of what's loaded.
+    bool canFetchMore(const QModelIndex& parent) const override;
+    void fetchMore(const QModelIndex& parent) override;
+
+    // Kept around for any caller that wants to slam an explicit list into
+    // the model (search results, ad-hoc fixture loaders). For browsing
+    // labels, prefer setLabelSource so canFetchMore can keep paging.
     void replaceAll(std::vector<Message> messages);
     const Message* messageAt(int row) const;
+
+    // Source-pinned modes. setLabelSource resets the model and loads the
+    // first cache page for the label; subsequent fetchMore calls walk
+    // the cache forward. setSearchSource pins to FTS5 search results
+    // (no pagination — the FTS API is top-K only).
+    void setLabelSource(const QString& labelId, bool conversationView);
+    void setSearchSource(const QString& query, bool conversationView);
+
+    // Re-queries the active source for offset=0, limit=loadedRows — used by
+    // messagesUpdated handlers to refresh in place without losing the
+    // user's scroll window. Falls back to a no-op when the source has
+    // never been set.
+    void refreshFromSource();
 
     // Toggle inline expansion of the thread at `row`. No-op if the row
     // is already a child or represents a single-message thread. On
@@ -59,12 +80,30 @@ public:
     // On collapse, those children are removed in place.
     void toggleThreadExpand(int row);
 
+    QString sourceLabelId() const;
+
+signals:
+    // Fired when fetchMore was asked but the cache had no more rows for
+    // the source. The owner connects this to SyncService::topUpLabel
+    // (or any equivalent server-side fetcher) to bring back more rows.
+    void cacheExhausted(const QString& labelId);
+
 private:
+    enum class Source { None, ByLabel, BySearch };
+
+    int  pageSize() const { return 100; }
+    void loadFirstPage();
+
     std::vector<Message> rows_;
     // Thread ids whose children are currently shown inline. Cleared on
     // every replaceAll — switching label / refresh resets expansion,
     // matching what most desktop mail clients do.
     QSet<QString> expandedThreads_;
+
+    Source  source_           = Source::None;
+    QString sourceParam_;     // labelId or search query
+    bool    conversationView_ = true;
+    bool    cacheDrained_     = false;   // last fetchMore returned 0
 };
 
 }  // namespace fc
