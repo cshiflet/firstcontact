@@ -638,7 +638,35 @@ void MainWindow::wireSignals() {
     connect(sync_, &fc::sync::SyncService::profileFetched, this,
             [this](const QString& email) {
                 auth_->setAccountEmail(email);
+                // First sign-in for a fresh account: AccountManager has
+                // no row for this email yet (the legacy seed has a
+                // placeholder email or "legacy@local"). Add the row so
+                // the toolbar account menu picks it up. Idempotent —
+                // adds for an existing email return the same id and
+                // just refresh display_name.
+                if (accounts_) {
+                    const QString id = accounts_->add(email);
+                    if (!id.isEmpty()) {
+                        accounts_->setCurrentAccountId(id);
+                    }
+                }
                 refreshAccountIndicator();
+            });
+    // Per-account contexts that arrive mid-session (Add account flow)
+    // need their schedulers kicked. accountsChanged fires on every
+    // add()/remove(); piggy-back on the same hook to start any newly
+    // created context.
+    connect(accounts_, &fc::account::AccountManager::accountsChanged, this,
+            [this] {
+                if (!auth_->isAuthorized()) return;
+                for (auto* ctx : accounts_->allContexts()) {
+                    if (auto* s = ctx->sync()) {
+                        // SyncService::startScheduler is idempotent —
+                        // calling it on an already-running timer just
+                        // resets the interval, which is fine.
+                        s->startScheduler();
+                    }
+                }
             });
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
@@ -659,6 +687,31 @@ void MainWindow::wireSignals() {
     // is the active account; other accounts' messagesUpdated still
     // tick the workers (Outbox / PendingOps / DraftSync) without
     // clobbering the UI.
+    connect(accounts_, &fc::account::AccountManager::accountsChanged, this,
+            &MainWindow::refreshAccountMenu);
+    // Account switch: rebind currentAccountId_, retarget every model,
+    // re-paint the sidebar, list, reader. The signed-in API stack
+    // (auth_, gmail_, sync_) stays pointing at the previous account
+    // for now — step 12 finishes the conversion to per-paint context
+    // lookups. For sync that's already accurate (each AccountContext
+    // owns its sync), so the switch immediately shows the new
+    // account's cached data.
+    connect(accounts_, &fc::account::AccountManager::currentAccountChanged,
+            this, [this](const QString& aid) {
+                currentAccountId_ = aid;
+                if (sync_) sync_->setAccountId(aid);
+                if (sidebar_ && sidebar_->model()) {
+                    sidebar_->model()->setAccountId(aid);
+                }
+                LabelStyleCache::instance().invalidate(aid);
+                listModel_->replaceAll({});
+                reader_->showEmpty();
+                currentMessage_ = {};
+                currentRow_ = -1;
+                currentLabelId_ = QStringLiteral("INBOX");
+                reloadCurrentLabel();
+                refreshAccountIndicator();
+            });
     connect(accounts_, &fc::account::AccountManager::labelsUpdated, this,
             [this](const QString& aid) {
                 if (aid != currentAccountId_) return;
@@ -900,11 +953,28 @@ void MainWindow::refreshAccountMenu() {
         ? tr("Signed in as %1").arg(email)
         : tr("Manage Google accounts"));
 
-    if (signedIn) {
-        // Header row: non-clickable info line showing the signed-in
-        // identity. Emails captured before we persisted them via
-        // setAccountEmail render as "Unknown account" — the manage
-        // dialog lets the user sign out either way.
+    // One menu entry per signed-in account. The active account gets a
+    // checkmark; selecting another flips currentAccountId via
+    // AccountManager::setCurrentAccountId, which retargets sidebar /
+    // list / reader. Accounts without a persisted email show as
+    // "Unknown account" until the next initial sync runs.
+    const auto allAccounts = accounts_->accounts();
+    if (!allAccounts.isEmpty()) {
+        for (const auto& a : allAccounts) {
+            QString label = a.email.isEmpty() ? tr("Unknown account") : a.email;
+            if (a.isDefault) label += tr(" (default)");
+            auto* act = accountMenu_->addAction(label);
+            act->setCheckable(true);
+            act->setChecked(a.id == currentAccountId_);
+            const QString id = a.id;
+            connect(act, &QAction::triggered, this, [this, id] {
+                accounts_->setCurrentAccountId(id);
+            });
+        }
+        accountMenu_->addSeparator();
+    } else if (signedIn) {
+        // Pre-step-6 fallback: anonymous stack, no accounts row. Show
+        // the legacy header line.
         const QString headerText = email.isEmpty()
             ? tr("Unknown account")
             : email;
@@ -913,10 +983,26 @@ void MainWindow::refreshAccountMenu() {
         accountMenu_->addSeparator();
     }
 
-    // Single "Manage…" entry covers sign-in, sign-out, and (eventually)
-    // multi-account switching. AccountManagerDialog owns the actual UI;
-    // it forwards the user's intent back here as signals so MainWindow
-    // can drive its existing onSignIn / onSignOut state machines.
+    // "Add another account…" — opens the OAuth flow on a fresh slot
+    // without touching any existing account.
+    auto* addAct = accountMenu_->addAction(
+        IconLoader::themed(QStringLiteral("login.svg")),
+        tr("Add another account…"));
+    connect(addAct, &QAction::triggered, this, [this] {
+        if (!config_->isConfigured()) {
+            SetupWizard wiz(config_, this);
+            if (wiz.exec() != QDialog::Accepted) return;
+        }
+        // The granted handler will mint the accounts row + start the
+        // scheduler. We just kick the OAuth dance.
+        statusBar()->showMessage(
+            tr("Starting OAuth flow for new account — opening your browser…"),
+            0);
+        auth_->authorize();
+    });
+
+    // "Manage…" — full multi-row dialog (per-account sign-out,
+    // make-default, etc.). Step 9 expands the dialog itself.
     auto* manageAct = accountMenu_->addAction(
         IconLoader::themed(QStringLiteral("user.svg")),
         tr("Manage…"));
