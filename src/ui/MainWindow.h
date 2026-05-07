@@ -72,6 +72,11 @@ private slots:
     // message in the thread carries UNREAD we drop UNREAD from every
     // message; otherwise we add UNREAD to every message.
     void onToggleReadCurrent();
+    // Snooze the current thread: pop a time-picker, drop INBOX, stamp
+    // every message's snooze_until. A periodic wake-up timer in
+    // MainWindow re-applies INBOX once the snooze window lapses.
+    void onSnoozeCurrent();
+    void wakeDueSnoozedMessages();
     // Left-click: write to a per-session temp dir and hand off to the
     // OS viewer; no permanent save, no AttachmentRepository update.
     void onOpenAttachment(const QString& messageId,
@@ -149,6 +154,13 @@ private:
     // tidies up after itself.
     QFrame*                  errorBanner_       = nullptr;
     QLabel*                  errorBannerLabel_  = nullptr;
+
+    // "↓ 1.2 MB" pill on the status bar. Tooltip explains: down / up /
+    // request count since launch. Bumped via SessionTransfer::changed
+    // — coalesced through the Qt event queue so we don't repaint per
+    // byte.
+    QLabel*                  bandwidthLabel_    = nullptr;
+    void                     refreshBandwidthLabel();
 
     // Overflow plumbing — hamburger button + menu plus the ordered list of
     // toolbar entries that may collapse into the menu when the window is

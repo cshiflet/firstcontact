@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "api/GmailClient.h"
+#include "api/SessionTransfer.h"
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
 #include "cache/AttachmentRepository.h"
@@ -48,6 +49,8 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QDateTime>
+#include <QDateTimeEdit>
+#include <QDialog>
 #include <QFrame>
 #include <QLabel>
 #include <QTimer>
@@ -131,6 +134,20 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     }
     statusBar()->addPermanentWidget(errorBanner_);
 
+    // Bandwidth meter — small "↓ 0 B" pill that grows with the session's
+    // accumulated wire transfer. Useful on metered or slow links to
+    // see what the app is actually costing. Tooltip explains the
+    // breakdown. Sits permanently on the right of the status bar.
+    bandwidthLabel_ = new QLabel(this);
+    bandwidthLabel_->setObjectName(QStringLiteral("FormHint"));
+    bandwidthLabel_->setContentsMargins(8, 0, 8, 0);
+    statusBar()->addPermanentWidget(bandwidthLabel_);
+    refreshBandwidthLabel();
+    connect(&fc::api::SessionTransfer::instance(),
+            &fc::api::SessionTransfer::changed,
+            this, &MainWindow::refreshBandwidthLabel,
+            Qt::QueuedConnection);
+
     wireSignals();
 
     // Initial baseline. The sync handler installed in wireSignals
@@ -153,6 +170,20 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     reloadSidebar();
     currentLabelId_ = QStringLiteral("INBOX");
     reloadCurrentLabel();
+
+    // Snooze wake-up scheduler. Snooze is FirstContact-local — Gmail's
+    // API doesn't expose its native snooze, so we tick every 60 s
+    // ourselves to find rows whose snooze_until has lapsed and restore
+    // INBOX on them. Run once now so a freshly-launched app catches
+    // anything that became due while it was closed.
+    {
+        wakeDueSnoozedMessages();
+        auto* snoozeTimer = new QTimer(this);
+        snoozeTimer->setInterval(60'000);
+        connect(snoozeTimer, &QTimer::timeout,
+                this, &MainWindow::wakeDueSnoozedMessages);
+        snoozeTimer->start();
+    }
 
     // If we have credentials already, kick off background sync.
     if (auth_->isAuthorized()) {
@@ -220,6 +251,7 @@ void MainWindow::buildToolBar() {
     auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2);
     auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3);
     auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2);
+    auto* snoozeAct  = withIcon(QStringLiteral("snooze.svg"),    tr("Snooze"),     2);
     auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2);
     tb->addSeparator();
 
@@ -327,6 +359,7 @@ void MainWindow::buildToolBar() {
     connect(forwardAct, &QAction::triggered, this, &MainWindow::onForwardCurrent);
     connect(archiveAct, &QAction::triggered, this, &MainWindow::onArchiveCurrent);
     connect(readAct,    &QAction::triggered, this, &MainWindow::onToggleReadCurrent);
+    connect(snoozeAct,  &QAction::triggered, this, &MainWindow::onSnoozeCurrent);
     connect(trash,      &QAction::triggered, this, &MainWindow::onDeleteCurrent);
     connect(settings,   &QAction::triggered, this, &MainWindow::onOpenSettings);
 
@@ -735,6 +768,36 @@ void MainWindow::wireSignals() {
     });
 }
 
+namespace {
+
+QString humanBytes(qint64 b) {
+    constexpr qint64 KB = 1024;
+    constexpr qint64 MB = KB * 1024;
+    constexpr qint64 GB = MB * 1024;
+    if (b >= GB) return QStringLiteral("%1 GB").arg(b / double(GB), 0, 'f', 2);
+    if (b >= MB) return QStringLiteral("%1 MB").arg(b / double(MB), 0, 'f', 1);
+    if (b >= KB) return QStringLiteral("%1 KB").arg(b / double(KB), 0, 'f', 1);
+    return QStringLiteral("%1 B").arg(b);
+}
+
+}  // namespace
+
+void MainWindow::refreshBandwidthLabel() {
+    if (!bandwidthLabel_) return;
+    const auto& s = fc::api::SessionTransfer::instance();
+    const qint64 down = s.bytesIn();
+    const qint64 up   = s.bytesOut();
+    const int reqs    = s.requestCount();
+    bandwidthLabel_->setText(QStringLiteral("↓ %1").arg(humanBytes(down)));
+    bandwidthLabel_->setToolTip(tr(
+        "Session transfer since launch:\n"
+        "↓ %1 received\n"
+        "↑ %2 sent\n"
+        "%3 request(s)")
+        .arg(humanBytes(down), humanBytes(up))
+        .arg(reqs));
+}
+
 void MainWindow::refreshAccountIndicator() {
     const QString email = auth_->accountEmail();
     const QString dryPrefix = fc::util::DryRun::enabled()
@@ -1044,13 +1107,25 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
         w->prefillFrom(*parent, static_cast<ComposeWindow::Mode>(mode));
     }
     connect(w, &ComposeWindow::composeReady, this,
-        [this](const fc::util::OutgoingMessage& msg, const QString& threadId) {
+        [this](const fc::util::OutgoingMessage& msg, const QString& threadId,
+               qint64 sendAtMs) {
             const QByteArray rfc = fc::util::MimeBuilder::build(msg);
             fc::cache::OutboxItem item;
             item.rfc5322  = rfc;
             item.threadId = threadId;
+            item.sendAt   = sendAtMs;   // 0 → send immediately
             fc::cache::OutboxRepository::enqueue(item);
-            outbox_->flush();
+            // Immediate send: poke the worker to flush right now.
+            // Scheduled send: the worker's existing timer will catch
+            // the row when it becomes due.
+            if (sendAtMs == 0) outbox_->flush();
+            else {
+                statusBar()->showMessage(
+                    tr("Scheduled to send at %1.")
+                        .arg(QDateTime::fromMSecsSinceEpoch(sendAtMs)
+                                 .toString(QStringLiteral("ddd MMM d, h:mm AP"))),
+                    8000);
+            }
         });
     connect(w, &ComposeWindow::saveDraftRequested, this,
         [this, w](const fc::util::OutgoingMessage& msg, const QString& threadId,
@@ -1513,6 +1588,91 @@ void MainWindow::onToggleReadCurrent() {
     statusBar()->showMessage(anyUnread ? tr("Marked as read.")
                                        : tr("Marked as unread."),
                               3000);
+    reloadCurrentLabel();
+    reloadSidebar();
+}
+
+void MainWindow::onSnoozeCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("snooze-thread"))) {
+        statusBar()->showMessage(tr("Dry-run mode: snooze blocked."), 4000);
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Snooze conversation"));
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr(
+        "Pick a wake-up time. The conversation drops out of Inbox now "
+        "and reappears at the chosen time. Snooze is FirstContact-local: "
+        "Gmail's API doesn't expose its native snooze, so the wake-up "
+        "fires only when FirstContact is running."), &dlg));
+    auto* picker = new QDateTimeEdit(
+        QDateTime::currentDateTime().addSecs(60 * 60 * 3), &dlg);
+    picker->setCalendarPopup(true);
+    picker->setMinimumDateTime(QDateTime::currentDateTime().addSecs(60));
+    picker->setDisplayFormat(QStringLiteral("ddd MMM d, yyyy  h:mm AP"));
+    layout->addWidget(picker);
+
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* okBtn     = new QPushButton(tr("Snooze"), &dlg);
+    okBtn->setObjectName(QStringLiteral("primary"));
+    okBtn->setDefault(true);
+    auto* cancelBtn = new QPushButton(tr("Cancel"), &dlg);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(okBtn);
+    layout->addLayout(btnRow);
+    QObject::connect(okBtn,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QDateTime when = picker->dateTime();
+    if (when <= QDateTime::currentDateTime()) {
+        statusBar()->showMessage(tr("Pick a time in the future."), 4000);
+        return;
+    }
+
+    // Drop INBOX from every message in the thread + stamp snooze_until
+    // so the wake-up timer can find them when the time comes. The
+    // INBOX drop also propagates to Gmail web (good — the user sees
+    // the conversation gone from Inbox there too); the wake-up will
+    // re-apply INBOX which restores it on Gmail web's side as well.
+    const QString tid = currentMessage_.threadId;
+    const auto thread = fc::cache::MessageRepository::byThread(tid);
+    const qint64 wakeAt = when.toMSecsSinceEpoch();
+    for (const auto& m : thread) {
+        if (m.id.isEmpty()) continue;
+        fc::cache::MessageRepository::setSnoozeUntil(m.id, wakeAt);
+    }
+    applyLabelDiffToThread(tid, {}, {QStringLiteral("INBOX")});
+    statusBar()->showMessage(
+        tr("Snoozed until %1.")
+            .arg(when.toString(QStringLiteral("ddd MMM d, h:mm AP"))),
+        5000);
+    reloadCurrentLabel();
+    reloadSidebar();
+}
+
+void MainWindow::wakeDueSnoozedMessages() {
+    if (fc::util::DryRun::enabled()) return;
+    const QStringList due = fc::cache::MessageRepository::dueSnoozeWakeups();
+    if (due.isEmpty()) return;
+    QSet<QString> threads;
+    for (const auto& mid : due) {
+        const auto m = fc::cache::MessageRepository::byId(mid);
+        if (!m.threadId.isEmpty()) threads.insert(m.threadId);
+        // Clear snooze_until first so a same-tick failure doesn't
+        // produce an infinite wake loop.
+        fc::cache::MessageRepository::setSnoozeUntil(mid, 0);
+    }
+    // Restore INBOX per thread (one diff per thread, not per message).
+    for (const QString& tid : threads) {
+        applyLabelDiffToThread(tid, {QStringLiteral("INBOX")}, {});
+    }
+    qInfo("Snooze: woke %d message(s) across %d thread(s)",
+          int(due.size()), int(threads.size()));
     reloadCurrentLabel();
     reloadSidebar();
 }

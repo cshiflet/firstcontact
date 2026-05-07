@@ -43,6 +43,7 @@ qt_add_resources(fc_ui "fc_ui_assets"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/radio-dot.svg"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/archive.svg"
         "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/mark-read.svg"
+        "${CMAKE_SOURCE_DIR}/resources/icons/symbolic/snooze.svg"
 )
 target_include_directories(fc_ui PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_ui

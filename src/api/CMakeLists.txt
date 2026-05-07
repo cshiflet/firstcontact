@@ -4,6 +4,7 @@ add_library(fc_api STATIC
     RestClient.h RestClient.cpp
     MessageParser.h MessageParser.cpp
     GmailClient.h GmailClient.cpp
+    SessionTransfer.h SessionTransfer.cpp
 )
 target_include_directories(fc_api PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_api

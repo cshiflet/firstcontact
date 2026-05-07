@@ -54,6 +54,18 @@ public:
 
     // Touches `last_accessed_at` for the LRU evictor.
     static void markAccessed(const QString& id);
+
+    // Snooze: sets / clears the per-message snooze_until ms-epoch.
+    // 0 / negative clears. Caller is responsible for the matching
+    // INBOX-label transition (drop INBOX on snooze, restore on wake)
+    // — the column is purely the "wake at time T" hint.
+    static void setSnoozeUntil(const QString& id, qint64 wakeAtMs);
+
+    // Returns ids of messages whose snooze window has lapsed
+    // (snooze_until IS NOT NULL AND snooze_until <= now). Used by the
+    // wake-up tick in MainWindow; the caller restores INBOX and
+    // clears snooze_until per id.
+    static QStringList dueSnoozeWakeups();
 };
 
 }  // namespace fc::cache

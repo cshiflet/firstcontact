@@ -1,6 +1,7 @@
 #include "RestClient.h"
 
 #include "RateLimiter.h"
+#include "SessionTransfer.h"
 #include "auth/OAuthClient.h"
 
 #include <QHttpMultiPart>
@@ -93,6 +94,12 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
         const QNetworkReply::NetworkError nerr = reply->error();
         const int retryAfter = reply->rawHeader("Retry-After").toInt();
         reply->deleteLater();
+
+        // Record the wire transfer for the status-bar bandwidth meter.
+        // Counts every response (including errors) so retried requests
+        // accumulate honestly. Header overhead is approximated inside
+        // SessionTransfer::record.
+        SessionTransfer::instance().record(data.size(), body.size());
 
         if (nerr != QNetworkReply::NoError && status == 0) {
             // Transport-level failure (no HTTP response).

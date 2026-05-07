@@ -40,10 +40,13 @@ public:
     QString draftId() const;
 
 signals:
-    // Emitted when the user clicks Send. `outgoing` is fully populated and
-    // ready to feed to MimeBuilder; threadId is set on reply/replyAll.
+    // Emitted when the user clicks Send (or the menu item under Send →
+    // Schedule…). `outgoing` is fully populated and ready to feed to
+    // MimeBuilder; threadId is set on reply/replyAll. sendAtMs is 0
+    // for "send now" and a future ms-epoch for scheduled-send.
     void composeReady(const fc::util::OutgoingMessage& outgoing,
-                      const QString& threadId);
+                      const QString& threadId,
+                      qint64 sendAtMs);
 
     // Emitted when the user clicks Save Draft (or closes a dirty window after
     // confirming). MainWindow persists into DraftRepository and triggers
@@ -54,6 +57,7 @@ signals:
 
 private slots:
     void onSend();
+    void onScheduleSend();
     void onSaveDraft();
 
 protected:

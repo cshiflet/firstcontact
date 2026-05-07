@@ -105,6 +105,14 @@ void Migrations::run(QSqlDatabase& db) {
         execAll(db, readResource(QStringLiteral(":/schema/0003_body_html.sql")));
         setSchemaVersion(db, 3);
     }
+    if (v < 4) {
+        execAll(db, readResource(QStringLiteral(":/schema/0004_send_at.sql")));
+        setSchemaVersion(db, 4);
+    }
+    if (v < 5) {
+        execAll(db, readResource(QStringLiteral(":/schema/0005_snooze.sql")));
+        setSchemaVersion(db, 5);
+    }
 }
 
 }  // namespace fc::cache

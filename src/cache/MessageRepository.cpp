@@ -507,4 +507,32 @@ void MessageRepository::markAccessed(const QString& id) {
     q.exec();
 }
 
+void MessageRepository::setSnoozeUntil(const QString& id, qint64 wakeAtMs) {
+    auto db = databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "UPDATE messages SET snooze_until = :t WHERE id = :id"));
+    if (wakeAtMs > 0) {
+        q.bindValue(QStringLiteral(":t"), wakeAtMs);
+    } else {
+        q.bindValue(QStringLiteral(":t"),
+                    QVariant(QMetaType(QMetaType::LongLong)));
+    }
+    q.bindValue(QStringLiteral(":id"), id);
+    q.exec();
+}
+
+QStringList MessageRepository::dueSnoozeWakeups() {
+    auto db = databaseHandle();
+    QStringList out;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT id FROM messages "
+        "WHERE snooze_until IS NOT NULL AND snooze_until <= :now"));
+    q.bindValue(QStringLiteral(":now"), QDateTime::currentMSecsSinceEpoch());
+    if (!q.exec()) return out;
+    while (q.next()) out << q.value(0).toString();
+    return out;
+}
+
 }  // namespace fc::cache

@@ -48,11 +48,17 @@ private slots:
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 3);   // bump on each schema change
+            QCOMPARE(q.value(0).toInt(), 5);   // bump on each schema change
 
             // body_html column landed in v3.
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT body_html FROM messages LIMIT 1")));   // shouldn't error
+            // send_at landed in v4 (scheduled send).
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT send_at FROM outbox LIMIT 1")));
+            // snooze_until landed in v5.
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT snooze_until FROM messages LIMIT 1")));
 
             // Idempotency: second run should not fail.
             fc::cache::Migrations::run(db);

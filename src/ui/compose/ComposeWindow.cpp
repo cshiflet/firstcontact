@@ -1,6 +1,9 @@
 #include "ComposeWindow.h"
 
 #include <QCloseEvent>
+#include <QDateTime>
+#include <QDateTimeEdit>
+#include <QDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -54,11 +57,13 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
     statusLabel_ = new QLabel(this);
     statusLabel_->setStyleSheet(QStringLiteral("color: gray;"));
 
-    auto* sendBtn      = new QPushButton(tr("Send"),       this);
+    auto* sendBtn      = new QPushButton(tr("Send"),         this);
     sendBtn->setObjectName(QStringLiteral("primary"));
-    auto* saveDraftBtn = new QPushButton(tr("Save draft"), this);
-    auto* cancelBtn    = new QPushButton(tr("Discard"),    this);
+    auto* scheduleBtn  = new QPushButton(tr("Schedule…"),    this);
+    auto* saveDraftBtn = new QPushButton(tr("Save draft"),   this);
+    auto* cancelBtn    = new QPushButton(tr("Discard"),      this);
     connect(sendBtn,      &QPushButton::clicked, this, &ComposeWindow::onSend);
+    connect(scheduleBtn,  &QPushButton::clicked, this, &ComposeWindow::onScheduleSend);
     connect(saveDraftBtn, &QPushButton::clicked, this, &ComposeWindow::onSaveDraft);
     connect(cancelBtn,    &QPushButton::clicked, this, [this] {
         suppressClosePrompt_ = true;
@@ -68,6 +73,7 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
     auto* btnRow = new QHBoxLayout;
     btnRow->addWidget(statusLabel_, 1);
     btnRow->addWidget(saveDraftBtn);
+    btnRow->addWidget(scheduleBtn);
     btnRow->addWidget(sendBtn);
     btnRow->addWidget(cancelBtn);
 
@@ -171,7 +177,58 @@ void ComposeWindow::onSend() {
         return;
     }
     suppressClosePrompt_ = true;
-    emit composeReady(msg, threadId_);
+    emit composeReady(msg, threadId_, /*sendAtMs=*/0);
+    close();
+}
+
+void ComposeWindow::onScheduleSend() {
+    const auto msg = currentMessage();
+    if (msg.to.isEmpty()) {
+        statusLabel_->setText(tr("Add at least one recipient."));
+        statusLabel_->setStyleSheet(QStringLiteral("color: #c92a2a;"));
+        return;
+    }
+
+    // Tiny scheduling dialog: a single QDateTimeEdit defaulted to one
+    // hour from now. No fancier presets ("tomorrow morning", "next
+    // Monday") for v1; users can drive the picker.
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Schedule send"));
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr(
+        "Pick a delivery time. The message stays queued in your local "
+        "outbox until that moment, then sends like any other message. "
+        "Sync must be running for delivery to actually fire — leave the "
+        "app open or relaunch in time."), &dlg));
+    auto* picker = new QDateTimeEdit(
+        QDateTime::currentDateTime().addSecs(60 * 60), &dlg);
+    picker->setCalendarPopup(true);
+    picker->setMinimumDateTime(QDateTime::currentDateTime().addSecs(60));
+    picker->setDisplayFormat(QStringLiteral("ddd MMM d, yyyy  h:mm AP"));
+    layout->addWidget(picker);
+
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* okBtn     = new QPushButton(tr("Schedule"), &dlg);
+    okBtn->setObjectName(QStringLiteral("primary"));
+    okBtn->setDefault(true);
+    auto* cancelBtn = new QPushButton(tr("Cancel"),   &dlg);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(okBtn);
+    layout->addLayout(btnRow);
+    QObject::connect(okBtn,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QDateTime when = picker->dateTime();
+    if (when <= QDateTime::currentDateTime()) {
+        statusLabel_->setText(tr("Pick a time in the future."));
+        statusLabel_->setStyleSheet(QStringLiteral("color: #c92a2a;"));
+        return;
+    }
+    suppressClosePrompt_ = true;
+    emit composeReady(msg, threadId_, when.toMSecsSinceEpoch());
     close();
 }
 

@@ -16,6 +16,9 @@ struct OutboxItem {
     qint64      createdAt = 0;
     int         attemptCount = 0;
     qint64      nextRetryAt = 0;
+    qint64      sendAt = 0;     // 0 = send immediately; otherwise ms-epoch
+                                // wall-clock at which the row becomes due
+                                // (scheduled send).
     QString     lastError;
 };
 
