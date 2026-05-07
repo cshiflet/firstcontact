@@ -1,6 +1,7 @@
 #include "OAuthClient.h"
 
 #include "ClientConfig.h"
+#include "cache/Database.h"
 #include "util/Base64Url.h"
 #include "util/Browser.h"
 
@@ -91,7 +92,17 @@ OAuthClient::OAuthClient(ClientConfig* config, TokenStore* store, QObject* paren
 OAuthClient::~OAuthClient() { delete d_; }
 
 void OAuthClient::hydrateFromStore() {
-    d_->store->load([this](bool ok, TokenStore::Tokens t, QString err) {
+    // Route through the per-account API. v1 still has a single
+    // OAuthClient instance, so it loads the default account's slot;
+    // step 6 introduces per-account OAuthClient instances inside
+    // AccountContext, each constructed against an explicit accountId.
+    const QString accountId = fc::cache::Database::defaultAccountId();
+    if (accountId.isEmpty()) {
+        emit tokensLoaded();
+        return;
+    }
+    d_->store->load(accountId,
+        [this](bool ok, TokenStore::Tokens t, QString err) {
         if (!ok) {
             qWarning("TokenStore::load failed: %s", qUtf8Printable(err));
             emit tokensLoaded();   // tell the UI to stop assuming pending
@@ -121,8 +132,15 @@ void OAuthClient::setAccountEmail(const QString& email) {
         QMutexLocker lock(&d_->tokenMutex);
         if (d_->tokens.accountEmail == email) return;   // no-op, no save
         d_->tokens.accountEmail = email;
+        // Stamp the slot's accountId from the default account if it
+        // wasn't already set (legacy hydrate path that pre-dates step 5
+        // sets it on read; this is belt-and-braces).
+        if (d_->tokens.accountId.isEmpty()) {
+            d_->tokens.accountId = fc::cache::Database::defaultAccountId();
+        }
         snapshot = d_->tokens;
     }
+    if (snapshot.accountId.isEmpty()) return;   // no slot to save into
     // Persist so we keep the email across restarts; otherwise we'd have to
     // wait for the next initial sync to re-populate it.
     d_->store->save(snapshot, [](bool ok, QString err) {
@@ -339,12 +357,20 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
         {
             QMutexLocker lock(&d_->tokenMutex);
             t.accountEmail = d_->tokens.accountEmail;  // preserve if any
+            t.accountId    = d_->tokens.accountId.isEmpty()
+                ? fc::cache::Database::defaultAccountId()
+                : d_->tokens.accountId;
             d_->tokens = t;
         }
-        d_->store->save(t, [](bool ok, QString err) {
-            if (!ok) qWarning("TokenStore::save failed: %s",
-                              qUtf8Printable(err));
-        });
+        if (t.accountId.isEmpty()) {
+            qWarning("OAuthClient: token exchange but no account row "
+                     "to attach the slot to; not persisting.");
+        } else {
+            d_->store->save(t, [](bool ok, QString err) {
+                if (!ok) qWarning("TokenStore::save failed: %s",
+                                  qUtf8Printable(err));
+            });
+        }
 
         // The handler isn't needed once tokens are in hand; closing it
         // releases the loopback port.
@@ -409,10 +435,16 @@ bool OAuthClient::refreshIfNeededLocked() {
     // Refresh tokens are sticky; Google only re-issues them on consent.
 
     auto persisted = d_->tokens;
-    d_->store->save(persisted, [](bool ok, QString saveErr) {
-        if (!ok) qWarning("TokenStore::save (refresh) failed: %s",
-                          qUtf8Printable(saveErr));
-    });
+    if (persisted.accountId.isEmpty()) {
+        persisted.accountId = fc::cache::Database::defaultAccountId();
+        d_->tokens.accountId = persisted.accountId;
+    }
+    if (!persisted.accountId.isEmpty()) {
+        d_->store->save(persisted, [](bool ok, QString saveErr) {
+            if (!ok) qWarning("TokenStore::save (refresh) failed: %s",
+                              qUtf8Printable(saveErr));
+        });
+    }
     return true;
 }
 
@@ -446,7 +478,14 @@ void OAuthClient::signOut() {
             reply->deleteLater();
         });
     }
-    d_->store->erase([this](bool, QString) { emit signedOut(); });
+    // Erase the keychain slot for the account we were signed in as.
+    // Step 9 wraps this in the "drop cache?" prompt; here we just
+    // revoke + clear the slot.
+    const QString accountId = copy.accountId.isEmpty()
+        ? fc::cache::Database::defaultAccountId()
+        : copy.accountId;
+    d_->store->erase(accountId,
+        [this](bool, QString) { emit signedOut(); });
 }
 
 }  // namespace fc::auth
