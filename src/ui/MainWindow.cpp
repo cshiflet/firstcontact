@@ -950,6 +950,16 @@ void MainWindow::onLabelSelected(const QString& id) {
     if (id.isEmpty() || id == currentLabelId_) return;
     currentLabelId_ = id;
     reloadCurrentLabel();
+    // Initial sync only seeds INBOX / SENT / DRAFT / STARRED — every
+    // other label (every user label, plus categories like SPAM /
+    // TRASH) only carries cached rows for messages that happened to
+    // overlap with a seed at sync time. Pull a server-side page so
+    // the user sees what Gmail web sees, not just the lucky overlap.
+    // SyncService::topUpLabel itself is a no-op for the seed labels
+    // and for the empty / search-mode case.
+    if (sync_ && currentSearchQuery_.isEmpty()) {
+        sync_->topUpLabel(id);
+    }
 }
 
 void MainWindow::reloadSidebar() {

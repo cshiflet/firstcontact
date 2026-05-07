@@ -205,6 +205,78 @@ void SyncService::doIncrementalSync() {
         });
 }
 
+namespace {
+
+// Per-label top-up state: where to resume the next listMessages page
+// for that label. We key the meta column with a label-scoped prefix so
+// every label gets its own page-walk independent of the others.
+QString topUpTokenKey(const QString& labelId) {
+    return QStringLiteral("labelTopUp/%1/pageToken").arg(labelId);
+}
+
+// Marks the label as fully walked once the server returns no more
+// pages, so the next click resets to the start instead of yielding
+// nothing.
+constexpr int kTopUpPageSize = 200;
+
+}  // namespace
+
+void SyncService::topUpLabel(const QString& labelId) {
+    if (labelId.isEmpty()) return;
+    // Skip if a sync is already in progress — top-up shares the same
+    // busy / state machinery as incremental sync, so two paths racing
+    // each other to set State and emit messagesUpdated would scramble
+    // the FSM. The user can click the label again once the in-flight
+    // sync settles.
+    if (d_->busy) return;
+    // Skip the round-trip for labels that incremental sync already
+    // keeps up to date; they're guaranteed complete from the initial
+    // seed onward.
+    for (const auto& seed : seedLabels()) {
+        if (seed == labelId) return;
+    }
+
+    const QString tokenKey = topUpTokenKey(labelId);
+    const QString pageToken = fc::cache::MetaRepository::get(tokenKey);
+
+    d_->gmail->listMessages(labelId, /*q=*/QString(), pageToken,
+        kTopUpPageSize,
+        [this, labelId, tokenKey]
+        (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
+            if (err) {
+                // Don't escalate — top-up is best-effort. The user
+                // still sees whatever's in the cache.
+                return;
+            }
+            // Save the next page token (or clear it when we ran off
+            // the end, so the next click starts fresh from page 1).
+            fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
+
+            // Skip ids we already have in the cache to avoid a wasted
+            // getMessage round-trip per known message.
+            QStringList missing;
+            missing.reserve(page.ids.size());
+            for (const auto& id : page.ids) {
+                if (!fc::cache::MessageRepository::exists(id)) {
+                    missing << id;
+                }
+            }
+            if (missing.isEmpty()) {
+                // Nothing new from the server, but still emit so the
+                // UI can refresh in case prior async writes have
+                // landed since the last reload.
+                emit messagesUpdated();
+                return;
+            }
+            // fetchAndStoreMessages flips d_->busy and the FSM state
+            // — fine: top-up doubles as a small sync pass and
+            // benefits from the same guard against overlapping work.
+            d_->busy = true;
+            setState(State::IncrementalSync);
+            fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false);
+        });
+}
+
 void SyncService::fetchAndStoreMessages(const QStringList& ids,
                                         int newCount,
                                         bool isInitial) {

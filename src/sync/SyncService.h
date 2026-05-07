@@ -30,6 +30,21 @@ public:
     void startScheduler(int intervalMs = 60'000);
     void stopScheduler();
 
+    // Pulls one server-side page of message ids for the given label,
+    // dedupes against the cache, and fetches full bodies for any
+    // entries we don't already have. Used to fill cache gaps for
+    // labels that weren't part of the initial-sync seed set (every
+    // user label, plus any system label outside INBOX / SENT / DRAFT
+    // / STARRED).
+    //
+    // Pagination state lives in the meta table — successive calls
+    // walk older pages until the label is exhausted, at which point
+    // the saved token resets and the cycle starts over from the most
+    // recent message. Skips the round-trip entirely for labels that
+    // were already in the initial-sync seed set, since incremental
+    // sync keeps them up to date.
+    void topUpLabel(const QString& labelId);
+
 signals:
     void stateChanged(fc::sync::SyncService::State s);
     void labelsUpdated();
