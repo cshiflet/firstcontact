@@ -763,14 +763,23 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::forwardCurrent,    this, &MainWindow::onForwardCurrent);
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
     connect(shortcuts_, &Shortcuts::deleteCurrent,  this, &MainWindow::onDeleteCurrent);
+    connect(shortcuts_, &Shortcuts::archiveAndPrev, this, &MainWindow::onArchiveAndPrev);
+    connect(shortcuts_, &Shortcuts::archiveAndNext, this, &MainWindow::onArchiveAndNext);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
     connect(shortcuts_, &Shortcuts::markRead,       this, &MainWindow::onMarkReadCurrent);
     connect(shortcuts_, &Shortcuts::markUnread,     this, &MainWindow::onMarkUnreadCurrent);
+    connect(shortcuts_, &Shortcuts::markImportant,    this, &MainWindow::onMarkImportant);
+    connect(shortcuts_, &Shortcuts::markNotImportant, this, &MainWindow::onMarkNotImportant);
     connect(shortcuts_, &Shortcuts::snoozeCurrent,  this, &MainWindow::onSnoozeCurrent);
+    connect(shortcuts_, &Shortcuts::muteThread,     this, &MainWindow::onMuteThread);
+    connect(shortcuts_, &Shortcuts::reportSpam,     this, &MainWindow::onReportSpam);
     connect(shortcuts_, &Shortcuts::backToList,     this, &MainWindow::onBackToList);
-    // Shortcuts::applyLabels (`l`) is wired in Phase 2 once the
-    // LabelChooserDialog lands. Until then the keybind is a no-op so
-    // muscle memory built in Phase 2 doesn't conflict with anything.
+    connect(shortcuts_, &Shortcuts::openCurrent,    this, &MainWindow::onOpenCurrent);
+    connect(shortcuts_, &Shortcuts::goToLabel,      this, &MainWindow::onGoToLabel);
+    // Shortcuts::applyLabels (`l`) and moveToLabel (`v`) are wired in
+    // Phase 2 once the LabelChooserDialog lands. Until then the
+    // keybinds are no-ops so muscle memory built in Phase 2 doesn't
+    // conflict with anything.
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
         const int n = listModel_->rowCount();
         if (n == 0) return;
@@ -1643,6 +1652,108 @@ void MainWindow::onBackToList() {
     }
 }
 
+void MainWindow::onOpenCurrent() {
+    // Gmail-web `o` / Enter: re-trigger the activation pipeline for
+    // whichever row is selected. If nothing's selected (fresh load,
+    // empty inbox), no-op.
+    if (!list_ || !listModel_) return;
+    const auto idx = list_->currentIndex();
+    if (!idx.isValid()) return;
+    const QString id = idx.data(fc::MessageListModel::IdRole).toString();
+    if (id.isEmpty()) return;
+    onMessageActivated(id, idx.row());
+    // Reader pane gets focus so PageDown/PageUp scroll the message
+    // body — matches Gmail-web's behavior where `o` "opens" the thread.
+    if (reader_) reader_->setFocus(Qt::ShortcutFocusReason);
+}
+
+void MainWindow::onArchiveAndPrev() {
+    if (currentMessage_.id.isEmpty()) return;
+    const int prevRow = currentRow_;
+    onArchiveCurrent();
+    // After reload, the row we want is at prevRow - 1 (the message that
+    // was directly above the one we just archived). Clamp to [0, n-1].
+    const int n = listModel_ ? listModel_->rowCount() : 0;
+    if (n == 0) return;
+    const int target = qMax(prevRow - 1, 0);
+    if (target >= n) return;
+    list_->setCurrentIndex(listModel_->index(target, 0));
+    onMessageActivated(listModel_->index(target, 0)
+                          .data(fc::MessageListModel::IdRole).toString(), target);
+}
+
+void MainWindow::onArchiveAndNext() {
+    if (currentMessage_.id.isEmpty()) return;
+    const int prevRow = currentRow_;
+    onArchiveCurrent();
+    // After reload, what was at prevRow + 1 is now at prevRow (the row
+    // we archived collapsed out of the list). Clamp to [0, n-1].
+    const int n = listModel_ ? listModel_->rowCount() : 0;
+    if (n == 0) return;
+    const int target = qMin(prevRow, n - 1);
+    if (target < 0) return;
+    list_->setCurrentIndex(listModel_->index(target, 0));
+    onMessageActivated(listModel_->index(target, 0)
+                          .data(fc::MessageListModel::IdRole).toString(), target);
+}
+
+void MainWindow::onMuteThread() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mute-thread"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mute blocked."), 4000);
+        return;
+    }
+    // Apply MUTE + drop INBOX — same data shape as Gmail web's mute
+    // action. We don't auto-archive future incoming replies (Gmail's
+    // server does that for you on its end), but the label is correct
+    // and reconciles cleanly when the server side reflects back.
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {QStringLiteral("MUTE")},
+                            {QStringLiteral("INBOX")});
+    statusBar()->showMessage(tr("Muted."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onReportSpam() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("report-spam"))) {
+        statusBar()->showMessage(tr("Dry-run mode: spam blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {QStringLiteral("SPAM")},
+                            {QStringLiteral("INBOX")});
+    statusBar()->showMessage(tr("Reported as spam."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onMarkImportant() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-important"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-important blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {QStringLiteral("IMPORTANT")}, {});
+    statusBar()->showMessage(tr("Marked important."), 3000);
+}
+
+void MainWindow::onMarkNotImportant() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-not-important"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-not-important blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {}, {QStringLiteral("IMPORTANT")});
+    statusBar()->showMessage(tr("Marked not important."), 3000);
+}
+
+void MainWindow::onGoToLabel(const QString& labelId) {
+    if (!sidebar_) return;
+    sidebar_->selectLabel(labelId);
+}
+
 void MainWindow::onShowShortcutsHelp() {
     // Grouped reference modeled on Gmail-web's own "?" overlay.
     // We render via a QDialog with a QGridLayout so the shortcut keys
@@ -1660,24 +1771,40 @@ void MainWindow::onShowShortcutsHelp() {
             { QStringLiteral("/"),       tr("Focus search") },
             { QStringLiteral("j"),       tr("Next message") },
             { QStringLiteral("k"),       tr("Previous message") },
+            { tr("o or Enter"),          tr("Open conversation") },
             { QStringLiteral("u"),       tr("Back to threadlist") },
         }},
+        { tr("Go to"), {
+            { QStringLiteral("g i"),     tr("Inbox") },
+            { QStringLiteral("g s"),     tr("Starred") },
+            { QStringLiteral("g t"),     tr("Sent") },
+            { QStringLiteral("g d"),     tr("Drafts") },
+        }},
         { tr("Compose"), {
-            { QStringLiteral("c"),                 tr("New message") },
-            { QStringLiteral("r"),                 tr("Reply") },
-            { tr("a or Shift+R"),                  tr("Reply all") },
-            { QStringLiteral("f"),                 tr("Forward") },
+            { QStringLiteral("c"),       tr("New message") },
+            { QStringLiteral("r"),       tr("Reply") },
+            { tr("a or Shift+R"),        tr("Reply all") },
+            { QStringLiteral("f"),       tr("Forward") },
+            { QStringLiteral("Ctrl+Enter"), tr("Send (compose window)") },
+            { QStringLiteral("Esc"),     tr("Close compose window") },
         }},
         { tr("Read state"), {
             { QStringLiteral("Shift+I"), tr("Mark as read") },
             { QStringLiteral("Shift+U"), tr("Mark as unread") },
             { QStringLiteral("s"),       tr("Toggle star") },
+            { QStringLiteral("="),       tr("Mark important") },
+            { QStringLiteral("-"),       tr("Mark not important") },
         }},
         { tr("Organize"), {
             { QStringLiteral("e"),       tr("Archive conversation") },
+            { QStringLiteral("["),       tr("Archive + previous") },
+            { QStringLiteral("]"),       tr("Archive + next") },
             { QStringLiteral("#"),       tr("Delete conversation") },
             { QStringLiteral("b"),       tr("Snooze conversation") },
-            { QStringLiteral("l"),       tr("Apply labels") },
+            { QStringLiteral("m"),       tr("Mute thread") },
+            { QStringLiteral("!"),       tr("Report as spam") },
+            { QStringLiteral("l"),       tr("Apply labels…") },
+            { QStringLiteral("v"),       tr("Move to label…") },
         }},
         { tr("Help"), {
             { QStringLiteral("?"),       tr("Show this dialog") },

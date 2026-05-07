@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QShortcut>
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QVBoxLayout>
@@ -59,9 +60,11 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
 
     auto* sendBtn      = new QPushButton(tr("Send"),         this);
     sendBtn->setObjectName(QStringLiteral("primary"));
+    sendBtn->setToolTip(tr("Send (Ctrl+Enter)"));
     auto* scheduleBtn  = new QPushButton(tr("Schedule…"),    this);
     auto* saveDraftBtn = new QPushButton(tr("Save draft"),   this);
     auto* cancelBtn    = new QPushButton(tr("Discard"),      this);
+    cancelBtn->setToolTip(tr("Discard (Esc)"));
     connect(sendBtn,      &QPushButton::clicked, this, &ComposeWindow::onSend);
     connect(scheduleBtn,  &QPushButton::clicked, this, &ComposeWindow::onScheduleSend);
     connect(saveDraftBtn, &QPushButton::clicked, this, &ComposeWindow::onSaveDraft);
@@ -69,6 +72,19 @@ ComposeWindow::ComposeWindow(const QString& fromAddr,
         suppressClosePrompt_ = true;
         close();
     });
+
+    // Gmail-web shortcuts inside the compose window:
+    //   Ctrl+Enter (Cmd+Enter on macOS via Qt::CTRL alias) — Send
+    //   Esc                                                   — Close
+    auto* sendShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
+    sendShortcut->setContext(Qt::WindowShortcut);
+    connect(sendShortcut, &QShortcut::activated, this, &ComposeWindow::onSend);
+    auto* sendShortcut2 = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Enter), this);
+    sendShortcut2->setContext(Qt::WindowShortcut);
+    connect(sendShortcut2, &QShortcut::activated, this, &ComposeWindow::onSend);
+    auto* escShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    escShortcut->setContext(Qt::WindowShortcut);
+    connect(escShortcut, &QShortcut::activated, this, [this] { close(); });
 
     auto* btnRow = new QHBoxLayout;
     btnRow->addWidget(statusLabel_, 1);

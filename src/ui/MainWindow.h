@@ -82,6 +82,26 @@ private slots:
     void onBackToList();
     // Gmail-web `?`: show a proper grouped keyboard shortcuts dialog.
     void onShowShortcutsHelp();
+    // Gmail-web `o` / Enter: open the currently-selected message.
+    void onOpenCurrent();
+    // Gmail-web `[` / `]`: archive the current conversation, then move
+    // selection to the prev / next row in the threadlist.
+    void onArchiveAndPrev();
+    void onArchiveAndNext();
+    // Gmail-web `m`: mute the current thread (apply MUTE label, then
+    // archive). Gmail's server-side filtering doesn't apply to our
+    // cache, but the label stamp matches Gmail's data shape so the
+    // user can find it under "Muted" and unmute on the server.
+    void onMuteThread();
+    // Gmail-web `!`: move conversation to Spam. Adds SPAM, drops INBOX.
+    void onReportSpam();
+    // Gmail-web `=` / `-`: toggle IMPORTANT for every message in the
+    // current thread.
+    void onMarkImportant();
+    void onMarkNotImportant();
+    // Gmail-web `g i / s / t / d`: jump the sidebar selection to a
+    // system label without leaving the keyboard.
+    void onGoToLabel(const QString& labelId);
     // Snooze the current thread: pop a time-picker, drop INBOX, stamp
     // every message's snooze_until. A periodic wake-up timer in
     // MainWindow re-applies INBOX once the snooze window lapses.
