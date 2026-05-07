@@ -16,6 +16,9 @@ constexpr char kMessageListPillsKey[] = "ui/messageListLabelPills";
 constexpr char kImageProxyKey[]       = "html/imageProxyUrlPattern";
 constexpr char kStripPixelsKey[]      = "html/stripTrackingPixels";
 constexpr char kDefaultImageProxy[]   = "https://wsrv.nl/?url={url}";
+constexpr char kSignatureKey[]        = "compose/signature";
+constexpr char kReplyAboveKey[]       = "compose/replyAboveOriginal";
+constexpr char kQuoteStyleKey[]       = "compose/quoteStyle";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -138,6 +141,60 @@ bool Preferences::stripTrackingPixels() {
 void Preferences::setStripTrackingPixels(bool on) {
     QSettings s;
     s.setValue(QLatin1String(kStripPixelsKey), on);
+    s.sync();
+}
+
+QString Preferences::signatureText() {
+    QSettings s;
+    return s.value(QLatin1String(kSignatureKey), QString()).toString();
+}
+
+void Preferences::setSignatureText(const QString& text) {
+    QSettings s;
+    if (text.isEmpty()) {
+        s.remove(QLatin1String(kSignatureKey));
+    } else {
+        s.setValue(QLatin1String(kSignatureKey), text);
+    }
+    s.sync();
+}
+
+bool Preferences::replyAboveOriginal() {
+    QSettings s;
+    // Default to top-posting: matches Gmail web's reply UX, which is
+    // what most users will expect coming from a Gmail-style client.
+    return s.value(QLatin1String(kReplyAboveKey), true).toBool();
+}
+
+void Preferences::setReplyAboveOriginal(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kReplyAboveKey), on);
+    s.sync();
+}
+
+QString Preferences::quoteStyleToString(QuoteStyle q) {
+    switch (q) {
+        case QuoteStyle::BlockQuote:    return QStringLiteral("blockquote");
+        case QuoteStyle::GreaterPrefix: return QStringLiteral("greater");
+    }
+    return QStringLiteral("blockquote");
+}
+
+Preferences::QuoteStyle Preferences::quoteStyleFromString(const QString& s) {
+    if (s == QLatin1String("greater")) return QuoteStyle::GreaterPrefix;
+    return QuoteStyle::BlockQuote;
+}
+
+Preferences::QuoteStyle Preferences::quoteStyle() {
+    QSettings s;
+    return quoteStyleFromString(
+        s.value(QLatin1String(kQuoteStyleKey),
+                QStringLiteral("blockquote")).toString());
+}
+
+void Preferences::setQuoteStyle(QuoteStyle q) {
+    QSettings s;
+    s.setValue(QLatin1String(kQuoteStyleKey), quoteStyleToString(q));
     s.sync();
 }
 

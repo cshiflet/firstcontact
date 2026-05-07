@@ -1132,9 +1132,11 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
 
     auto* w = new ComposeWindow(auth_->accountEmail(), QString(), this);
     w->setAttribute(Qt::WA_DeleteOnClose);
-    if (parent) {
-        w->prefillFrom(*parent, static_cast<ComposeWindow::Mode>(mode));
-    }
+    // Always prefill — Mode::New seeds the signature too, so calling it
+    // for a brand-new compose isn't an empty no-op.
+    const fc::Message empty;
+    w->prefillFrom(parent ? *parent : empty,
+                    static_cast<ComposeWindow::Mode>(mode));
     connect(w, &ComposeWindow::composeReady, this,
         [this](const fc::util::OutgoingMessage& msg, const QString& threadId,
                qint64 sendAtMs) {

@@ -1,5 +1,7 @@
 #include "ComposeWindow.h"
 
+#include "ui/common/Preferences.h"
+
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDateTimeEdit>
@@ -8,6 +10,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -23,6 +26,53 @@ namespace {
 QStringList splitAddresses(const QString& raw) {
     return raw.split(QRegularExpression(QStringLiteral("\\s*,\\s*")),
                      Qt::SkipEmptyParts);
+}
+
+// Plain-text quoting — for the rich-text path (Phase 5) the BlockQuote
+// branch will become a real <blockquote>, but in plain text both
+// QuoteStyle variants render identically as "> " line prefixes since
+// that's the universal email convention.
+QString quoteBody(const QString& body) {
+    QStringList lines = body.split(QChar('\n'));
+    for (auto& line : lines) line = QStringLiteral("> ") + line;
+    return lines.join(QChar('\n'));
+}
+
+QString attribution(const fc::Message& parent,
+                     fc::ui::ComposeWindow::Mode mode) {
+    const QString from = parent.fromName.isEmpty()
+        ? parent.fromAddr
+        : QStringLiteral("%1 <%2>").arg(parent.fromName, parent.fromAddr);
+
+    if (mode == fc::ui::ComposeWindow::Mode::Forward) {
+        const QString date = parent.internalDate > 0
+            ? QLocale::system().toString(
+                  QDateTime::fromMSecsSinceEpoch(parent.internalDate),
+                  QLocale::ShortFormat)
+            : QString();
+        return QStringLiteral(
+            "---------- Forwarded message ---------\n"
+            "From: %1\nDate: %2\nSubject: %3\nTo: %4\n\n")
+            .arg(from, date, parent.subject,
+                  parent.toAddrs.join(QStringLiteral(", ")));
+    }
+
+    // Reply / ReplyAll attribution. Mirrors Gmail web's "On <date>,
+    // <person> wrote:" line.
+    const QString date = parent.internalDate > 0
+        ? QLocale::system().toString(
+              QDateTime::fromMSecsSinceEpoch(parent.internalDate),
+              QLocale::LongFormat)
+        : QString();
+    return QStringLiteral("On %1, %2 wrote:\n").arg(date, from);
+}
+
+QString withSignature(const QString& body, const QString& sig) {
+    if (sig.isEmpty()) return body;
+    // RFC 3676-style signature delimiter: "\n-- \n" (note trailing
+    // space on the dashes). Plays nicely with most clients that
+    // suppress the sig from quoted replies.
+    return body + QStringLiteral("\n-- \n") + sig;
 }
 
 }  // namespace
@@ -173,13 +223,51 @@ void ComposeWindow::prefillFrom(const fc::Message& parent, Mode mode) {
     }
     subjectEdit_->setText(subject);
 
-    if (mode != Mode::New) {
-        const QString header = QStringLiteral(
-            "\n\n----- Original message -----\nFrom: %1\nDate: %2\nSubject: %3\n\n%4")
-            .arg(parent.fromAddr, QString(), parent.subject, parent.bodyText);
-        bodyEdit_->setPlainText(header);
-        bodyEdit_->moveCursor(QTextCursor::Start);
+    // Compose-body assembly. Three pieces, ordered by preference:
+    //
+    //   replyAboveOriginal == true  (Gmail / Outlook default):
+    //       <cursor>
+    //       <signature>
+    //       <attribution + quoted parent>
+    //
+    //   replyAboveOriginal == false (Usenet / mailing-list convention):
+    //       <attribution + quoted parent>
+    //       <cursor>
+    //       <signature>
+    //
+    // For Mode::New there's no parent — the body is empty + signature
+    // and the cursor sits at the start of the empty body.
+    const QString sig = Preferences::signatureText();
+
+    QString body;
+    int cursorPos = 0;
+
+    if (mode == Mode::New) {
+        body = withSignature(QString(), sig);
+        cursorPos = 0;
+    } else {
+        const QString quoted = attribution(parent, mode)
+                              + quoteBody(parent.bodyText);
+        if (Preferences::replyAboveOriginal()) {
+            // Two leading newlines so the cursor lands on line 1, with
+            // a clear gap before the signature / quoted block.
+            const QString prefix = QStringLiteral("\n\n");
+            body = prefix + withSignature(QString(), sig)
+                 + QStringLiteral("\n\n") + quoted;
+            cursorPos = 0;
+        } else {
+            body = quoted + QStringLiteral("\n\n");
+            cursorPos = body.length();
+            body = withSignature(body, sig);
+        }
     }
+
+    bodyEdit_->setPlainText(body);
+
+    // Place the cursor where the user is expected to start typing.
+    QTextCursor c = bodyEdit_->textCursor();
+    c.setPosition(qMin(cursorPos, bodyEdit_->document()->characterCount() - 1));
+    bodyEdit_->setTextCursor(c);
 
     // We just programmatically populated fields; the user hasn't typed yet.
     dirty_ = false;

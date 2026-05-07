@@ -88,6 +88,37 @@ public:
     // robustness.
     static bool stripTrackingPixels();
     static void setStripTrackingPixels(bool on);
+
+    // ----------------------------------------------------------------
+    // Compose preferences
+
+    // Plain-text signature appended to outgoing messages. Empty string
+    // means no signature. Inserted as-is after a leading "\n--\n"
+    // separator, matching the de-facto RFC 3676 sig delimiter.
+    static QString signatureText();
+    static void    setSignatureText(const QString& text);
+
+    // True: the user's reply body sits ABOVE the quoted original
+    // (Gmail / Outlook web default — top-posting). False: body sits
+    // BELOW the quoted original (Usenet / mailing-list convention —
+    // bottom-posting). The cursor is placed appropriately on
+    // prefill so typing lands in the right spot.
+    static bool replyAboveOriginal();
+    static void setReplyAboveOriginal(bool on);
+
+    // How the original message gets quoted in a reply / forward body:
+    //   BlockQuote  — RFC-1849 style: each line prefixed with "> ".
+    //                 Renders as a real blockquote in HTML.
+    //   GreaterPrefix — same prefix; identical text format. Difference
+    //                   only matters for the rich-text / HTML reply
+    //                   path (Phase 5) where BlockQuote becomes a
+    //                   real <blockquote> element and GreaterPrefix
+    //                   stays as plain ">"-prefixed lines.
+    enum class QuoteStyle { BlockQuote, GreaterPrefix };
+    static QuoteStyle quoteStyle();
+    static void       setQuoteStyle(QuoteStyle s);
+    static QString    quoteStyleToString(QuoteStyle s);
+    static QuoteStyle quoteStyleFromString(const QString& s);
 };
 
 }  // namespace fc::ui

@@ -11,6 +11,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
@@ -291,6 +292,76 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     labelsHint->setTextFormat(Qt::RichText);
     labelsForm->addRow(QString(), labelsHint);
     contentLayout->addLayout(labelsForm);
+
+    // ------------------------------------------------------------- Compose
+    auto* composeTitle = new QLabel(
+        tr("<h3 style='margin:0'>Compose</h3>"), content);
+    composeTitle->setTextFormat(Qt::RichText);
+    contentLayout->addWidget(composeTitle);
+
+    auto* composeForm = new QFormLayout;
+    composeForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    composeForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    // Signature: multi-line plain text. Saved on focus-out so users
+    // don't lose work if they close the dialog without clicking Close.
+    auto* sigEdit = new QPlainTextEdit(content);
+    sigEdit->setPlainText(Preferences::signatureText());
+    sigEdit->setMinimumHeight(110);
+    sigEdit->setPlaceholderText(tr(
+        "e.g.\nJane Doe\nSenior Engineer\njane@example.com"));
+    sigEdit->setTabChangesFocus(true);
+    connect(sigEdit, &QPlainTextEdit::textChanged, this, [sigEdit] {
+        Preferences::setSignatureText(sigEdit->toPlainText());
+    });
+    composeForm->addRow(tr("Signature:"), sigEdit);
+
+    auto* sigHint = new QLabel(tr(
+        "Appended to every new message after a <code>-- </code> "
+        "delimiter (RFC 3676). Most clients hide signatures when "
+        "quoting your reply, so chains stay tidy."),
+        content);
+    sigHint->setObjectName(QStringLiteral("FormHint"));
+    sigHint->setWordWrap(true);
+    sigHint->setTextFormat(Qt::RichText);
+    composeForm->addRow(QString(), sigHint);
+
+    auto* replyBox = new QComboBox(content);
+    replyBox->addItem(tr("Above the original (Gmail / Outlook default)"), true);
+    replyBox->addItem(tr("Below the original (mailing-list convention)"), false);
+    replyBox->setCurrentIndex(Preferences::replyAboveOriginal() ? 0 : 1);
+    connect(replyBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [replyBox](int idx) {
+        Preferences::setReplyAboveOriginal(replyBox->itemData(idx).toBool());
+    });
+    composeForm->addRow(tr("Reply position:"), replyBox);
+
+    auto* quoteBox = new QComboBox(content);
+    quoteBox->addItem(tr("Indented blockquote (HTML reply)"),
+                      int(Preferences::QuoteStyle::BlockQuote));
+    quoteBox->addItem(tr("Greater-than prefix (\"> line\")"),
+                      int(Preferences::QuoteStyle::GreaterPrefix));
+    const int quoteIdx = quoteBox->findData(int(Preferences::quoteStyle()));
+    if (quoteIdx >= 0) quoteBox->setCurrentIndex(quoteIdx);
+    connect(quoteBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [quoteBox](int idx) {
+        Preferences::setQuoteStyle(static_cast<Preferences::QuoteStyle>(
+            quoteBox->itemData(idx).toInt()));
+    });
+    composeForm->addRow(tr("Quoted text:"), quoteBox);
+
+    auto* quoteHint = new QLabel(tr(
+        "<b>Indented blockquote</b> renders as a real <code>&lt;blockquote&gt;</code> "
+        "in HTML replies (and as <code>&gt; </code> in plain text). "
+        "<b>Greater-than prefix</b> uses <code>&gt; </code> in both — useful "
+        "for mailing lists or anyone who reads in a plain-text client."),
+        content);
+    quoteHint->setObjectName(QStringLiteral("FormHint"));
+    quoteHint->setWordWrap(true);
+    quoteHint->setTextFormat(Qt::RichText);
+    composeForm->addRow(QString(), quoteHint);
+
+    contentLayout->addLayout(composeForm);
 
     contentLayout->addStretch(1);
 
