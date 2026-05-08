@@ -188,8 +188,29 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
             continue;
         }
 
-        // Tag.
-        const int gt = dirty.indexOf(QChar('>'), i);
+        // Tag. Scan to the matching `>`, but skip over any `>` that
+        // sits inside a quoted attribute value — naive indexOf('>')
+        // would terminate parsing early on inputs like
+        //   <a title="a>b" href="javascript:…">
+        // and leak the tail back into the output as escaped text.
+        // The result was rendering noise (script never executed —
+        // tail still got escaped) but ugly. Walk the input looking
+        // for the close while toggling an `inQuote` flag on
+        // unescaped `'`/`"`.
+        int gt = -1;
+        QChar quote;
+        for (int j = i + 1; j < dirty.size(); ++j) {
+            const QChar c = dirty[j];
+            if (!quote.isNull()) {
+                if (c == quote) quote = QChar();
+                continue;
+            }
+            if (c == QLatin1Char('"') || c == QLatin1Char('\'')) {
+                quote = c;
+                continue;
+            }
+            if (c == QLatin1Char('>')) { gt = j; break; }
+        }
         if (gt < 0) {
             // Unterminated `<`; treat as literal text (escaped).
             if (dropDepth == 0) out.append(QStringLiteral("&lt;"));
@@ -252,7 +273,12 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
         }
 
         out.append(QChar('<')).append(t.name).append(attrsOut);
-        if (t.selfClose || voidTags().contains(t.name)) {
+        // HTML5 only treats VOID elements as self-closing when written
+        // `<tag />`. For non-void tags an XHTML-style `<div/>` parses
+        // as an open `<div>` (with no matching close), which leaves
+        // the document tree imbalanced. Honour selfClose only when
+        // the element is in our void-tag list.
+        if (voidTags().contains(t.name)) {
             out.append(QStringLiteral(" />"));
         } else {
             out.append(QChar('>'));
