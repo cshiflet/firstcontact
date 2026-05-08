@@ -162,6 +162,24 @@ private:
                                  const QStringList& add,
                                  const QStringList& remove);
 
+    // Common shape for the toolbar / shortcut handlers that apply
+    // a label diff to the current thread:
+    //   1. bail if no thread is selected
+    //   2. honour FC_DRY_RUN with a transient status-bar message
+    //   3. push the diff through applyLabelDiffToThread
+    //   4. show a success status, refresh the list view (and
+    //      optionally the sidebar's unread counts).
+    // Returns true if the action ran (false on empty-current /
+    // dry-run skip), so the caller can apply any local-state
+    // tweaks (e.g. flipping currentMessage_.isUnread) only when
+    // the diff actually went through.
+    bool guardedThreadAction(const QString& dryRunKey,
+                              const QString& blockedStatus,
+                              const QString& successStatus,
+                              const QStringList& add,
+                              const QStringList& remove,
+                              bool refreshSidebar = false);
+
     fc::auth::ClientConfig*    config_;
     fc::auth::OAuthClient*     auth_;
     fc::api::GmailClient*      gmail_;

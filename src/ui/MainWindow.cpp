@@ -1789,20 +1789,34 @@ void MainWindow::applyLabelDiffToThread(const QString& threadId,
     pending_->flush();
 }
 
-void MainWindow::onArchiveCurrent() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("archive-message"))) {
-        statusBar()->showMessage(
-            tr("Dry-run mode: archive blocked."), 4000);
-        return;
+bool MainWindow::guardedThreadAction(const QString& dryRunKey,
+                                      const QString& blockedStatus,
+                                      const QString& successStatus,
+                                      const QStringList& add,
+                                      const QStringList& remove,
+                                      bool refreshSidebar) {
+    if (currentMessage_.id.isEmpty()) return false;
+    if (fc::util::DryRun::block(dryRunKey)) {
+        statusBar()->showMessage(blockedStatus, 4000);
+        return false;
     }
-    // Archive the entire conversation, matching Gmail web semantics.
-    // For single-message rows, byThread returns the one message and the
-    // loop is a no-op extra cost — fine.
-    const QStringList rem{QStringLiteral("INBOX")};
-    applyLabelDiffToThread(currentMessage_.threadId, {}, rem);
-    statusBar()->showMessage(tr("Archived."), 3000);
+    applyLabelDiffToThread(currentMessage_.threadId, add, remove);
+    statusBar()->showMessage(successStatus, 3000);
     reloadCurrentLabel();
+    if (refreshSidebar) reloadSidebar();
+    return true;
+}
+
+void MainWindow::onArchiveCurrent() {
+    // Archive the entire conversation, matching Gmail web semantics.
+    // For single-message rows, byThread inside applyLabelDiffToThread
+    // returns the one message and the loop is a no-op extra cost.
+    guardedThreadAction(
+        QStringLiteral("archive-message"),
+        tr("Dry-run mode: archive blocked."),
+        tr("Archived."),
+        /*add=*/{},
+        /*remove=*/{QStringLiteral("INBOX")});
 }
 
 void MainWindow::onToggleReadCurrent() {
@@ -1828,31 +1842,27 @@ void MainWindow::onToggleReadCurrent() {
 }
 
 void MainWindow::onMarkReadCurrent() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("mark-read"))) {
-        statusBar()->showMessage(tr("Dry-run mode: mark-read blocked."), 4000);
-        return;
+    if (guardedThreadAction(
+            QStringLiteral("mark-read"),
+            tr("Dry-run mode: mark-read blocked."),
+            tr("Marked as read."),
+            /*add=*/{},
+            /*remove=*/{QStringLiteral("UNREAD")},
+            /*refreshSidebar=*/true)) {
+        currentMessage_.isUnread = false;
     }
-    applyLabelDiffToThread(currentMessage_.threadId,
-                            {}, {QStringLiteral("UNREAD")});
-    currentMessage_.isUnread = false;
-    statusBar()->showMessage(tr("Marked as read."), 3000);
-    reloadCurrentLabel();
-    reloadSidebar();
 }
 
 void MainWindow::onMarkUnreadCurrent() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("mark-unread"))) {
-        statusBar()->showMessage(tr("Dry-run mode: mark-unread blocked."), 4000);
-        return;
+    if (guardedThreadAction(
+            QStringLiteral("mark-unread"),
+            tr("Dry-run mode: mark-unread blocked."),
+            tr("Marked as unread."),
+            /*add=*/{QStringLiteral("UNREAD")},
+            /*remove=*/{},
+            /*refreshSidebar=*/true)) {
+        currentMessage_.isUnread = true;
     }
-    applyLabelDiffToThread(currentMessage_.threadId,
-                            {QStringLiteral("UNREAD")}, {});
-    currentMessage_.isUnread = true;
-    statusBar()->showMessage(tr("Marked as unread."), 3000);
-    reloadCurrentLabel();
-    reloadSidebar();
 }
 
 void MainWindow::onBackToList() {
@@ -1912,33 +1922,25 @@ void MainWindow::onArchiveAndNext() {
 }
 
 void MainWindow::onMuteThread() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("mute-thread"))) {
-        statusBar()->showMessage(tr("Dry-run mode: mute blocked."), 4000);
-        return;
-    }
     // Apply MUTE + drop INBOX — same data shape as Gmail web's mute
     // action. We don't auto-archive future incoming replies (Gmail's
     // server does that for you on its end), but the label is correct
     // and reconciles cleanly when the server side reflects back.
-    applyLabelDiffToThread(currentMessage_.threadId,
-                            {QStringLiteral("MUTE")},
-                            {QStringLiteral("INBOX")});
-    statusBar()->showMessage(tr("Muted."), 3000);
-    reloadCurrentLabel();
+    guardedThreadAction(
+        QStringLiteral("mute-thread"),
+        tr("Dry-run mode: mute blocked."),
+        tr("Muted."),
+        /*add=*/{QStringLiteral("MUTE")},
+        /*remove=*/{QStringLiteral("INBOX")});
 }
 
 void MainWindow::onReportSpam() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("report-spam"))) {
-        statusBar()->showMessage(tr("Dry-run mode: spam blocked."), 4000);
-        return;
-    }
-    applyLabelDiffToThread(currentMessage_.threadId,
-                            {QStringLiteral("SPAM")},
-                            {QStringLiteral("INBOX")});
-    statusBar()->showMessage(tr("Reported as spam."), 3000);
-    reloadCurrentLabel();
+    guardedThreadAction(
+        QStringLiteral("report-spam"),
+        tr("Dry-run mode: spam blocked."),
+        tr("Reported as spam."),
+        /*add=*/{QStringLiteral("SPAM")},
+        /*remove=*/{QStringLiteral("INBOX")});
 }
 
 void MainWindow::onMarkImportant() {
