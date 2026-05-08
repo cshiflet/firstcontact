@@ -103,6 +103,9 @@ private slots:
     // Gmail-web `g i / s / t / d`: jump the sidebar selection to a
     // system label without leaving the keyboard.
     void onGoToLabel(const QString& labelId);
+    // Shift+L — flip Preferences::linkDisplayMode and re-render the
+    // active reader content so the change is immediately visible.
+    void onToggleLinkDisplay();
     // Gmail-web `l` (Apply labels…): pop the LabelChooserDialog in
     // multi-select mode pre-filled with the thread's current label
     // set; on accept, push the diff through applyLabelDiffToThread.

@@ -137,24 +137,23 @@ constexpr int kMaxDisplayUrlLen = 60;
 
 }  // namespace
 
-QString linkifyPlainText(const QString& plain) {
+QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     // Decode entity references BEFORE HTML-escaping so that &#847; etc. turn
     // into the actual Unicode character instead of being shown literally.
     QString escaped = decodeEntitiesInline(plain).toHtmlEscaped();
 
     // Two-pass linkification, modelled on baremail-terminal:
-    //   Pass 1 finds "label [URL]" patterns and renders them with the
-    //          label as the visible click target — the URL goes into
-    //          title= (so a hover or long-press surfaces it) but stays
-    //          out of the visible text. Most marketing / transactional
-    //          emails route through Gmail's HTML→text converter and
-    //          come out in this shape, so the user sees clean prose
-    //          instead of bracketed URL noise.
+    //   Pass 1 finds "label [URL]" patterns. In LinkDisplayMode::Labeled
+    //          (default) the label alone is the visible click target;
+    //          in LinkDisplayMode::FullUrl both the label and URL are
+    //          visible with the URL part being the click target —
+    //          mirrors baremail-terminal's linkModeLabeled vs
+    //          linkModeURL toggle.
     //   Pass 2 finds bare URLs that DIDN'T overlap with a labeled
-    //          match and renders them as standalone links. URLs
-    //          longer than kMaxDisplayUrlLen are visibly truncated
-    //          to keep the message readable; the click target stays
-    //          the full URL.
+    //          match and renders them as standalone links. In
+    //          Labeled mode the visible URL gets a start/ellipsis/end
+    //          truncation when long; FullUrl mode shows the URL
+    //          verbatim. Click target is always the full URL.
     struct Replacement {
         qsizetype start;
         qsizetype end;
@@ -172,12 +171,10 @@ QString linkifyPlainText(const QString& plain) {
         // each URL standalone for Pass 2.
         if (label.contains(QStringLiteral("://"))) continue;
         const QString url = m.captured(2);
-        reps.append({
-            m.capturedStart(),
-            m.capturedEnd(),
-            QStringLiteral("<a href=\"%1\" title=\"%1\">%2</a>")
-                .arg(url, label),
-        });
+        const QString html = (mode == LinkDisplayMode::FullUrl)
+            ? QStringLiteral("%1 [<a href=\"%2\" title=\"%2\">%2</a>]").arg(label, url)
+            : QStringLiteral("<a href=\"%1\" title=\"%1\">%2</a>").arg(url, label);
+        reps.append({m.capturedStart(), m.capturedEnd(), html});
     }
 
     // Pass 2: bare URLs not overlapping a Pass 1 match.
@@ -197,7 +194,8 @@ QString linkifyPlainText(const QString& plain) {
         if (href.startsWith(QStringLiteral("www."), Qt::CaseInsensitive)) {
             href.prepend(QStringLiteral("https://"));
         }
-        const QString display = url.size() > kMaxDisplayUrlLen
+        const QString display = (mode == LinkDisplayMode::Labeled
+                                  && url.size() > kMaxDisplayUrlLen)
             ? truncateForDisplay(url, kMaxDisplayUrlLen)
             : url;
         reps.append({

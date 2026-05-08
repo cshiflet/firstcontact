@@ -903,7 +903,8 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::reportSpam,     this, &MainWindow::onReportSpam);
     connect(shortcuts_, &Shortcuts::backToList,     this, &MainWindow::onBackToList);
     connect(shortcuts_, &Shortcuts::openCurrent,    this, &MainWindow::onOpenCurrent);
-    connect(shortcuts_, &Shortcuts::goToLabel,      this, &MainWindow::onGoToLabel);
+    connect(shortcuts_, &Shortcuts::goToLabel,        this, &MainWindow::onGoToLabel);
+    connect(shortcuts_, &Shortcuts::toggleLinkDisplay, this, &MainWindow::onToggleLinkDisplay);
     connect(shortcuts_, &Shortcuts::applyLabels,    this, &MainWindow::onApplyLabelsCurrent);
     connect(shortcuts_, &Shortcuts::moveToLabel,    this, &MainWindow::onMoveToLabelCurrent);
     connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
@@ -1951,6 +1952,29 @@ void MainWindow::onGoToLabel(const QString& labelId) {
     sidebar_->selectLabel(labelId);
 }
 
+void MainWindow::onToggleLinkDisplay() {
+    using fc::util::LinkDisplayMode;
+    const auto current = Preferences::linkDisplayMode();
+    const auto next    = (current == LinkDisplayMode::Labeled)
+        ? LinkDisplayMode::FullUrl
+        : LinkDisplayMode::Labeled;
+    Preferences::setLinkDisplayMode(next);
+    statusBar()->showMessage(next == LinkDisplayMode::FullUrl
+        ? tr("Showing full URLs")
+        : tr("Showing link labels"), 3000);
+
+    // Re-render the reader so the change is immediately visible.
+    if (currentMessage_.id.isEmpty()) return;
+    const auto cached = fc::cache::MessageRepository::byId(currentMessage_.id);
+    if (cached.id.isEmpty()) return;
+    const auto thread = fc::cache::MessageRepository::byThread(cached.threadId);
+    if (thread.size() > 1) {
+        reader_->showThread(thread, cached.id);
+    } else {
+        reader_->showMessage(cached);
+    }
+}
+
 void MainWindow::onApplyLabelsCurrent() {
     if (currentMessage_.id.isEmpty()) return;
     if (fc::util::DryRun::block(QStringLiteral("apply-labels"))) {
@@ -2074,6 +2098,9 @@ void MainWindow::onShowShortcutsHelp() {
             { QStringLiteral("!"),       tr("Report as spam") },
             { QStringLiteral("l"),       tr("Apply labels…") },
             { QStringLiteral("v"),       tr("Move to label…") },
+        }},
+        { tr("View"), {
+            { QStringLiteral("Shift+L"), tr("Toggle link display (label only ↔ label + URL)") },
         }},
         { tr("Help"), {
             { QStringLiteral("?"),       tr("Show this dialog") },

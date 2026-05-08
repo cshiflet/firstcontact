@@ -80,6 +80,10 @@ Shortcuts::Shortcuts(QMainWindow* main) : QObject(main) {
     connect(make(main, QKeySequence(QStringLiteral("v"))),
             &QShortcut::activated, this, &Shortcuts::moveToLabel);
 
+    // ------------------------------------------------------------------ Link display toggle
+    connect(make(main, QKeySequence(QStringLiteral("Shift+L"))),
+            &QShortcut::activated, this, &Shortcuts::toggleLinkDisplay);
+
     // ------------------------------------------------------------------ Two-key go-to nav
     // Qt's QKeySequence supports up to four chords separated by commas.
     // The two-step "g, x" pattern matches Gmail web exactly: pressing

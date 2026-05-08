@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/Linkify.h"
+
 #include <QString>
 
 namespace fc::ui {
@@ -142,6 +144,12 @@ public:
     // best results.
     static double uiFontScale();
     static void   setUiFontScale(double scale);
+
+    // How URLs render in the linkified plain-text body (see
+    // util::LinkDisplayMode). Toggleable via Shift+L; the dropdown
+    // in Settings → Reader mirrors the same pref.
+    static fc::util::LinkDisplayMode linkDisplayMode();
+    static void                       setLinkDisplayMode(fc::util::LinkDisplayMode m);
 };
 
 }  // namespace fc::ui

@@ -21,6 +21,7 @@ constexpr char kReplyAboveKey[]       = "compose/replyAboveOriginal";
 constexpr char kQuoteStyleKey[]       = "compose/quoteStyle";
 constexpr char kUnreadOnlyKey[]       = "filter/unreadOnly";
 constexpr char kUiFontScaleKey[]      = "ui/fontScale";
+constexpr char kLinkModeKey[]         = "ui/linkDisplayMode";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -220,6 +221,23 @@ double Preferences::uiFontScale() {
 void Preferences::setUiFontScale(double scale) {
     QSettings s;
     s.setValue(QLatin1String(kUiFontScaleKey), qBound(0.75, scale, 3.0));
+    s.sync();
+}
+
+fc::util::LinkDisplayMode Preferences::linkDisplayMode() {
+    QSettings s;
+    const QString v = s.value(QLatin1String(kLinkModeKey),
+                               QStringLiteral("labeled")).toString();
+    if (v == QLatin1String("full")) return fc::util::LinkDisplayMode::FullUrl;
+    return fc::util::LinkDisplayMode::Labeled;
+}
+
+void Preferences::setLinkDisplayMode(fc::util::LinkDisplayMode m) {
+    QSettings s;
+    s.setValue(QLatin1String(kLinkModeKey),
+                m == fc::util::LinkDisplayMode::FullUrl
+                    ? QStringLiteral("full")
+                    : QStringLiteral("labeled"));
     s.sync();
 }
 

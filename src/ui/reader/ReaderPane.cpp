@@ -183,7 +183,9 @@ QString humanSize(qint64 bytes) {
 }
 
 QString bodyHtml(const fc::Message& m) {
-    if (!m.bodyText.isEmpty()) return util::linkifyPlainText(m.bodyText);
+    if (!m.bodyText.isEmpty()) {
+        return util::linkifyPlainText(m.bodyText, Preferences::linkDisplayMode());
+    }
     if (!m.bodyHtml.isEmpty()) {
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;

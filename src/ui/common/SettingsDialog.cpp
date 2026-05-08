@@ -228,6 +228,36 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     stripHint->setTextFormat(Qt::RichText);
     htmlForm->addRow(QString(), stripHint);
 
+    auto* linkBox = new QComboBox(content);
+    linkBox->addItem(tr("Label only — hover to see URL"),
+                     int(fc::util::LinkDisplayMode::Labeled));
+    linkBox->addItem(tr("Label and full URL"),
+                     int(fc::util::LinkDisplayMode::FullUrl));
+    linkBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    linkBox->setMinimumWidth(280);
+    {
+        const int idx = linkBox->findData(int(Preferences::linkDisplayMode()));
+        if (idx >= 0) linkBox->setCurrentIndex(idx);
+    }
+    connect(linkBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [linkBox](int idx) {
+                Preferences::setLinkDisplayMode(
+                    static_cast<fc::util::LinkDisplayMode>(
+                        linkBox->itemData(idx).toInt()));
+            });
+    htmlForm->addRow(tr("Link display:"), linkBox);
+
+    auto* linkHint = new QLabel(tr(
+        "When emails arrive in the <code>label [https://url]</code> shape "
+        "(common for marketing / transactional mail), the label-only "
+        "mode hides the URL behind a hover tooltip / status-bar preview "
+        "for cleaner reading. Toggle live with <b>Shift+L</b>."),
+        content);
+    linkHint->setObjectName(QStringLiteral("FormHint"));
+    linkHint->setWordWrap(true);
+    linkHint->setTextFormat(Qt::RichText);
+    htmlForm->addRow(QString(), linkHint);
+
     contentLayout->addLayout(htmlForm);
 
     // ---------------------------------------------------------- Attachments

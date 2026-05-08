@@ -59,6 +59,12 @@ signals:
 
     void goToLabel(const QString& labelId);  // gi / gs / gt / gd
 
+    // Shift+L — toggle link display between "label only" (default,
+    // hover for URL) and "label + URL" (URL visible alongside label).
+    // Mirrors baremail-terminal's `l` toggle, using a different key
+    // because plain `l` is the apply-labels picker.
+    void toggleLinkDisplay();
+
     void showHelp();                 // ?
 };
 
