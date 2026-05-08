@@ -250,12 +250,13 @@ void SyncService::topUpLabel(const QString& labelId) {
             if (err) {
                 // Don't escalate — top-up is best-effort. The user
                 // still sees whatever's in the cache.
-                emit topUpFinished(labelId, 0);
+                emit topUpFinished(labelId, 0, /*serverExhausted=*/false);
                 return;
             }
             // Save the next page token (or clear it when we ran off
             // the end, so the next click starts fresh from page 1).
             fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
+            const bool serverExhausted = page.nextPageToken.isEmpty();
 
             // Skip ids we already have in the cache to avoid a wasted
             // getMessage round-trip per known message.
@@ -271,7 +272,7 @@ void SyncService::topUpLabel(const QString& labelId) {
                 // UI can refresh in case prior async writes have
                 // landed since the last reload.
                 emit messagesUpdated();
-                emit topUpFinished(labelId, 0);
+                emit topUpFinished(labelId, 0, serverExhausted);
                 return;
             }
             // fetchAndStoreMessages flips d_->busy and the FSM state
@@ -285,8 +286,8 @@ void SyncService::topUpLabel(const QString& labelId) {
             setState(State::IncrementalSync);
             const int storeCount = static_cast<int>(missing.size());
             fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
-                [this, labelId, storeCount] {
-                    emit topUpFinished(labelId, storeCount);
+                [this, labelId, storeCount, serverExhausted] {
+                    emit topUpFinished(labelId, storeCount, serverExhausted);
                 });
         });
 }

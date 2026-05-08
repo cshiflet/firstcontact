@@ -59,9 +59,12 @@ signals:
     // Per-label top-up bracket: emitted around topUpLabel so the UI
     // can show a label-specific "Syncing <name>…" / "<name>: Done"
     // status instead of the generic stateChanged message. Fire-and-
-    // forget — listening is optional.
+    // forget — listening is optional. `serverExhausted` tells the
+    // caller whether the server returned an empty nextPageToken,
+    // i.e., we've walked the label end-to-end.
     void topUpStarted(const QString& labelId);
-    void topUpFinished(const QString& labelId, int newRowsStored);
+    void topUpFinished(const QString& labelId, int newRowsStored,
+                        bool serverExhausted);
 
 private:
     void doInitialSync();

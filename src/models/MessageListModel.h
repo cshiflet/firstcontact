@@ -95,6 +95,12 @@ public:
 
     QString sourceLabelId() const;
 
+    // True when the last fetchMore returned 0 or a short page — i.e.,
+    // the cache has nothing more to give for the current source.
+    // Owners use this to drive a "No more messages" footer or to
+    // decide whether to fire a server-side top-up.
+    bool cacheDrained() const { return cacheDrained_; }
+
 signals:
     // Fired when fetchMore was asked but the cache had no more rows for
     // the source. The owner connects this to SyncService::topUpLabel

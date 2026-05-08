@@ -2,6 +2,7 @@
 
 #include "models/Message.h"
 
+#include <QHash>
 #include <QList>
 #include <QMainWindow>
 #include <QPair>
@@ -138,6 +139,10 @@ private:
     void buildToolBar();
     void buildLayout();
     void wireSignals();
+    // Recomputes the "Loading more messages…" / "No more messages"
+    // footer text and visibility from the current model + top-up
+    // state. Cheap — call from any place that touches those.
+    void refreshListFooter();
     void refreshAccountIndicator();
     void refreshAccountMenu();    // (re)builds the Account toolbar dropdown
     void refreshToolbarIcons();   // re-bake icons from the active palette
@@ -167,6 +172,17 @@ private:
     MessageListView*         list_;
     ReaderPane*              reader_;
     fc::MessageListModel*    listModel_;
+    // Loading footer below the message list. Three states:
+    //   "" / hidden       — idle (more cache rows can be scrolled to)
+    //   "Loading more…"    — a server top-up is in flight for the
+    //                        currently-visible label
+    //   "No more messages" — cache is fully drained AND the server
+    //                        reported no more pages, OR the visible
+    //                        label is one of the seed labels that
+    //                        incremental sync keeps complete.
+    QLabel*                  listFooter_       = nullptr;
+    bool                     topUpInFlight_    = false;
+    QHash<QString, bool>     serverExhaustedByLabel_;
 
     QLineEdit*               searchEdit_;
     QAction*                 searchIconAction_ = nullptr;

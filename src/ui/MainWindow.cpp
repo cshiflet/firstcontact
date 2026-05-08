@@ -204,14 +204,31 @@ void MainWindow::buildLayout() {
     sidebar_ = new SidebarWidget(splitter_);
     sidebar_->setMaximumWidth(260);
 
-    list_      = new MessageListView(splitter_);
+    // Wrap the list view + a small footer label in a single column so
+    // the footer ("Loading more messages…" / "No more messages") sits
+    // tight beneath the list within the splitter cell.
+    auto* listColumn = new QWidget(splitter_);
+    auto* listColumnLayout = new QVBoxLayout(listColumn);
+    listColumnLayout->setContentsMargins(0, 0, 0, 0);
+    listColumnLayout->setSpacing(0);
+
+    list_      = new MessageListView(listColumn);
     listModel_ = new fc::MessageListModel(this);
     list_->setModel(listModel_);
+    listColumnLayout->addWidget(list_, /*stretch=*/1);
+
+    listFooter_ = new QLabel(listColumn);
+    listFooter_->setObjectName(QStringLiteral("listFooter"));
+    listFooter_->setAlignment(Qt::AlignCenter);
+    listFooter_->setContentsMargins(8, 6, 8, 6);
+    listFooter_->setStyleSheet(QStringLiteral("color: gray; font-style: italic;"));
+    listFooter_->setVisible(false);
+    listColumnLayout->addWidget(listFooter_);
 
     reader_ = new ReaderPane(splitter_);
 
     splitter_->addWidget(sidebar_);
-    splitter_->addWidget(list_);
+    splitter_->addWidget(listColumn);
     splitter_->addWidget(reader_);
     splitter_->setStretchFactor(0, 0);
     splitter_->setStretchFactor(1, 1);
@@ -687,6 +704,7 @@ void MainWindow::wireSignals() {
                         }
                     }
                 }
+                refreshListFooter();
             });
     // When the model can't fetch any more rows from the cache, fall
     // through to the server-side top-up. Subsequent messagesUpdated
@@ -694,6 +712,7 @@ void MainWindow::wireSignals() {
     connect(listModel_, &fc::MessageListModel::cacheExhausted,
             this,        [this](const QString& labelId) {
                 if (sync_) sync_->topUpLabel(labelId);
+                refreshListFooter();
             });
 
     // Label-scoped progress messages for top-up. Generic stateChanged
@@ -707,9 +726,13 @@ void MainWindow::wireSignals() {
                 statusBar()->showMessage(name.isEmpty()
                     ? tr("Syncing…")
                     : tr("Syncing %1…").arg(name));
+                if (labelId == listModel_->sourceLabelId()) {
+                    topUpInFlight_ = true;
+                    refreshListFooter();
+                }
             });
     connect(sync_, &fc::sync::SyncService::topUpFinished, this,
-            [this](const QString& labelId, int newRows) {
+            [this](const QString& labelId, int newRows, bool serverExhausted) {
                 const QString name = fc::cache::LabelRepository::byId(labelId).name;
                 if (!name.isEmpty()) {
                     const QString msg = newRows > 0
@@ -717,6 +740,7 @@ void MainWindow::wireSignals() {
                         : tr("%1: up to date").arg(name);
                     statusBar()->showMessage(msg, 30000);
                 }
+                serverExhaustedByLabel_[labelId] = serverExhausted;
                 // The cache just gained `newRows` older rows. Push them
                 // into the model so the user's scroll-to-bottom session
                 // continues seamlessly. Skip if the user has navigated
@@ -724,6 +748,10 @@ void MainWindow::wireSignals() {
                 if (newRows > 0
                     && labelId == listModel_->sourceLabelId()) {
                     listModel_->resumeAfterTopUp();
+                }
+                if (labelId == listModel_->sourceLabelId()) {
+                    topUpInFlight_ = false;
+                    refreshListFooter();
                 }
             });
     connect(sync_, &fc::sync::SyncService::failed, this,
@@ -1035,6 +1063,10 @@ void MainWindow::onRefresh() {
 void MainWindow::onLabelSelected(const QString& id) {
     if (id.isEmpty() || id == currentLabelId_) return;
     currentLabelId_ = id;
+    // Reset top-up state for the new label — any in-flight top-up
+    // for the old label is no longer interesting to the footer.
+    topUpInFlight_ = false;
+    refreshListFooter();
     reloadCurrentLabel();
     // Initial sync only seeds INBOX / SENT / DRAFT / STARRED — every
     // other label (every user label, plus categories like SPAM /
@@ -1046,10 +1078,60 @@ void MainWindow::onLabelSelected(const QString& id) {
     if (sync_ && currentSearchQuery_.isEmpty()) {
         sync_->topUpLabel(id);
     }
+    refreshListFooter();
 }
 
 void MainWindow::reloadSidebar() {
     sidebar_->model()->reload();
+}
+
+void MainWindow::refreshListFooter() {
+    if (!listFooter_ || !listModel_) return;
+
+    // While a server top-up for the visible label is in flight, the
+    // footer always shows the loading state regardless of the
+    // model's current row count — the user just triggered a fetch
+    // and wants to know it's working.
+    if (topUpInFlight_) {
+        listFooter_->setText(tr("Loading more messages…"));
+        listFooter_->setVisible(true);
+        return;
+    }
+
+    const QString labelId = listModel_->sourceLabelId();
+    if (labelId.isEmpty()) {
+        listFooter_->setVisible(false);
+        return;
+    }
+
+    // Cache still has more to give — don't show the footer; scrolling
+    // pulls more rows in directly.
+    if (!listModel_->cacheDrained()) {
+        listFooter_->setVisible(false);
+        return;
+    }
+
+    // Drained cache. Show "No more messages" if we know we've walked
+    // the label end-to-end on the server, OR if this is one of the
+    // seed labels that incremental sync keeps fully cached. For
+    // non-seed labels where the server walk hasn't yielded an empty
+    // nextPageToken yet, leave the footer hidden — a future scroll
+    // will trigger another top-up that may bring more rows back.
+    static const QSet<QString> seedLabels = {
+        QStringLiteral("INBOX"),
+        QStringLiteral("SENT"),
+        QStringLiteral("DRAFT"),
+        QStringLiteral("STARRED"),
+    };
+    const bool isSeed   = seedLabels.contains(labelId);
+    const bool srvDone  = serverExhaustedByLabel_.value(labelId, false);
+
+    if (isSeed || srvDone) {
+        listFooter_->setText(tr("No more messages"));
+        listFooter_->setVisible(true);
+    } else {
+        listFooter_->setVisible(false);
+    }
 }
 
 void MainWindow::reloadCurrentLabel() {
@@ -1108,6 +1190,8 @@ void MainWindow::reloadCurrentLabel() {
         reader_->showEmpty();
         currentMessage_ = {};
     }
+
+    refreshListFooter();
 }
 
 void MainWindow::onMessageActivated(const QString& messageId, int row) {

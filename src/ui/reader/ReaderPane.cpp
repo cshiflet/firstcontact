@@ -343,6 +343,10 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     const bool offerBrowserButtons =
         previewMode != Preferences::HtmlPreview::Disabled;
     const bool hasHtml = !m.bodyHtml.isEmpty() || m.bodyHtmlPresent;
+    qInfo("ReaderPane: building card msg=%s expanded=%d buttons=%d hasHtml=%d previewMode=%s",
+          qUtf8Printable(m.id), initiallyExpanded ? 1 : 0,
+          offerBrowserButtons ? 1 : 0, hasHtml ? 1 : 0,
+          previewMode == Preferences::HtmlPreview::Disabled ? "disabled" : "external");
     auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
     auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
     auto htmlForServer = m.bodyHtml.isEmpty()
