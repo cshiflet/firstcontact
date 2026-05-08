@@ -2,11 +2,13 @@
 #include "Bootstrap.h"
 
 #include "ui/MainWindow.h"
+#include "ui/common/Preferences.h"
 #include "ui/common/Theme.h"
 #include "util/Logger.h"
 #include "util/Paths.h"
 
 #include <QCoreApplication>
+#include <QFont>
 #include <QLockFile>
 
 int main(int argc, char** argv) {
@@ -20,6 +22,28 @@ int main(int argc, char** argv) {
 
     fc::app::Application app(argc, argv);
     fc::util::installLogger();
+
+    // UI font scale — applied BEFORE Theme::applyPersisted and BEFORE
+    // any widgets are constructed so every paint picks up the scaled
+    // font size. Useful on HiDPI environments where the system DPI
+    // doesn't match the physical scale (notably WSL, which often
+    // reports 96 DPI even on a 4K host display).
+    {
+        const double scale = fc::ui::Preferences::uiFontScale();
+        if (qAbs(scale - 1.0) > 0.001) {
+            QFont f = QApplication::font();
+            const int basePt = f.pointSize();
+            if (basePt > 0) {
+                f.setPointSizeF(basePt * scale);
+            } else {
+                // Some platforms report point size = -1 and use
+                // pixel size instead; scale that path too.
+                const int basePx = f.pixelSize();
+                if (basePx > 0) f.setPixelSize(int(basePx * scale));
+            }
+            QApplication::setFont(f);
+        }
+    }
 
     // Apply the theme BEFORE constructing widgets so the QSS lands on the
     // initial paint and we don't briefly flash the system's default style.

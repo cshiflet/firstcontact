@@ -34,6 +34,11 @@ private slots:
 private:
     QTreeView*           tree_;
     fc::LabelTreeModel*  model_;
+    // Cached selection id. We re-apply it after every modelReset
+    // (label list changes) — without this the selection would be
+    // dropped any time the label cache refreshed, including the
+    // initial reload that runs right after construction.
+    QString              selectedId_;
 };
 
 }  // namespace fc::ui

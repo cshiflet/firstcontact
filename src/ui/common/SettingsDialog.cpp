@@ -87,6 +87,55 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     themeHint->setObjectName(QStringLiteral("FormHint"));
     themeHint->setWordWrap(true);
     form->addRow(QString(), themeHint);
+
+    // Text scale — covers HiDPI environments where the system DPI is
+    // wrong (WSL especially). Stored as a percentage and applied to
+    // QApplication::font() at startup; widget metrics fully recompute
+    // on next launch.
+    auto* scaleBox = new QComboBox(content);
+    const QList<QPair<QString, double>> scaleOpts = {
+        { tr("100% (system default)"), 1.0 },
+        { tr("110%"),                   1.1 },
+        { tr("125%"),                   1.25 },
+        { tr("150%"),                   1.5 },
+        { tr("175%"),                   1.75 },
+        { tr("200%"),                   2.0 },
+    };
+    for (const auto& [label, value] : scaleOpts) {
+        scaleBox->addItem(label, value);
+    }
+    scaleBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    scaleBox->setMinimumWidth(280);
+    {
+        const double current = Preferences::uiFontScale();
+        // Pick the closest option — if a user set something custom via
+        // QSettings directly, we still highlight a sensible match.
+        int bestIdx = 0;
+        double bestDelta = 1e9;
+        for (int i = 0; i < scaleBox->count(); ++i) {
+            const double delta = qAbs(scaleBox->itemData(i).toDouble() - current);
+            if (delta < bestDelta) { bestDelta = delta; bestIdx = i; }
+        }
+        scaleBox->setCurrentIndex(bestIdx);
+    }
+    connect(scaleBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [scaleBox](int idx) {
+                Preferences::setUiFontScale(scaleBox->itemData(idx).toDouble());
+            });
+    form->addRow(tr("Text scale:"), scaleBox);
+
+    auto* scaleHint = new QLabel(tr(
+        "Bumps the application font size on HiDPI displays where the "
+        "system-reported DPI doesn't match the physical scale (notably "
+        "WSL). <b>Restart FirstContact</b> for the change to fully "
+        "apply — text resizes immediately, but toolbar / row heights "
+        "only recompute on the next launch."),
+        content);
+    scaleHint->setObjectName(QStringLiteral("FormHint"));
+    scaleHint->setWordWrap(true);
+    scaleHint->setTextFormat(Qt::RichText);
+    form->addRow(QString(), scaleHint);
+
     contentLayout->addLayout(form);
 
     // ------------------------------------------------------------- HTML preview

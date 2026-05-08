@@ -20,6 +20,7 @@ constexpr char kSignatureKey[]        = "compose/signature";
 constexpr char kReplyAboveKey[]       = "compose/replyAboveOriginal";
 constexpr char kQuoteStyleKey[]       = "compose/quoteStyle";
 constexpr char kUnreadOnlyKey[]       = "filter/unreadOnly";
+constexpr char kUiFontScaleKey[]      = "ui/fontScale";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -207,6 +208,18 @@ bool Preferences::unreadOnly() {
 void Preferences::setUnreadOnly(bool on) {
     QSettings s;
     s.setValue(QLatin1String(kUnreadOnlyKey), on);
+    s.sync();
+}
+
+double Preferences::uiFontScale() {
+    QSettings s;
+    const double v = s.value(QLatin1String(kUiFontScaleKey), 1.0).toDouble();
+    return qBound(0.75, v, 3.0);
+}
+
+void Preferences::setUiFontScale(double scale) {
+    QSettings s;
+    s.setValue(QLatin1String(kUiFontScaleKey), qBound(0.75, scale, 3.0));
     s.sync();
 }
 

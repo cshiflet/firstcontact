@@ -129,6 +129,19 @@ public:
     // threads with at least one unread message). Off by default.
     static bool unreadOnly();
     static void setUnreadOnly(bool on);
+
+    // Multiplier applied to the application's default font point size
+    // at startup. Useful on HiDPI displays where the system's reported
+    // DPI doesn't match the physical scale (notably WSL, where the
+    // host's HiDPI scale doesn't always propagate through X). Values
+    // outside [0.75, 3.0] are clamped. 1.0 is the platform default.
+    //
+    // Read-once-at-startup contract: changing this lives via a UI
+    // control but most widget metrics only fully recompute on the
+    // next launch, so the Settings dialog hints at a restart for
+    // best results.
+    static double uiFontScale();
+    static void   setUiFontScale(double scale);
 };
 
 }  // namespace fc::ui
