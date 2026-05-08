@@ -62,6 +62,37 @@ private slots:
         QVERIFY(!out.contains(QStringLiteral(">%1<").arg(url)));   // not visibly full
     }
 
+    void rendersParenthesizedLinkAsLabelOnly() {
+        // Gmail's text/plain converter emits `label (URL)` when
+        // converting an <a href>label</a>. Without dedicated handling
+        // the bare-URL pass linkifies just the URL inside the parens
+        // and leaves "label (" / ")" as visible noise around it.
+        const auto out = fc::util::linkifyPlainText(
+            QStringLiteral("YOUR GARAGE (https://enews.example.com/q/abc123) today."));
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://enews.example.com/q/abc123\" "
+            "title=\"https://enews.example.com/q/abc123\">YOUR GARAGE</a>")));
+        // No leftover ` (URL)` remnant in the visible text.
+        QVERIFY(!out.contains(QStringLiteral(" (https://enews.example.com")));
+    }
+
+    void htmlAnchorWithImgAltUsesAltAsLabel() {
+        // Real-world bug: `<a href="X"><img alt="YOUR GARAGE" …></a>`
+        // captured the entire <img> tag as the label and rendered
+        // raw markup. Use the alt text as the visible label.
+        const QString in = QStringLiteral(
+            "<a href=\"https://example.com/garage\" target=\"_blank\">"
+            "<img src=\"https://cdn/banner.jpg\" alt=\"YOUR GARAGE\" "
+            "width=\"150\"></a>");
+        const auto out = fc::util::linkifyPlainText(in);
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://example.com/garage\" "
+            "title=\"https://example.com/garage\">YOUR GARAGE</a>")));
+        // No raw <img> markup leaks through.
+        QVERIFY(!out.contains(QStringLiteral("&lt;img")));
+        QVERIFY(!out.contains(QStringLiteral("alt=&quot;")));
+    }
+
     void rendersHtmlAnchorAsLabelOnly() {
         // Real-world bug: some senders dump literal HTML anchors into
         // the text/plain alternative (UPS shipment notifications are

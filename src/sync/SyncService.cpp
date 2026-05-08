@@ -6,6 +6,7 @@
 #include "cache/MessageRepository.h"
 #include "cache/MetaRepository.h"
 
+#include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -238,24 +239,34 @@ void SyncService::topUpLabel(const QString& labelId) {
         if (seed == labelId) return;
     }
 
+    // Claim the busy slot synchronously BEFORE the async listMessages
+    // call. Without this, a 60s sync timer firing between this point
+    // and the callback would also see busy=false, race past, and end
+    // up calling fetchAndStoreMessages from two paths concurrently.
+    d_->busy = true;
+    setState(State::IncrementalSync);
     emit topUpStarted(labelId);
 
     const QString tokenKey = topUpTokenKey(labelId);
     const QString pageToken = fc::cache::MetaRepository::get(tokenKey);
 
+    QPointer<SyncService> self(this);
     d_->gmail->listMessages(labelId, /*q=*/QString(), pageToken,
         kTopUpPageSize,
-        [this, labelId, tokenKey]
+        [self, labelId, tokenKey]
         (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
+            if (!self) return;   // we were destroyed in flight
             if (err) {
                 // Don't escalate — top-up is best-effort. The user
-                // still sees whatever's in the cache.
-                emit topUpFinished(labelId, 0, /*serverExhausted=*/false);
+                // still sees whatever's in the cache. DO NOT advance
+                // the saved pageToken: we never actually got the next
+                // page, so the next attempt should retry the same
+                // window.
+                self->d_->busy = false;
+                self->setState(State::Idle);
+                emit self->topUpFinished(labelId, 0, /*serverExhausted=*/false);
                 return;
             }
-            // Save the next page token (or clear it when we ran off
-            // the end, so the next click starts fresh from page 1).
-            fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
             const bool serverExhausted = page.nextPageToken.isEmpty();
 
             // Skip ids we already have in the cache to avoid a wasted
@@ -268,26 +279,33 @@ void SyncService::topUpLabel(const QString& labelId) {
                 }
             }
             if (missing.isEmpty()) {
-                // Nothing new from the server, but still emit so the
-                // UI can refresh in case prior async writes have
-                // landed since the last reload.
-                emit messagesUpdated();
-                emit topUpFinished(labelId, 0, serverExhausted);
+                // Nothing to fetch — the page is fully cached. Safe
+                // to advance the cursor right now since no fetch can
+                // fail downstream of this branch.
+                fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
+                self->d_->busy = false;
+                self->setState(State::Idle);
+                emit self->messagesUpdated();
+                emit self->topUpFinished(labelId, 0, serverExhausted);
                 return;
             }
-            // fetchAndStoreMessages flips d_->busy and the FSM state
-            // — fine: top-up doubles as a small sync pass and
-            // benefits from the same guard against overlapping work.
             // The completion callback fires AFTER all per-message
             // getMessage round-trips have settled, so the
             // topUpFinished signal lines up with the moment the user
-            // actually has the new rows.
-            d_->busy = true;
-            setState(State::IncrementalSync);
+            // actually has the new rows. fetchAndStoreMessages clears
+            // busy / state on its way out (we set them already to
+            // hold the slot through the listMessages await). Advance
+            // the saved pageToken ONLY when the fetch finishes — if
+            // the per-message fetches blow up partway, the next call
+            // can retry the same window rather than skipping ids
+            // permanently.
             const int storeCount = static_cast<int>(missing.size());
-            fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
-                [this, labelId, storeCount, serverExhausted] {
-                    emit topUpFinished(labelId, storeCount, serverExhausted);
+            const QString nextToken = page.nextPageToken;
+            self->fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
+                [self, labelId, tokenKey, nextToken, storeCount, serverExhausted] {
+                    if (!self) return;
+                    fc::cache::MetaRepository::set(tokenKey, nextToken);
+                    emit self->topUpFinished(labelId, storeCount, serverExhausted);
                 });
         });
 }
@@ -328,18 +346,31 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     auto queue = std::make_shared<QStringList>(ids);
     auto inflight = std::make_shared<int>(0);
 
-    // Function that pulls the next id and dispatches.
+    // Function that pulls the next id and dispatches itself again
+    // when each callback fires. The original code captured `next`
+    // (the shared_ptr to the std::function) BY VALUE inside the
+    // outer lambda body itself, producing a reference cycle:
+    //   shared_ptr → std::function (lambda) → captures shared_ptr
+    // The outer lambda kept itself alive forever, leaking the chain
+    // even after all inflight callbacks completed. Fix:
+    //   - The outer lambda captures only a weak_ptr (no own ref).
+    //   - Each inner getMessage callback captures a strong shared
+    //     (via lock), anchoring the chain to the in-flight requests.
+    // Once every inner callback resolves and drops its strong copy,
+    // the std::function reaches refcount zero and is freed cleanly.
     auto next = std::make_shared<std::function<void()>>();
-    *next = [this, queue, inflight, onOne, next]() mutable {
+    std::weak_ptr<std::function<void()>> nextWeak = next;
+    *next = [this, queue, inflight, onOne, nextWeak]() {
         while (*inflight < kSerialGetBatch && !queue->isEmpty()) {
             const QString id = queue->takeFirst();
             ++(*inflight);
+            auto strong = nextWeak.lock();
             d_->gmail->getMessage(id,
-                [inflight, next, onOne]
+                [inflight, strong, onOne]
                 (fc::Message m, fc::api::ApiError err) {
                     --(*inflight);
                     onOne(m, err);
-                    (*next)();
+                    if (strong) (*strong)();
                 });
         }
     };

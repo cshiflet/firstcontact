@@ -44,6 +44,18 @@ const QRegularExpression& markdownLinkRe() {
     return re;
 }
 
+// "label (https://url)" — Gmail's text/plain converter emits this
+// shape for `<a href="URL">text</a>` and for `<a><img alt="text">…</a>`
+// (using the img's alt as the visible label). Without a dedicated
+// pattern the bare-URL pass linkifies just the URL inside the
+// parens and leaves "label (" / ")" as text noise around it.
+const QRegularExpression& parenLinkRe() {
+    static const QRegularExpression re(
+        QStringLiteral(R"((\S[^\(\n]{0,79}?) \((https?://[^\)\s]+)\))"),
+        QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
 // Literal HTML anchor — `<a href="...">label</a>`. Some senders dump
 // raw HTML into the text/plain alternative (UPS shipment mail is a
 // recurring example). Without this pre-pass the linkifier escapes
@@ -172,14 +184,35 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     // output (a single round of escaping, not double).
     QString preprocessed = plain;
     {
+        // When the inner of <a>…</a> is an <img alt="X">, take X as
+        // the visible label — that's what the user sees on a graphical
+        // client. Otherwise strip any stray tags from the inner so a
+        // marketing email with nested <span> wrapping doesn't end up
+        // with raw markup as the link label.
+        static const QRegularExpression imgAltRe(
+            QStringLiteral(R"(<img\b[^>]*?\balt\s*=\s*["']([^"']*)["'][^>]*>)"),
+            QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression strayTagRe(
+            QStringLiteral(R"(<[^>]+>)"));
+
         QString out;
         out.reserve(preprocessed.size());
         qsizetype idx = 0;
         for (auto it = htmlAnchorRe().globalMatch(preprocessed); it.hasNext(); ) {
             const auto m = it.next();
             out.append(preprocessed.mid(idx, m.capturedStart() - idx));
-            QString href  = decodeEntitiesInline(m.captured(1).trimmed());
-            QString label = decodeEntitiesInline(m.captured(2)).simplified();
+            QString href = decodeEntitiesInline(m.captured(1).trimmed());
+            QString rawInner = m.captured(2);
+            // Extract a usable label: prefer <img alt="…">, fall
+            // back to the inner with all tags stripped.
+            QString label;
+            if (auto am = imgAltRe.match(rawInner); am.hasMatch()) {
+                label = decodeEntitiesInline(am.captured(1)).trimmed();
+            }
+            if (label.isEmpty()) {
+                label = decodeEntitiesInline(
+                    rawInner.replace(strayTagRe, QString())).simplified();
+            }
             // Only http(s) anchors are user-meaningful in plain text;
             // the linkify regexes downstream require those schemes
             // anyway. Skip everything else (mailto: still works via
@@ -257,7 +290,7 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
         if (label.isEmpty()) continue;
         // Discard if the "label" itself looks like a URL — that's the
         // shape "https://a https://b" produces and we want to leave
-        // each URL standalone for Pass 2.
+        // each URL standalone for the bare-URL pass.
         if (label.contains(QStringLiteral("://"))) continue;
         const QString url = m.captured(2);
         const QString html = (mode == LinkDisplayMode::FullUrl)
@@ -266,7 +299,24 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
         reps.append({m.capturedStart(), m.capturedEnd(), html});
     }
 
-    // Pass 2: bare URLs not overlapping a Pass 0 / Pass 1 match.
+    // Pass 1.5: parenthesized "label (URL)" — Gmail's text/plain
+    // converter emits this shape for `<a href>text</a>` and for the
+    // <a><img alt> case (alt becomes the visible label). Same render
+    // logic as the labeled pass.
+    for (auto it = parenLinkRe().globalMatch(escaped); it.hasNext(); ) {
+        const auto m = it.next();
+        if (overlapsExisting(m.capturedStart(), m.capturedEnd())) continue;
+        const QString label = m.captured(1).trimmed();
+        if (label.isEmpty()) continue;
+        if (label.contains(QStringLiteral("://"))) continue;
+        const QString url = m.captured(2);
+        const QString html = (mode == LinkDisplayMode::FullUrl)
+            ? QStringLiteral("%1 (<a href=\"%2\" title=\"%2\">%2</a>)").arg(label, url)
+            : QStringLiteral("<a href=\"%1\" title=\"%1\">%2</a>").arg(url, label);
+        reps.append({m.capturedStart(), m.capturedEnd(), html});
+    }
+
+    // Pass 2: bare URLs not overlapping a prior match.
     for (auto it = urlRe().globalMatch(escaped); it.hasNext(); ) {
         const auto m = it.next();
         if (overlapsExisting(m.capturedStart(), m.capturedEnd())) continue;
