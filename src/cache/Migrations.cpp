@@ -86,32 +86,88 @@ void setSchemaVersion(QSqlDatabase& db, int v) {
         "INSERT INTO meta(key, value) VALUES ('schema_version', :v) "
         "ON CONFLICT(key) DO UPDATE SET value = :v"));
     q.bindValue(QStringLiteral(":v"), QString::number(v));
-    q.exec();
+    if (!q.exec()) {
+        // If we can't update the schema version, the next run will
+        // think this migration never happened and will replay every
+        // statement on top of an already-migrated DB. That's worse
+        // than aborting outright.
+        qFatal("Migrations: failed to update schema_version: %s",
+               qUtf8Printable(q.lastError().text()));
+    }
+}
+
+// Runs `body` inside a single sqlite transaction. Any qFatal coming
+// out of execAll / setSchemaVersion aborts the process before the
+// commit, so the half-applied step is rolled back automatically when
+// the WAL replay runs on the next launch. Without the transaction
+// boundary a partially-applied schema would persist on disk and
+// every subsequent migration would compound the breakage.
+template <typename Body>
+void runStep(QSqlDatabase& db, Body body) {
+    if (!db.transaction()) {
+        qFatal("Migrations: failed to start transaction: %s",
+               qUtf8Printable(db.lastError().text()));
+    }
+    body();
+    if (!db.commit()) {
+        // Best-effort rollback before bailing — sqlite may still
+        // have the open transaction; commit failure is rare but
+        // worth surfacing rather than silently losing the step.
+        db.rollback();
+        qFatal("Migrations: failed to commit step: %s",
+               qUtf8Printable(db.lastError().text()));
+    }
 }
 
 }  // namespace
 
 void Migrations::run(QSqlDatabase& db) {
+    // Connection-level PRAGMAs first — these can't run inside a
+    // transaction (journal_mode in particular), so we apply them
+    // directly before any version-checked step. Idempotent on a
+    // re-opened database, so running every launch is fine.
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("PRAGMA journal_mode = WAL"))) {
+            qWarning("Migrations: PRAGMA journal_mode failed: %s",
+                     qUtf8Printable(q.lastError().text()));
+        }
+        if (!q.exec(QStringLiteral("PRAGMA foreign_keys = ON"))) {
+            qWarning("Migrations: PRAGMA foreign_keys failed: %s",
+                     qUtf8Printable(q.lastError().text()));
+        }
+    }
+
     const int v = currentSchemaVersion(db);
     if (v < 1) {
-        execAll(db, readResource(QStringLiteral(":/schema/0001_init.sql")));
-        setSchemaVersion(db, 1);
+        runStep(db, [&] {
+            execAll(db, readResource(QStringLiteral(":/schema/0001_init.sql")));
+            setSchemaVersion(db, 1);
+        });
     }
     if (v < 2) {
-        execAll(db, readResource(QStringLiteral(":/schema/0002_fts.sql")));
-        setSchemaVersion(db, 2);
+        runStep(db, [&] {
+            execAll(db, readResource(QStringLiteral(":/schema/0002_fts.sql")));
+            setSchemaVersion(db, 2);
+        });
     }
     if (v < 3) {
-        execAll(db, readResource(QStringLiteral(":/schema/0003_body_html.sql")));
-        setSchemaVersion(db, 3);
+        runStep(db, [&] {
+            execAll(db, readResource(QStringLiteral(":/schema/0003_body_html.sql")));
+            setSchemaVersion(db, 3);
+        });
     }
     if (v < 4) {
-        execAll(db, readResource(QStringLiteral(":/schema/0004_send_at.sql")));
-        setSchemaVersion(db, 4);
+        runStep(db, [&] {
+            execAll(db, readResource(QStringLiteral(":/schema/0004_send_at.sql")));
+            setSchemaVersion(db, 4);
+        });
     }
     if (v < 5) {
-        execAll(db, readResource(QStringLiteral(":/schema/0005_snooze.sql")));
-        setSchemaVersion(db, 5);
+        runStep(db, [&] {
+            execAll(db, readResource(QStringLiteral(":/schema/0005_snooze.sql")));
+            setSchemaVersion(db, 5);
+        });
     }
 }
 

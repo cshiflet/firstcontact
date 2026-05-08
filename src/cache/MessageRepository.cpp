@@ -511,6 +511,17 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
                                        const QStringList& added,
                                        const QStringList& removed) {
     auto db = databaseHandle();
+    // Wrap the three-statement label-edge update in a single
+    // transaction so a crash mid-call doesn't leave the cache in
+    // a state where the edges and the derived is_unread / is_starred
+    // flags disagree. Without the transaction a partial failure
+    // produced an inbox where a row was sometimes shown as unread
+    // even though UNREAD had just been removed, until the next
+    // sync recomputed.
+    if (!db.transaction()) {
+        qWarning("applyLabelDiff: failed to begin txn: %s",
+                 qUtf8Printable(db.lastError().text()));
+    }
 
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
@@ -519,7 +530,11 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
     for (const auto& l : added) {
         ins.bindValue(QStringLiteral(":m"), messageId);
         ins.bindValue(QStringLiteral(":l"), l);
-        ins.exec();
+        if (!ins.exec()) {
+            qWarning("applyLabelDiff add %s/%s: %s",
+                     qUtf8Printable(messageId), qUtf8Printable(l),
+                     qUtf8Printable(ins.lastError().text()));
+        }
     }
 
     QSqlQuery del(db);
@@ -528,7 +543,11 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
     for (const auto& l : removed) {
         del.bindValue(QStringLiteral(":m"), messageId);
         del.bindValue(QStringLiteral(":l"), l);
-        del.exec();
+        if (!del.exec()) {
+            qWarning("applyLabelDiff del %s/%s: %s",
+                     qUtf8Printable(messageId), qUtf8Printable(l),
+                     qUtf8Printable(del.lastError().text()));
+        }
     }
 
     QSqlQuery flags(db);
@@ -538,7 +557,17 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
         "  is_starred = (SELECT COUNT(*) FROM message_labels WHERE message_id = :m AND label_id = 'STARRED') > 0 "
         "WHERE id = :m"));
     flags.bindValue(QStringLiteral(":m"), messageId);
-    flags.exec();
+    if (!flags.exec()) {
+        qWarning("applyLabelDiff flags %s: %s",
+                 qUtf8Printable(messageId),
+                 qUtf8Printable(flags.lastError().text()));
+    }
+
+    if (!db.commit()) {
+        qWarning("applyLabelDiff: commit failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        db.rollback();
+    }
 }
 
 void MessageRepository::markAccessed(const QString& id) {
