@@ -332,21 +332,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // Strict and proxy modes share LocalHtmlServer holders so a re-click
     // reuses the same server / URL token.
     const auto previewMode = Preferences::htmlPreview();
-    // Show the buttons whenever HTML preview is enabled at all. The
-    // strict / images openers degrade to a "(no HTML body cached)"
-    // placeholder if the message turns out to be pure plain text, but
-    // "Open in Gmail" is universally useful — opening the thread on
-    // mail.google.com works for ANY message — so it's worth always
-    // having the row reachable. Previously gated on bodyHtml /
-    // bodyHtmlPresent, which silently hid the row on cached rows
-    // missing those flags (older caches, lazy-fetched HTML, etc.).
-    const bool offerBrowserButtons =
-        previewMode != Preferences::HtmlPreview::Disabled;
+    // The button row appears whenever the message would have ANY
+    // useful action available. "Open in Gmail" is universal — it
+    // doesn't render HTML locally, just opens the thread on
+    // mail.google.com — so we want it reachable even when the user
+    // explicitly disabled HTML preview. The strict / images openers
+    // ARE local-rendering paths, so those still respect the
+    // previewMode == Disabled choice and stay disabled (with a
+    // tooltip) in that mode.
+    const bool offerBrowserButtons = true;
     const bool hasHtml = !m.bodyHtml.isEmpty() || m.bodyHtmlPresent;
-    qInfo("ReaderPane: building card msg=%s expanded=%d buttons=%d hasHtml=%d previewMode=%s",
-          qUtf8Printable(m.id), initiallyExpanded ? 1 : 0,
-          offerBrowserButtons ? 1 : 0, hasHtml ? 1 : 0,
-          previewMode == Preferences::HtmlPreview::Disabled ? "disabled" : "external");
+    const bool localPreviewOk = previewMode != Preferences::HtmlPreview::Disabled;
     auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
     auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
     auto htmlForServer = m.bodyHtml.isEmpty()
@@ -366,27 +362,37 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), host);
         strictBtn->setObjectName(QStringLiteral("link"));
         strictBtn->setCursor(Qt::PointingHandCursor);
-        strictBtn->setToolTip(hasHtml
+        strictBtn->setToolTip(!localPreviewOk
             ? QObject::tr(
-                "Render in your system browser. Strict CSP — no remote "
-                "images, no scripts, no iframes.")
-            : QObject::tr(
-                "Plain-text message — no HTML body to render."));
-        strictBtn->setEnabled(hasHtml);
+                "HTML preview is disabled in Settings — "
+                "set HTML preview to \"Open in external browser\" to "
+                "enable this.")
+            : hasHtml
+                ? QObject::tr(
+                    "Render in your system browser. Strict CSP — no remote "
+                    "images, no scripts, no iframes.")
+                : QObject::tr(
+                    "Plain-text message — no HTML body to render."));
+        strictBtn->setEnabled(localPreviewOk && hasHtml);
         row->addWidget(strictBtn);
 
         auto* imagesBtn = new QPushButton(QObject::tr("Open with images"), card);
         imagesBtn->setObjectName(QStringLiteral("link"));
         imagesBtn->setCursor(Qt::PointingHandCursor);
-        imagesBtn->setToolTip(hasHtml
+        imagesBtn->setToolTip(!localPreviewOk
             ? QObject::tr(
-                "Same as 'Open in browser' but image URLs are routed through "
-                "the configured image proxy (Settings → HTML preview) so the "
-                "marketer's CDN never sees your IP. Scripts / iframes / forms "
-                "still blocked.")
-            : QObject::tr(
-                "Plain-text message — no HTML body to render."));
-        imagesBtn->setEnabled(hasHtml);
+                "HTML preview is disabled in Settings — "
+                "set HTML preview to \"Open in external browser\" to "
+                "enable this.")
+            : hasHtml
+                ? QObject::tr(
+                    "Same as 'Open in browser' but image URLs are routed through "
+                    "the configured image proxy (Settings → HTML preview) so the "
+                    "marketer's CDN never sees your IP. Scripts / iframes / forms "
+                    "still blocked.")
+                : QObject::tr(
+                    "Plain-text message — no HTML body to render."));
+        imagesBtn->setEnabled(localPreviewOk && hasHtml);
         row->addWidget(imagesBtn);
 
         auto* gmailBtn = new QPushButton(QObject::tr("Open in Gmail"), card);
