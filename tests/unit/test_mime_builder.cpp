@@ -38,6 +38,61 @@ private slots:
         QVERIFY(rfc.contains("Subject: =?UTF-8?B?"));
     }
 
+    void splitsLongNonAsciiSubjectAcrossEncodedWords() {
+        // RFC 2047 §2 caps each encoded-word at 75 chars total. A
+        // long non-ASCII subject must split into multiple encoded-
+        // words separated by folded-whitespace ("\r\n " between them).
+        // Without this split, strict MTAs reject the oversized blob
+        // and Gmail's send / draft endpoints have been known to
+        // mangle the result.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QString::fromUtf8(
+            "résumé café — a long subject that should overflow one "
+            "encoded-word and require folding into two or three pieces");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Multiple encoded-words present.
+        const int firstEW = rfc.indexOf("=?UTF-8?B?");
+        QVERIFY(firstEW >= 0);
+        const int secondEW = rfc.indexOf("=?UTF-8?B?", firstEW + 1);
+        QVERIFY(secondEW > firstEW);
+        // No single encoded-word exceeds 75 chars.
+        QByteArray subjectLine = rfc.mid(rfc.indexOf("Subject:"));
+        subjectLine = subjectLine.left(subjectLine.indexOf("\r\nDate:"));
+        for (const auto& part : subjectLine.split(' ')) {
+            if (part.startsWith("=?UTF-8?B?")) {
+                QVERIFY(part.size() <= 75);
+            }
+        }
+    }
+
+    void messageIdRejectsMalformedFromDomain() {
+        // sanitizeHeaderField only strips CR/LF/control chars, so a
+        // malformed sender like "a@evil>x" survives and used to be
+        // spliced verbatim into the Message-ID's domain part. The
+        // newMessageId path now requires the domain match a strict
+        // dot-atom; anything else falls back to firstcontact.local.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@evil>x");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("hi");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Pull just the Message-ID header line.
+        const int mid = rfc.indexOf("Message-ID:");
+        QVERIFY(mid >= 0);
+        const QByteArray idLine = rfc.mid(mid, rfc.indexOf("\r\n", mid) - mid);
+        // Falls back to the safe sentinel domain.
+        QVERIFY(idLine.contains("@firstcontact.local>"));
+        // The malformed `>` from the From address must not have
+        // leaked into the Message-ID header.
+        QVERIFY(!idLine.contains("evil"));
+    }
+
     void rejectsHeaderInjectionInRecipients() {
         // Attacker-controlled "name" or address tries to splice in Bcc by
         // embedding CRLF in a recipient. The injected text must collapse

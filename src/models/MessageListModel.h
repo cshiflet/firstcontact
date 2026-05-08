@@ -124,6 +124,12 @@ private:
     bool    conversationView_ = true;
     bool    unreadOnly_       = false;
     bool    cacheDrained_     = false;   // last fetchMore returned 0
+    // Re-entry guard for resumeAfterTopUp — set while we're inside
+    // its drain loop. Without it, fetchMore can emit cacheExhausted
+    // mid-loop which the owner reroutes back into topUpLabel /
+    // topUpFinished and re-enters resumeAfterTopUp before the prior
+    // call returns.
+    bool    resumingAfterTopUp_ = false;
 };
 
 }  // namespace fc

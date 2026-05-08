@@ -3,6 +3,8 @@
 #include "cache/MessageRepository.h"
 #include "util/Html2Text.h"
 
+#include <QScopedValueRollback>
+
 #include <algorithm>
 
 namespace fc {
@@ -124,6 +126,13 @@ void MessageListModel::resumeAfterTopUp() {
     // server round-trip's worth of fresh rows lands in the view
     // without forcing the user to scroll-poke for each chunk.
     if (source_ != Source::ByLabel) return;
+    // Re-entry guard. fetchMore inside the loop emits cacheExhausted
+    // on short pages, which the owner connects to topUpLabel ->
+    // topUpFinished -> back here. Without this guard a tight cascade
+    // of fetchMore -> cacheExhausted -> topUpLabel -> fetchMore can
+    // recurse and confuse the rows_ index counters.
+    if (resumingAfterTopUp_) return;
+    QScopedValueRollback<bool> guard(resumingAfterTopUp_, true);
     cacheDrained_ = false;
     constexpr int kMaxChunksPerResume = 6;   // up to 600 rows per top-up
     for (int i = 0; i < kMaxChunksPerResume && !cacheDrained_; ++i) {
@@ -190,11 +199,32 @@ void MessageListModel::refreshFromSource() {
             : cache::MessageRepository::searchFts(sourceParam_, limit);
     }
 
+    // Capture the user's currently-expanded thread set before the
+    // reset clears it. After endResetModel we walk the new rows and
+    // re-expand any thread that survived the refresh — without this
+    // step, every messagesUpdated signal silently collapsed open
+    // threads, which was jarring during incremental sync.
+    const QSet<QString> savedExpansions = expandedThreads_;
+
     beginResetModel();
     rows_ = std::move(rows);
     expandedThreads_.clear();
     cacheDrained_ = (source_ == Source::BySearch) || !moreInCache;
     endResetModel();
+
+    if (savedExpansions.isEmpty()) return;
+    // Re-expand each previously-open thread. Walk in REVERSE so
+    // injecting children at row N doesn't shift the indices of rows
+    // < N that we still want to inspect. Only act on parent rows
+    // (isThreadChild==false) with multi-message threads — single-
+    // message threads have nothing to inject and toggleThreadExpand
+    // would be a no-op anyway.
+    for (int i = static_cast<int>(rows_.size()) - 1; i >= 0; --i) {
+        if (rows_[i].isThreadChild) continue;
+        if (rows_[i].threadCount <= 1) continue;
+        if (!savedExpansions.contains(rows_[i].threadId)) continue;
+        toggleThreadExpand(i);
+    }
 }
 
 void MessageListModel::loadFirstPage() {

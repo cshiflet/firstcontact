@@ -907,20 +907,29 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::toggleLinkDisplay, this, &MainWindow::onToggleLinkDisplay);
     connect(shortcuts_, &Shortcuts::applyLabels,    this, &MainWindow::onApplyLabelsCurrent);
     connect(shortcuts_, &Shortcuts::moveToLabel,    this, &MainWindow::onMoveToLabelCurrent);
-    connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
+    // selectNext/selectPrev should advance from whatever the user has
+    // selected RIGHT NOW (which can be ahead of currentRow_ — e.g.
+    // they clicked a row to select it but didn't activate it). Read
+    // the live current index off the view rather than the cached
+    // currentRow_ which only updates on activation.
+    auto selectAt = [this](int row) {
         const int n = listModel_->rowCount();
         if (n == 0) return;
-        const int row = qMin(currentRow_ + 1, n - 1);
-        list_->setCurrentIndex(listModel_->index(row, 0));
-        onMessageActivated(listModel_->index(row, 0)
-                              .data(fc::MessageListModel::IdRole).toString(), row);
+        row = qBound(0, row, n - 1);
+        const auto idx = listModel_->index(row, 0);
+        list_->setCurrentIndex(idx);
+        onMessageActivated(idx.data(fc::MessageListModel::IdRole).toString(),
+                            row);
+    };
+    auto selectedRow = [this] {
+        const auto idx = list_->currentIndex();
+        return idx.isValid() ? idx.row() : currentRow_;
+    };
+    connect(shortcuts_, &Shortcuts::selectNext, this, [selectAt, selectedRow] {
+        selectAt(selectedRow() + 1);
     });
-    connect(shortcuts_, &Shortcuts::selectPrev, this, [this] {
-        if (listModel_->rowCount() == 0) return;
-        const int row = qMax(currentRow_ - 1, 0);
-        list_->setCurrentIndex(listModel_->index(row, 0));
-        onMessageActivated(listModel_->index(row, 0)
-                              .data(fc::MessageListModel::IdRole).toString(), row);
+    connect(shortcuts_, &Shortcuts::selectPrev, this, [selectAt, selectedRow] {
+        selectAt(selectedRow() - 1);
     });
     connect(shortcuts_, &Shortcuts::showHelp, this, &MainWindow::onShowShortcutsHelp);
 }
@@ -1044,6 +1053,13 @@ void MainWindow::onSignOut() {
         outbox_->stop();
         pending_->stop();
         drafts_->stop();
+        // Reset transient session state so a stale "current message" /
+        // "current row" can't drive a shortcut press (r, e, #, etc.)
+        // into operating on cached data that no longer represents the
+        // signed-in user. Reader pane goes back to its empty hint.
+        currentMessage_ = {};
+        currentRow_     = -1;
+        if (reader_) reader_->showEmpty(tr("Not signed in."));
     }
 }
 

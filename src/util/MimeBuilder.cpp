@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QLocale>
+#include <QRegularExpression>
 #include <QString>
 #include <QUuid>
 
@@ -47,8 +48,32 @@ bool needsEncodedWord(const QString& s) {
 
 QString encodedWord(const QString& s) {
     if (!needsEncodedWord(s)) return s;
-    return QStringLiteral("=?UTF-8?B?%1?=").arg(
-        QString::fromLatin1(s.toUtf8().toBase64()));
+    // RFC 2047 §2: an encoded-word is at most 75 chars total. The
+    // wrapper "=?UTF-8?B??=" is 12 chars, leaving 63 for the base64
+    // payload; 63 base64 chars encode 47 bytes (rounded down to a
+    // multiple of 3 → 45 bytes, with 60 base64 chars). Split the
+    // UTF-8 stream into ≤45-byte chunks AT UTF-8 codepoint
+    // boundaries so multi-byte characters don't get sliced; emit
+    // one encoded-word per chunk separated by "\r\n " (folded
+    // whitespace). Strict MTAs that rejected our previous single
+    // oversized encoded-word now accept the folded sequence.
+    const QByteArray utf8 = s.toUtf8();
+    constexpr int kMaxBytesPerChunk = 45;
+    QStringList parts;
+    for (int i = 0; i < utf8.size(); ) {
+        int end = qMin(i + kMaxBytesPerChunk, utf8.size());
+        // Back off to a UTF-8 lead-byte boundary so we don't cut
+        // mid-codepoint. Continuation bytes have top two bits 10.
+        while (end > i + 1 && end < utf8.size()
+               && (static_cast<uchar>(utf8[end]) & 0xC0) == 0x80) {
+            --end;
+        }
+        const QByteArray chunk = utf8.mid(i, end - i);
+        parts << QStringLiteral("=?UTF-8?B?%1?=")
+                    .arg(QString::fromLatin1(chunk.toBase64()));
+        i = end;
+    }
+    return parts.join(QStringLiteral("\r\n "));
 }
 
 QString formatAddress(const QString& addr, const QString& name = {}) {
@@ -105,13 +130,23 @@ QByteArray newBoundary() {
 }  // namespace
 
 QString MimeBuilder::newMessageId(const QString& fromAddr) {
+    // Default to a sentinel domain. We'll only override when the
+    // fromAddr's domain part is a strict RFC 5321 dot-atom — letters,
+    // digits, dot, hyphen — so a malformed sender like "a@evil>x"
+    // can't smuggle stray characters into the Message-ID and break
+    // header parsing downstream.
     QString domain = QStringLiteral("firstcontact.local");
     const QString safeFrom = sanitizeHeaderField(fromAddr);
     const int at = safeFrom.indexOf('@');
     if (at > 0 && at + 1 < safeFrom.size()) {
-        domain = safeFrom.mid(at + 1);
+        const QString cand = safeFrom.mid(at + 1).trimmed();
+        static const QRegularExpression dotAtom(
+            QStringLiteral(R"(^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?$)"));
+        if (dotAtom.match(cand).hasMatch() && cand.contains(QChar('.'))) {
+            domain = cand;
+        }
     }
-    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     return QStringLiteral("<%1@%2>").arg(uuid, domain);
 }
 
