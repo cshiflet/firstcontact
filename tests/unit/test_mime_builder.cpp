@@ -117,6 +117,33 @@ private slots:
         QVERIFY(!toLine.contains('\n'));
     }
 
+    void rejectsBccSmugglingInToList() {
+        // Defensive: an attacker who controls a To recipient string
+        // tries to splice in a fake Bcc header by embedding CRLF + a
+        // header line. sanitizeHeaderField strips CRs/LFs from the
+        // recipient, so the literal bytes "Bcc:" survive but as part
+        // of the ONE-LINE To value rather than a new header.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = {QStringLiteral("ok@x.test\r\nBcc: leak@evil.test")};
+        m.subject  = QStringLiteral("hi");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        const auto headers = rfc.left(rfc.indexOf("\r\n\r\n"));
+        // No standalone Bcc line emitted by us.
+        QVERIFY(!headers.contains("\r\nBcc:"));
+        QVERIFY(!headers.startsWith("Bcc:"));
+        // To: header is a single physical line.
+        const int toStart = headers.indexOf("To:");
+        QVERIFY(toStart >= 0);
+        const int toEnd = headers.indexOf("\r\n", toStart);
+        QVERIFY(toEnd > toStart);
+        const QByteArray toLine = headers.mid(toStart, toEnd - toStart);
+        QVERIFY(!toLine.contains('\r'));
+        QVERIFY(!toLine.contains('\n'));
+    }
+
     void rejectsHeaderInjectionInSubject() {
         fc::util::OutgoingMessage m;
         m.fromAddr = QStringLiteral("a@x.test");
