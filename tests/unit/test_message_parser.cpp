@@ -52,6 +52,82 @@ private slots:
         QCOMPARE(m.bodyText, QStringLiteral("hello world"));
         QVERIFY(m.isUnread);
     }
+    void splitAddressListRespectsQuotedComma() {
+        // Real-world bug: `"Smith, John" <s@x.test>, b@y.test` was
+        // splitting into three pieces because the comma inside the
+        // quoted display name was treated like a separator. Build a
+        // minimal payload routed through MessageParser to exercise
+        // splitAddressList without exposing it directly.
+        QJsonObject body;
+        body.insert(QStringLiteral("data"),
+                     QString::fromLatin1(fc::util::base64UrlEncode(
+                         QByteArrayLiteral("body"))));
+        body.insert(QStringLiteral("size"), 4);
+
+        QJsonArray headers;
+        auto h = [&](const QString& n, const QString& v) {
+            QJsonObject o;
+            o.insert(QStringLiteral("name"), n);
+            o.insert(QStringLiteral("value"), v);
+            headers.append(o);
+        };
+        h("From", QStringLiteral("Sender <s@x.test>"));
+        h("Subject", QStringLiteral("hi"));
+        h("To",
+          QStringLiteral(R"("Smith, John" <john@x.test>, b@y.test)"));
+
+        QJsonObject payload;
+        payload.insert(QStringLiteral("mimeType"), QStringLiteral("text/plain"));
+        payload.insert(QStringLiteral("headers"), headers);
+        payload.insert(QStringLiteral("body"), body);
+
+        QJsonObject g;
+        g.insert(QStringLiteral("id"), QStringLiteral("m"));
+        g.insert(QStringLiteral("threadId"), QStringLiteral("t"));
+        g.insert(QStringLiteral("internalDate"), QStringLiteral("0"));
+        g.insert(QStringLiteral("payload"), payload);
+
+        const auto m = fc::api::MessageParser::parse(g);
+        QCOMPARE(m.toAddrs.size(), 2);
+        QVERIFY(m.toAddrs[0].contains(QStringLiteral("Smith, John")));
+        QVERIFY(m.toAddrs[0].contains(QStringLiteral("john@x.test")));
+        QCOMPARE(m.toAddrs[1], QStringLiteral("b@y.test"));
+    }
+
+    void splitAddressIgnoresAnglesInsideQuotes() {
+        // Defensive: a display name that itself contains "< >" must
+        // not steal the address slot. Without quote-aware parsing,
+        // `<weird> <real@x.test>` would parse name="" addr="weird".
+        QJsonObject body;
+        body.insert(QStringLiteral("data"),
+                     QString::fromLatin1(fc::util::base64UrlEncode(
+                         QByteArrayLiteral("hi"))));
+        body.insert(QStringLiteral("size"), 2);
+
+        QJsonArray headers;
+        auto h = [&](const QString& n, const QString& v) {
+            QJsonObject o;
+            o.insert(QStringLiteral("name"), n);
+            o.insert(QStringLiteral("value"), v);
+            headers.append(o);
+        };
+        h("From", QStringLiteral(R"("<weird>" <real@x.test>)"));
+
+        QJsonObject payload;
+        payload.insert(QStringLiteral("mimeType"), QStringLiteral("text/plain"));
+        payload.insert(QStringLiteral("headers"), headers);
+        payload.insert(QStringLiteral("body"), body);
+
+        QJsonObject g;
+        g.insert(QStringLiteral("id"), QStringLiteral("m"));
+        g.insert(QStringLiteral("threadId"), QStringLiteral("t"));
+        g.insert(QStringLiteral("internalDate"), QStringLiteral("0"));
+        g.insert(QStringLiteral("payload"), payload);
+
+        const auto m = fc::api::MessageParser::parse(g);
+        QCOMPARE(m.fromAddr, QStringLiteral("real@x.test"));
+        QCOMPARE(m.fromName, QStringLiteral("<weird>"));
+    }
 };
 
 QTEST_APPLESS_MAIN(TestMessageParser)

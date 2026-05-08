@@ -24,9 +24,24 @@ QString header(const QJsonArray& hs, const char* name) {
 }
 
 // Splits "Christopher Shiflet <chris@shiflet.org>" into name + addr.
+// Walks the input tracking quoted-string and angle-bracket state so
+// `< / >` inside quoted display names (e.g. "<weird>" <real@x>) don't
+// break the split. Picks the LAST `<` outside quotes as the address
+// boundary, mirroring most-permissive parsers.
 std::pair<QString, QString> splitAddress(const QString& v) {
-    const int lt = v.indexOf('<');
-    const int gt = v.indexOf('>');
+    int lt = -1;
+    int gt = -1;
+    bool inQuote = false;
+    bool escape = false;
+    for (int i = 0; i < v.size(); ++i) {
+        const QChar c = v[i];
+        if (escape) { escape = false; continue; }
+        if (c == QLatin1Char('\\')) { escape = true; continue; }
+        if (c == QLatin1Char('"')) { inQuote = !inQuote; continue; }
+        if (inQuote) continue;
+        if (c == QLatin1Char('<'))      lt = i;   // last unquoted `<`
+        else if (c == QLatin1Char('>')) gt = i;   // last unquoted `>`
+    }
     if (lt > 0 && gt > lt) {
         QString name = v.left(lt).trimmed();
         if (name.startsWith('"') && name.endsWith('"') && name.size() >= 2) {
@@ -41,18 +56,29 @@ std::pair<QString, QString> splitAddress(const QString& v) {
 }
 
 QStringList splitAddressList(const QString& raw) {
+    // Track angle-bracket depth AND quoted-string state so a comma
+    // inside a quoted display name (e.g. `"Smith, John" <s@x>, b@y`)
+    // doesn't turn one address into two. Naive depth-only splitting
+    // produced "Smith / John" <s@x> / b@y for that input.
     QStringList out;
     int depth = 0;
+    bool inQuote = false;
+    bool escape = false;
     QString cur;
     for (const QChar c : raw) {
-        if (c == '<') ++depth;
-        if (c == '>') --depth;
-        if (c == ',' && depth == 0) {
-            out << cur.trimmed();
-            cur.clear();
-        } else {
-            cur += c;
+        if (escape) { cur += c; escape = false; continue; }
+        if (c == QLatin1Char('\\')) { cur += c; escape = true; continue; }
+        if (c == QLatin1Char('"')) { inQuote = !inQuote; cur += c; continue; }
+        if (!inQuote) {
+            if (c == QLatin1Char('<')) ++depth;
+            else if (c == QLatin1Char('>')) --depth;
+            if (c == QLatin1Char(',') && depth == 0) {
+                out << cur.trimmed();
+                cur.clear();
+                continue;
+            }
         }
+        cur += c;
     }
     if (!cur.trimmed().isEmpty()) out << cur.trimmed();
     return out;
