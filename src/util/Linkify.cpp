@@ -302,13 +302,23 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     // Pass 1.5: parenthesized "label (URL)" — Gmail's text/plain
     // converter emits this shape for `<a href>text</a>` and for the
     // <a><img alt> case (alt becomes the visible label). Same render
-    // logic as the labeled pass.
+    // logic as the labeled pass, but ONLY when the label sits at
+    // the start of a line. Mid-prose parenthesized URLs ("I went to
+    // (https://x.com)") would otherwise greedily attach the
+    // preceding sentence as the "label" and turn casual writing into
+    // an unreadable mass of hyperlinks. Visible-button text in
+    // marketing emails always lands at column 0 (or right after a
+    // newline) because that's where Gmail's converter puts it.
     for (auto it = parenLinkRe().globalMatch(escaped); it.hasNext(); ) {
         const auto m = it.next();
         if (overlapsExisting(m.capturedStart(), m.capturedEnd())) continue;
         const QString label = m.captured(1).trimmed();
         if (label.isEmpty()) continue;
         if (label.contains(QStringLiteral("://"))) continue;
+        const auto labelStart = m.capturedStart();
+        const bool lineStart = labelStart == 0
+            || escaped[labelStart - 1] == QChar('\n');
+        if (!lineStart) continue;
         const QString url = m.captured(2);
         const QString html = (mode == LinkDisplayMode::FullUrl)
             ? QStringLiteral("%1 (<a href=\"%2\" title=\"%2\">%2</a>)").arg(label, url)
@@ -355,8 +365,8 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     out.append(escaped.mid(idx));
 
     // Pass 3: bare emails. Operate on the result so we don't double-wrap URLs.
-    QString final;
-    final.reserve(out.size() + 64);
+    QString result;
+    result.reserve(out.size() + 64);
     qsizetype mIdx = 0;
     auto mit = mailRe().globalMatch(out);
     while (mit.hasNext()) {
@@ -367,14 +377,14 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
                 .contains(QStringLiteral("href="))) {
             continue;
         }
-        final.append(out.mid(mIdx, m.capturedStart() - mIdx));
-        final.append(QStringLiteral("<a href=\"mailto:%1\">%1</a>").arg(m.captured(0)));
+        result.append(out.mid(mIdx, m.capturedStart() - mIdx));
+        result.append(QStringLiteral("<a href=\"mailto:%1\">%1</a>").arg(m.captured(0)));
         mIdx = m.capturedEnd();
     }
-    final.append(out.mid(mIdx));
+    result.append(out.mid(mIdx));
 
-    final.replace(QChar('\n'), QStringLiteral("<br>"));
-    return final;
+    result.replace(QChar('\n'), QStringLiteral("<br>"));
+    return result;
 }
 
 }  // namespace fc::util

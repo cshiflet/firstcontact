@@ -322,10 +322,17 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         return;
     }
 
+    // QPointer guard threaded through every async callback so a
+    // SyncService destroyed mid-flight (shutdown, sign-out) doesn't
+    // dereference a dead `d_->gmail` / `d_->busy` or emit signals
+    // on a freed object. The earlier topUpLabel guard was useless if
+    // the inner onOne / next captured `this` raw — fixed here.
+    QPointer<SyncService> self(this);
+
     auto remaining = std::make_shared<int>(ids.size());
     auto stored    = std::make_shared<int>(0);
 
-    auto onOne = [this, remaining, stored, newCount, isInitial,
+    auto onOne = [self, remaining, stored, newCount, isInitial,
                    done = std::move(done)]
         (fc::Message m, fc::api::ApiError err) {
         if (!err && !m.id.isEmpty()) {
@@ -334,11 +341,17 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         }
         if (--(*remaining) > 0) return;
         fc::cache::LabelRepository::recomputeCounts();
-        emit labelsUpdated();
-        emit messagesUpdated();
-        if (!isInitial && newCount > 0) emit newMessages(newCount);
-        d_->busy = false;
-        setState(State::Idle);
+        if (!self) {
+            // We were destroyed; still run the completion callback
+            // so the caller-side state (topUpFinished, etc.) settles.
+            if (done) done();
+            return;
+        }
+        emit self->labelsUpdated();
+        emit self->messagesUpdated();
+        if (!isInitial && newCount > 0) emit self->newMessages(newCount);
+        self->d_->busy = false;
+        self->setState(State::Idle);
         if (done) done();
     };
 
@@ -360,12 +373,13 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     // the std::function reaches refcount zero and is freed cleanly.
     auto next = std::make_shared<std::function<void()>>();
     std::weak_ptr<std::function<void()>> nextWeak = next;
-    *next = [this, queue, inflight, onOne, nextWeak]() {
+    *next = [self, queue, inflight, onOne, nextWeak]() {
+        if (!self) return;   // service died; abandon the queue
         while (*inflight < kSerialGetBatch && !queue->isEmpty()) {
             const QString id = queue->takeFirst();
             ++(*inflight);
             auto strong = nextWeak.lock();
-            d_->gmail->getMessage(id,
+            self->d_->gmail->getMessage(id,
                 [inflight, strong, onOne]
                 (fc::Message m, fc::api::ApiError err) {
                     --(*inflight);

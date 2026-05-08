@@ -165,7 +165,16 @@ void MessageListModel::refreshFromSource() {
     // / incremental sync surfaces without losing the user's scroll
     // window. The loadedRows fallback to pageSize() for the case where
     // we just initialized and rowCount is zero.
-    const int limit = qMax(static_cast<int>(rows_.size()), pageSize());
+    //
+    // Count only PARENT rows. expandedThreads_ preservation injects
+    // child rows into rows_ — the cache queries
+    // (listByLabel / listThreadsByLabel) return parents only, so a
+    // limit derived from rows_.size() that includes children would
+    // overshoot the actual cache content and the probe-based
+    // moreInCache decision would set cacheDrained_ true prematurely.
+    int parentRows = 0;
+    for (const auto& m : rows_) if (!m.isThreadChild) ++parentRows;
+    const int limit = qMax(parentRows, pageSize());
 
     // Probe one extra row beyond `limit` so we can DETECT whether the
     // cache has more than what we're about to show. Without the probe,

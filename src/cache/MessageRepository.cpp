@@ -518,9 +518,15 @@ void MessageRepository::applyLabelDiff(const QString& messageId,
     // produced an inbox where a row was sometimes shown as unread
     // even though UNREAD had just been removed, until the next
     // sync recomputed.
+    //
+    // If begin-transaction itself fails, abandon the operation
+    // rather than fall through to non-atomic writes — the whole
+    // point of the transaction was to avoid the half-committed
+    // state. The next user action will retry.
     if (!db.transaction()) {
         qWarning("applyLabelDiff: failed to begin txn: %s",
                  qUtf8Printable(db.lastError().text()));
+        return;
     }
 
     QSqlQuery ins(db);
