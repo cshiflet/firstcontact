@@ -158,12 +158,33 @@ void MessageListModel::refreshFromSource() {
     // we just initialized and rowCount is zero.
     const int limit = qMax(static_cast<int>(rows_.size()), pageSize());
 
+    // Probe one extra row beyond `limit` so we can DETECT whether the
+    // cache has more than what we're about to show. Without the probe,
+    // a refresh that lands rows_.size() == limit looks identical
+    // whether the cache has exactly `limit` rows total (drained) or
+    // millions more (lots more to scroll). That ambiguity led to a
+    // hot loop:
+    //   fetchMore drains -> cacheExhausted -> topUpLabel (no missing
+    //   because we've walked the whole label) -> messagesUpdated ->
+    //   refreshFromSource resets cacheDrained_ to false ->
+    //   fetchMore drains again -> ...
+    // The probe distinguishes the two cases cleanly: "rows.size() >
+    // limit" means there's more, "rows.size() == limit (or less)"
+    // means we've reached the end.
+    const int probe = limit + 1;
+
     std::vector<Message> rows;
+    bool moreInCache = false;
     if (source_ == Source::ByLabel) {
         rows = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, limit, 0, unreadOnly_)
-            : cache::MessageRepository::listByLabel(sourceParam_, limit, 0, unreadOnly_);
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, probe, 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(sourceParam_, probe, 0, unreadOnly_);
+        moreInCache = static_cast<int>(rows.size()) > limit;
+        if (moreInCache) rows.pop_back();   // we only show `limit` rows
     } else {
+        // Search has no offset support, so the probe doesn't apply —
+        // FTS top-K returns however many results match, capped at
+        // `limit`.
         rows = conversationView_
             ? cache::MessageRepository::searchFtsThreads(sourceParam_, limit)
             : cache::MessageRepository::searchFts(sourceParam_, limit);
@@ -172,8 +193,7 @@ void MessageListModel::refreshFromSource() {
     beginResetModel();
     rows_ = std::move(rows);
     expandedThreads_.clear();
-    cacheDrained_ = (source_ == Source::BySearch)
-        || static_cast<int>(rows_.size()) < limit;
+    cacheDrained_ = (source_ == Source::BySearch) || !moreInCache;
     endResetModel();
 }
 

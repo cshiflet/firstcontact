@@ -323,9 +323,16 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // Strict and proxy modes share LocalHtmlServer holders so a re-click
     // reuses the same server / URL token.
     const auto previewMode = Preferences::htmlPreview();
+    // Buttons go on every card that has HTML to offer, regardless of
+    // initial expand state — the show/hide tracks the body so a
+    // collapsed card doesn't render orphaned button strips, and an
+    // expanded card (initial OR via the Show toggle) reveals them
+    // automatically. The previous gate also required initiallyExpanded
+    // which made the buttons disappear when the user activated a
+    // child message in conversation view that happened not to be the
+    // latest.
     const bool offerBrowserButtons =
-        initiallyExpanded
-        && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
+        (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
         && previewMode != Preferences::HtmlPreview::Disabled;
     auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
     auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
@@ -334,11 +341,16 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         : m.bodyHtml;
     const QString threadIdForGmail = m.threadId;
 
-    auto buildBrowserRow = [&]() -> QHBoxLayout* {
-        auto* row = new QHBoxLayout;
+    auto buildBrowserRow = [&]() -> QWidget* {
+        // Wrap the QHBoxLayout in a QWidget so the toggle below can
+        // show/hide the whole strip in one call. Layouts can't be
+        // hidden directly without iterating their children.
+        auto* host = new QWidget(card);
+        auto* row  = new QHBoxLayout(host);
+        row->setContentsMargins(0, 0, 0, 0);
         row->addStretch(1);
 
-        auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), card);
+        auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), host);
         strictBtn->setObjectName(QStringLiteral("link"));
         strictBtn->setCursor(Qt::PointingHandCursor);
         strictBtn->setToolTip(QObject::tr(
@@ -452,11 +464,14 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                 fc::util::launchBrowser(QUrl(url));
             });
 
-        return row;
+        return host;
     };
 
+    QWidget* topBrowserRow = nullptr;
     if (offerBrowserButtons) {
-        cardLayout->addLayout(buildBrowserRow());
+        topBrowserRow = buildBrowserRow();
+        topBrowserRow->setVisible(initiallyExpanded);
+        cardLayout->addWidget(topBrowserRow);
     }
 
     // No vertical stretch: AutoSizeTextBrowser reports the exact height
@@ -551,8 +566,11 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // row so the link is reachable when the user is at the bottom of a
     // long message. Same shared holders → same servers → same URL/token
     // when re-clicked from either copy.
+    QWidget* bottomBrowserRow = nullptr;
     if (offerBrowserButtons) {
-        cardLayout->addLayout(buildBrowserRow());
+        bottomBrowserRow = buildBrowserRow();
+        bottomBrowserRow->setVisible(initiallyExpanded);
+        cardLayout->addWidget(bottomBrowserRow);
     }
 
     if (!initiallyExpanded) {
@@ -567,9 +585,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         toggle->setCursor(Qt::PointingHandCursor);
         cardLayout->addWidget(toggle, 0, Qt::AlignRight);
         QObject::connect(toggle, &QPushButton::clicked,
-                         body, [body, header, m, toggle]() {
+                         body, [body, header, m, toggle,
+                                 topBrowserRow, bottomBrowserRow]() {
             const bool now = !body->isVisible();
             body->setVisible(now);
+            if (topBrowserRow)    topBrowserRow->setVisible(now);
+            if (bottomBrowserRow) bottomBrowserRow->setVisible(now);
             header->setText(headerHtml(m, /*full=*/now));
             toggle->setText(now ? QStringLiteral("Hide")
                                 : QStringLiteral("Show"));

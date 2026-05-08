@@ -121,6 +121,15 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     connect(scaleBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [scaleBox](int idx) {
                 Preferences::setUiFontScale(scaleBox->itemData(idx).toDouble());
+                // Re-apply the active theme — Theme::loadStylesheet
+                // bakes the scale into every "font-size" QSS rule at
+                // load time, so re-running it picks up the new value
+                // without requiring the user to restart. Widget
+                // METRICS (toolbar height, list row height) only
+                // recompute on the next launch though, so the hint
+                // below still calls a restart out for the cleanest
+                // result.
+                Theme::apply(Theme::currentMode());
             });
     form->addRow(tr("Text scale:"), scaleBox);
 
