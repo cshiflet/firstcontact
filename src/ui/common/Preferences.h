@@ -119,6 +119,16 @@ public:
     static void       setQuoteStyle(QuoteStyle s);
     static QString    quoteStyleToString(QuoteStyle s);
     static QuoteStyle quoteStyleFromString(const QString& s);
+
+    // ----------------------------------------------------------------
+    // Filter state — persisted across sessions so the user's last
+    // toggle survives a restart (matches Gmail web's behavior).
+
+    // When true, every label's message list is filtered down to
+    // messages currently carrying UNREAD (or in conversation view,
+    // threads with at least one unread message). Off by default.
+    static bool unreadOnly();
+    static void setUnreadOnly(bool on);
 };
 
 }  // namespace fc::ui

@@ -239,17 +239,30 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
 }
 
 std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
-                                                        int limit, int offset) {
+                                                        int limit, int offset,
+                                                        bool unreadOnly) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
 
     QSqlQuery q(db);
-    q.prepare(QStringLiteral(
-        "SELECT m.* FROM messages m "
-        "JOIN message_labels ml ON ml.message_id = m.id "
-        "WHERE ml.label_id = :l "
-        "ORDER BY m.internal_date DESC "
-        "LIMIT :lim OFFSET :off"));
+    // Two SQL variants because SQLite can't optimize a `:flag = 0 OR
+    // m.is_unread = 1` predicate as well as a literal AND, and the
+    // unread filter needs to make use of the is_unread column index.
+    if (unreadOnly) {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "JOIN message_labels ml ON ml.message_id = m.id "
+            "WHERE ml.label_id = :l AND m.is_unread = 1 "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    } else {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "JOIN message_labels ml ON ml.message_id = m.id "
+            "WHERE ml.label_id = :l "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    }
     q.bindValue(QStringLiteral(":l"),   labelId);
     q.bindValue(QStringLiteral(":lim"), limit);
     q.bindValue(QStringLiteral(":off"), offset);
@@ -311,17 +324,48 @@ void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
 }  // namespace
 
 std::vector<fc::Message> MessageRepository::listThreadsByLabel(
-        const QString& labelId, int limit, int offset) {
+        const QString& labelId, int limit, int offset, bool unreadOnly) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
 
-    QSqlQuery q(db);
-    q.prepare(buildThreadRollupSql(QStringLiteral(
+    // Wrap the standard rollup in an extra select that filters the
+    // already-aggregated t_unread column when the caller wants
+    // unread-only. Doing the filter here (instead of pushing it into
+    // the inner WHERE) keeps the thread aggregates faithful: every
+    // message in the thread still contributes to t_count / t_starred
+    // / t_attach, only the row visibility changes.
+    QString sql = buildThreadRollupSql(QStringLiteral(
         "JOIN message_labels ml ON ml.message_id = m.id "
-        "WHERE ml.label_id = :l")));
-    q.bindValue(QStringLiteral(":l"),   labelId);
-    q.bindValue(QStringLiteral(":lim"), limit);
-    q.bindValue(QStringLiteral(":off"), offset);
+        "WHERE ml.label_id = :l"));
+    if (unreadOnly) {
+        // buildThreadRollupSql already terminates with "ORDER BY …
+        // LIMIT … OFFSET …" — we can't just append another WHERE.
+        // Wrap the whole thing so the outer SELECT can apply the
+        // filter. The wrap pushes the LIMIT/OFFSET binding to the
+        // outer query; the inner LIMIT becomes a (very large)
+        // upper bound to cap resource use on huge mailboxes.
+        sql = QStringLiteral(
+            "SELECT * FROM (%1) WHERE t_unread > 0 "
+            "ORDER BY internal_date DESC "
+            "LIMIT :outerLim OFFSET :outerOff").arg(sql);
+    }
+
+    QSqlQuery q(db);
+    q.prepare(sql);
+    q.bindValue(QStringLiteral(":l"), labelId);
+    if (unreadOnly) {
+        // Inner LIMIT/OFFSET: load enough rows to filter from. The
+        // outer SELECT then applies the user-visible LIMIT/OFFSET.
+        // 10× headroom is plenty unless 90% of a mailbox is read,
+        // in which case a follow-up query covers the gap.
+        q.bindValue(QStringLiteral(":lim"),       qMax(limit * 10, 200));
+        q.bindValue(QStringLiteral(":off"),       0);
+        q.bindValue(QStringLiteral(":outerLim"),  limit);
+        q.bindValue(QStringLiteral(":outerOff"),  offset);
+    } else {
+        q.bindValue(QStringLiteral(":lim"), limit);
+        q.bindValue(QStringLiteral(":off"), offset);
+    }
     if (!q.exec()) {
         qWarning("listThreadsByLabel: %s",
                  qUtf8Printable(q.lastError().text()));

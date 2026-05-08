@@ -64,7 +64,12 @@ public:
     // first cache page for the label; subsequent fetchMore calls walk
     // the cache forward. setSearchSource pins to FTS5 search results
     // (no pagination — the FTS API is top-K only).
-    void setLabelSource(const QString& labelId, bool conversationView);
+    //
+    // unreadOnly applies to the label source: when true, only messages
+    // currently carrying UNREAD (or threads with at least one unread
+    // message in conversation view) appear in the listing.
+    void setLabelSource(const QString& labelId, bool conversationView,
+                         bool unreadOnly = false);
     void setSearchSource(const QString& query, bool conversationView);
 
     // Re-queries the active source for offset=0, limit=loadedRows — used by
@@ -111,6 +116,7 @@ private:
     Source  source_           = Source::None;
     QString sourceParam_;     // labelId or search query
     bool    conversationView_ = true;
+    bool    unreadOnly_       = false;
     bool    cacheDrained_     = false;   // last fetchMore returned 0
 };
 

@@ -86,8 +86,8 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
 
     const int offset = static_cast<int>(rows_.size());
     auto more = conversationView_
-        ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset)
-        : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset);
+        ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset, unreadOnly_)
+        : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset, unreadOnly_);
 
     if (more.empty()) {
         cacheDrained_ = true;
@@ -117,18 +117,28 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
 
 void MessageListModel::resumeAfterTopUp() {
     // Top-up just finished — there should be more rows in the cache
-    // below what we already have loaded. Clear the drain flag and push
-    // a fetchMore explicitly: Qt's view doesn't poll canFetchMore on
-    // its own, so flipping the flag isn't enough.
+    // below what we already have loaded. Clear the drain flag and
+    // drain the cache into the model in 100-row chunks until we hit
+    // either a short page (cache exhausted again — top-up will fire
+    // for the next page if user scrolls) or a sane cap, so a single
+    // server round-trip's worth of fresh rows lands in the view
+    // without forcing the user to scroll-poke for each chunk.
     if (source_ != Source::ByLabel) return;
     cacheDrained_ = false;
-    fetchMore({});
+    constexpr int kMaxChunksPerResume = 6;   // up to 600 rows per top-up
+    for (int i = 0; i < kMaxChunksPerResume && !cacheDrained_; ++i) {
+        const int before = static_cast<int>(rows_.size());
+        fetchMore({});
+        if (static_cast<int>(rows_.size()) == before) break;  // no progress
+    }
 }
 
-void MessageListModel::setLabelSource(const QString& labelId, bool conversationView) {
+void MessageListModel::setLabelSource(const QString& labelId, bool conversationView,
+                                       bool unreadOnly) {
     source_           = Source::ByLabel;
     sourceParam_      = labelId;
     conversationView_ = conversationView;
+    unreadOnly_       = unreadOnly;
     loadFirstPage();
 }
 
@@ -136,6 +146,7 @@ void MessageListModel::setSearchSource(const QString& query, bool conversationVi
     source_           = Source::BySearch;
     sourceParam_      = query;
     conversationView_ = conversationView;
+    unreadOnly_       = false;   // search results aren't unread-filtered
     loadFirstPage();
 }
 
@@ -150,8 +161,8 @@ void MessageListModel::refreshFromSource() {
     std::vector<Message> rows;
     if (source_ == Source::ByLabel) {
         rows = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, limit, 0)
-            : cache::MessageRepository::listByLabel(sourceParam_, limit, 0);
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, limit, 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(sourceParam_, limit, 0, unreadOnly_);
     } else {
         rows = conversationView_
             ? cache::MessageRepository::searchFtsThreads(sourceParam_, limit)
@@ -170,8 +181,8 @@ void MessageListModel::loadFirstPage() {
     std::vector<Message> rows;
     if (source_ == Source::ByLabel) {
         rows = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), 0)
-            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), 0);
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), 0, unreadOnly_);
     } else if (source_ == Source::BySearch) {
         rows = conversationView_
             ? cache::MessageRepository::searchFtsThreads(sourceParam_, pageSize())

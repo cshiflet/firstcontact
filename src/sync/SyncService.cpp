@@ -216,8 +216,10 @@ QString topUpTokenKey(const QString& labelId) {
 
 // Marks the label as fully walked once the server returns no more
 // pages, so the next click resets to the start instead of yielding
-// nothing.
-constexpr int kTopUpPageSize = 200;
+// nothing. 500 is the Gmail API's per-page maximum — we use the
+// largest single page to minimise the number of round-trips a user
+// has to scroll-trigger before a deep label finishes catching up.
+constexpr int kTopUpPageSize = 500;
 
 }  // namespace
 

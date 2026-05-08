@@ -19,8 +19,12 @@ public:
 
     // Loads the inbox-style listing for a label, ordered by internalDate desc.
     // Pulls metadata + snippet only — body is loaded on demand by `byId`.
+    // When `unreadOnly` is true, the listing is filtered to messages
+    // currently carrying the UNREAD label (mirrors Gmail web's filter
+    // chip).
     static std::vector<fc::Message> listByLabel(const QString& labelId,
-                                                int limit, int offset);
+                                                int limit, int offset,
+                                                bool unreadOnly = false);
 
     // Conversation-view variant: groups messages by thread_id and returns
     // one row per thread, hydrated with the LATEST message's headers plus
@@ -28,8 +32,10 @@ public:
     // threadHasStarred, threadHasAttachment). The row's `id` is the latest
     // message's id so opening + marking-read still work the same way.
     // Used when Preferences::conversationView() is true.
+    // unreadOnly filters to threads with at least one unread message.
     static std::vector<fc::Message> listThreadsByLabel(const QString& labelId,
-                                                       int limit, int offset);
+                                                       int limit, int offset,
+                                                       bool unreadOnly = false);
 
     // Full-text search via FTS5; results ordered by rank then internalDate.
     // The query is normalised internally to a safe FTS5 expression so callers

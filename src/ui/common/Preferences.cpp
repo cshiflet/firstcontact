@@ -19,6 +19,7 @@ constexpr char kDefaultImageProxy[]   = "https://wsrv.nl/?url={url}";
 constexpr char kSignatureKey[]        = "compose/signature";
 constexpr char kReplyAboveKey[]       = "compose/replyAboveOriginal";
 constexpr char kQuoteStyleKey[]       = "compose/quoteStyle";
+constexpr char kUnreadOnlyKey[]       = "filter/unreadOnly";
 }
 
 const char* Preferences::htmlPreviewKey() { return kKey; }
@@ -195,6 +196,17 @@ Preferences::QuoteStyle Preferences::quoteStyle() {
 void Preferences::setQuoteStyle(QuoteStyle q) {
     QSettings s;
     s.setValue(QLatin1String(kQuoteStyleKey), quoteStyleToString(q));
+    s.sync();
+}
+
+bool Preferences::unreadOnly() {
+    QSettings s;
+    return s.value(QLatin1String(kUnreadOnlyKey), false).toBool();
+}
+
+void Preferences::setUnreadOnly(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kUnreadOnlyKey), on);
     s.sync();
 }
 

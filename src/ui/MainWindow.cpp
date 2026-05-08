@@ -270,6 +270,29 @@ void MainWindow::buildToolBar() {
                                  QStringLiteral("b"));
     auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2,
                                  QStringLiteral("#"));
+
+    // Filter chip: All / Unread-only. Checkable; persists in
+    // Preferences (matches Gmail web's filter-chip behaviour). Lives
+    // between the action cluster and the search bar so it reads as
+    // "what's IN this view" rather than as an action on the
+    // selection. Lower priority so it falls into the hamburger menu
+    // sooner than archive / delete on narrow windows.
+    auto* unreadAct = tb->addAction(IconLoader::themed(
+                                         QStringLiteral("mark-read.svg")),
+                                     tr("Unread only"));
+    unreadAct->setCheckable(true);
+    unreadAct->setChecked(Preferences::unreadOnly());
+    unreadAct->setToolTip(tr(
+        "Filter the message list to unread messages (or threads with "
+        "any unread message in conversation view)."));
+    iconActions_.append({unreadAct, QStringLiteral("mark-read.svg")});
+    overflowEntries_.push_back({unreadAct, /*before=*/nullptr,
+                                  tr("Unread only"), 2, {}, {}});
+    connect(unreadAct, &QAction::toggled, this, [this](bool on) {
+        Preferences::setUnreadOnly(on);
+        reloadCurrentLabel();
+    });
+
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -1041,7 +1064,8 @@ void MainWindow::reloadCurrentLabel() {
     const QString preservedThreadId = currentMessage_.threadId;
 
     if (currentSearchQuery_.isEmpty()) {
-        listModel_->setLabelSource(currentLabelId_, conv);
+        listModel_->setLabelSource(currentLabelId_, conv,
+                                    Preferences::unreadOnly());
     } else {
         listModel_->setSearchSource(currentSearchQuery_, conv);
     }
