@@ -32,6 +32,18 @@ const QRegularExpression& labeledRe() {
     return re;
 }
 
+// Markdown-style "[label](https://url)". Some senders pre-convert
+// HTML to markdown for the text/plain alternative — Amazon
+// transactional mail is a notable example. Without a dedicated
+// pattern the bare-URL pass would only linkify the URL inside the
+// parens, leaving "[label](" and ")" as visible text noise.
+const QRegularExpression& markdownLinkRe() {
+    static const QRegularExpression re(
+        QStringLiteral(R"(\[([^\]\n]{1,80}?)\]\((https?://[^\)\s]+)\))"),
+        QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
 const QRegularExpression& mailRe() {
     static const QRegularExpression re(
         QStringLiteral(R"(([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}))"));
@@ -142,7 +154,13 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     // into the actual Unicode character instead of being shown literally.
     QString escaped = decodeEntitiesInline(plain).toHtmlEscaped();
 
-    // Two-pass linkification, modelled on baremail-terminal:
+    // Three-pass linkification, modelled on baremail-terminal with
+    // an extra leading pass for markdown-style links:
+    //   Pass 0 finds "[label](URL)" markdown patterns. Some senders
+    //          pre-convert HTML to markdown for the text/plain part
+    //          — without a dedicated pass the bare-URL pass would
+    //          linkify only the URL inside the parens and leave the
+    //          markdown brackets as visible text noise.
     //   Pass 1 finds "label [URL]" patterns. In LinkDisplayMode::Labeled
     //          (default) the label alone is the visible click target;
     //          in LinkDisplayMode::FullUrl both the label and URL are
@@ -161,9 +179,30 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
     };
     QList<Replacement> reps;
 
-    // Pass 1: labeled.
+    auto overlapsExisting = [&reps](qsizetype start, qsizetype end) {
+        for (const auto& r : reps) {
+            if (start < r.end && end > r.start) return true;
+        }
+        return false;
+    };
+
+    // Pass 0: markdown-style "[label](URL)".
+    for (auto it = markdownLinkRe().globalMatch(escaped); it.hasNext(); ) {
+        const auto m = it.next();
+        const QString label = m.captured(1).trimmed();
+        if (label.isEmpty()) continue;
+        if (label.contains(QStringLiteral("://"))) continue;
+        const QString url = m.captured(2);
+        const QString html = (mode == LinkDisplayMode::FullUrl)
+            ? QStringLiteral("[%1](<a href=\"%2\" title=\"%2\">%2</a>)").arg(label, url)
+            : QStringLiteral("<a href=\"%1\" title=\"%1\">%2</a>").arg(url, label);
+        reps.append({m.capturedStart(), m.capturedEnd(), html});
+    }
+
+    // Pass 1: labeled "label [URL]".
     for (auto it = labeledRe().globalMatch(escaped); it.hasNext(); ) {
         const auto m = it.next();
+        if (overlapsExisting(m.capturedStart(), m.capturedEnd())) continue;
         const QString label = m.captured(1).trimmed();
         if (label.isEmpty()) continue;
         // Discard if the "label" itself looks like a URL — that's the
@@ -177,16 +216,10 @@ QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
         reps.append({m.capturedStart(), m.capturedEnd(), html});
     }
 
-    // Pass 2: bare URLs not overlapping a Pass 1 match.
+    // Pass 2: bare URLs not overlapping a Pass 0 / Pass 1 match.
     for (auto it = urlRe().globalMatch(escaped); it.hasNext(); ) {
         const auto m = it.next();
-        bool overlap = false;
-        for (const auto& r : reps) {
-            if (m.capturedStart() < r.end && m.capturedEnd() > r.start) {
-                overlap = true; break;
-            }
-        }
-        if (overlap) continue;
+        if (overlapsExisting(m.capturedStart(), m.capturedEnd())) continue;
 
         QString url = trimTrailingPunct(m.captured(0));
         if (url.isEmpty()) continue;

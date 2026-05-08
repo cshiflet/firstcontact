@@ -62,6 +62,22 @@ private slots:
         QVERIFY(!out.contains(QStringLiteral(">%1<").arg(url)));   // not visibly full
     }
 
+    void rendersMarkdownLinkAsLabelOnly() {
+        // Some senders pre-convert HTML→markdown for the text/plain
+        // alternative — Amazon transactional mail in particular emits
+        // `[label](url)`. Without dedicated handling the bare-URL
+        // pass would only linkify the URL inside the parens and leave
+        // the markdown brackets as visible text.
+        const auto out = fc::util::linkifyPlainText(
+            QStringLiteral("[Privacy Notice](https://amazon.com/help/privacy) follows."));
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://amazon.com/help/privacy\" "
+            "title=\"https://amazon.com/help/privacy\">Privacy Notice</a>")));
+        // Markdown brackets / parens must NOT remain in the output.
+        QVERIFY(!out.contains(QStringLiteral("[Privacy Notice]")));
+        QVERIFY(!out.contains(QStringLiteral("(https://amazon.com")));
+    }
+
     void doesNotDoubleWrapWhenLabelLooksLikeUrl() {
         // "https://a [https://b]" should leave each URL standalone — no
         // labeled-link match where the label is itself a URL.
