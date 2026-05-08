@@ -90,29 +90,38 @@ ThemeColors themeColors() {
 QString headerHtml(const fc::Message& m, bool full) {
     const ThemeColors c = themeColors();
     const QString subject = util::decodeHtmlEntities(m.subject);
+    // Scale the inline pt sizes by the user's UI scale preference —
+    // these are inline HTML styles, NOT QSS rules, so the regex pass
+    // in Theme::loadStylesheet doesn't reach them.
+    const double scale = Preferences::uiFontScale();
+    auto pt = [scale](int n) { return qMax(1, qRound(n * scale)); };
     QString h = QStringLiteral(
-        "<div style='font-weight:600; font-size:13pt; line-height:1.3; color:%1;'>%2</div>"
-        "<div style='color:%3; font-size:10pt; margin-top:2px;'>"
-        "<span style='font-weight:500; color:%1;'>%4</span> &nbsp;·&nbsp; %5</div>")
-        .arg(c.primary,
-             subject.isEmpty()
+        "<div style='font-weight:600; font-size:%1pt; line-height:1.3; color:%2;'>%3</div>"
+        "<div style='color:%4; font-size:%5pt; margin-top:2px;'>"
+        "<span style='font-weight:500; color:%2;'>%6</span> &nbsp;·&nbsp; %7</div>")
+        .arg(pt(13))
+        .arg(c.primary)
+        .arg(subject.isEmpty()
                  ? QStringLiteral("<i>(no subject)</i>")
-                 : subject.toHtmlEscaped(),
-             c.secondary,
-             fromDisplay(m),
-             formatDate(m.internalDate));
+                 : subject.toHtmlEscaped())
+        .arg(c.secondary)
+        .arg(pt(10))
+        .arg(fromDisplay(m))
+        .arg(formatDate(m.internalDate));
     if (full) {
         if (!m.toAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:%1; font-size:9pt; margin-top:4px;'>"
-                                "<b>to</b> %2</div>")
-                    .arg(c.secondary,
-                         m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:%2pt; margin-top:4px;'>"
+                                "<b>to</b> %3</div>")
+                    .arg(c.secondary)
+                    .arg(pt(9))
+                    .arg(m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
         if (!m.ccAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:%1; font-size:9pt;'>"
-                                "<b>cc</b> %2</div>")
-                    .arg(c.secondary,
-                         m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:%2pt;'>"
+                                "<b>cc</b> %3</div>")
+                    .arg(c.secondary)
+                    .arg(pt(9))
+                    .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
     }
     return h;
@@ -323,17 +332,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // Strict and proxy modes share LocalHtmlServer holders so a re-click
     // reuses the same server / URL token.
     const auto previewMode = Preferences::htmlPreview();
-    // Buttons go on every card that has HTML to offer, regardless of
-    // initial expand state — the show/hide tracks the body so a
-    // collapsed card doesn't render orphaned button strips, and an
-    // expanded card (initial OR via the Show toggle) reveals them
-    // automatically. The previous gate also required initiallyExpanded
-    // which made the buttons disappear when the user activated a
-    // child message in conversation view that happened not to be the
-    // latest.
+    // Show the buttons whenever HTML preview is enabled at all. The
+    // strict / images openers degrade to a "(no HTML body cached)"
+    // placeholder if the message turns out to be pure plain text, but
+    // "Open in Gmail" is universally useful — opening the thread on
+    // mail.google.com works for ANY message — so it's worth always
+    // having the row reachable. Previously gated on bodyHtml /
+    // bodyHtmlPresent, which silently hid the row on cached rows
+    // missing those flags (older caches, lazy-fetched HTML, etc.).
     const bool offerBrowserButtons =
-        (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
-        && previewMode != Preferences::HtmlPreview::Disabled;
+        previewMode != Preferences::HtmlPreview::Disabled;
+    const bool hasHtml = !m.bodyHtml.isEmpty() || m.bodyHtmlPresent;
     auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
     auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
     auto htmlForServer = m.bodyHtml.isEmpty()
@@ -353,19 +362,27 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), host);
         strictBtn->setObjectName(QStringLiteral("link"));
         strictBtn->setCursor(Qt::PointingHandCursor);
-        strictBtn->setToolTip(QObject::tr(
-            "Render in your system browser. Strict CSP — no remote "
-            "images, no scripts, no iframes."));
+        strictBtn->setToolTip(hasHtml
+            ? QObject::tr(
+                "Render in your system browser. Strict CSP — no remote "
+                "images, no scripts, no iframes.")
+            : QObject::tr(
+                "Plain-text message — no HTML body to render."));
+        strictBtn->setEnabled(hasHtml);
         row->addWidget(strictBtn);
 
         auto* imagesBtn = new QPushButton(QObject::tr("Open with images"), card);
         imagesBtn->setObjectName(QStringLiteral("link"));
         imagesBtn->setCursor(Qt::PointingHandCursor);
-        imagesBtn->setToolTip(QObject::tr(
-            "Same as 'Open in browser' but image URLs are routed through "
-            "the configured image proxy (Settings → HTML preview) so the "
-            "marketer's CDN never sees your IP. Scripts / iframes / forms "
-            "still blocked."));
+        imagesBtn->setToolTip(hasHtml
+            ? QObject::tr(
+                "Same as 'Open in browser' but image URLs are routed through "
+                "the configured image proxy (Settings → HTML preview) so the "
+                "marketer's CDN never sees your IP. Scripts / iframes / forms "
+                "still blocked.")
+            : QObject::tr(
+                "Plain-text message — no HTML body to render."));
+        imagesBtn->setEnabled(hasHtml);
         row->addWidget(imagesBtn);
 
         auto* gmailBtn = new QPushButton(QObject::tr("Open in Gmail"), card);
