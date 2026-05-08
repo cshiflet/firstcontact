@@ -44,6 +44,12 @@ public:
     void showEmpty(const QString& reason = {});
 
 signals:
+    // Fired when the mouse moves over (or off) a link inside any
+    // message body in the pane. Slot owner typically pipes this to
+    // QStatusBar::showMessage so the user can see the link target
+    // before clicking. An empty URL means the cursor left the link.
+    void urlHovered(const QString& url);
+
     // Fired on left-click of an attachment chip. Slot owner writes the
     // bytes to a per-session temp directory and hands the path to
     // QDesktopServices::openUrl — the file is NOT recorded as a permanent

@@ -561,6 +561,19 @@ void MainWindow::wireSignals() {
             this,    &MainWindow::onSaveAsAttachment);
     connect(reader_, &ReaderPane::downloadAllRequested,
             this,    &MainWindow::onDownloadAllAttachments);
+    // Hover a link in any message body → show its target in the
+    // status bar; the existing messageChanged restorer puts the
+    // signed-in-as / sync-progress baseline back when the cursor
+    // leaves the link (we pass a 0-timeout temporary message which
+    // clears as soon as we feed it an empty string).
+    connect(reader_, &ReaderPane::urlHovered, this,
+            [this](const QString& url) {
+                if (url.isEmpty()) {
+                    statusBar()->clearMessage();
+                } else {
+                    statusBar()->showMessage(url);
+                }
+            });
 
     connect(sidebar_, &SidebarWidget::labelSelected,
             this,     &MainWindow::onLabelSelected);

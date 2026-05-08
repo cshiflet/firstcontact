@@ -292,6 +292,16 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                          if (!clicked.isValid()) return;
                          fc::util::launchBrowser(clicked);
                      });
+    // Forward link-hover events up so MainWindow can show the URL
+    // in the status bar — QTextBrowser's `highlighted` fires with
+    // the link's URL on enter and an empty/invalid QUrl on leave.
+    // We pass the link target through unchanged; the title="…"
+    // attribute we attached in linkifyPlainText is what carries
+    // the real destination for "label [URL]" patterns.
+    QObject::connect(body, &QTextBrowser::highlighted, this,
+                     [this](const QUrl& u) {
+                         emit urlHovered(u.isValid() ? u.toString() : QString());
+                     });
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
     body->setStyleSheet(QStringLiteral("background: transparent;"));
