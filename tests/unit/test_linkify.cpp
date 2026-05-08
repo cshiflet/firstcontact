@@ -9,7 +9,7 @@ private slots:
     void wrapsHttpUrl() {
         const auto out = fc::util::linkifyPlainText(
             QStringLiteral("see https://example.com/x"));
-        QVERIFY(out.contains(QStringLiteral("<a href=\"https://example.com/x\">")));
+        QVERIFY(out.contains(QStringLiteral("href=\"https://example.com/x\"")));
     }
 
     void trimsTrailingPunctuation() {
@@ -24,6 +24,57 @@ private slots:
             QStringLiteral("ping a@b.test for details"));
         QVERIFY(out.contains(QStringLiteral("<a href=\"mailto:a@b.test\">")));
     }
+
+    // -------------------------------------------------------------- New behaviour
+
+    void rendersLabeledLinkAsLabelOnly() {
+        // baremail-terminal style: `text [https://url]` from Gmail's
+        // text/plain converter becomes <a href="url" title="url">text</a>
+        // — the URL is hidden behind a hover-tooltip / click instead of
+        // dominating the prose.
+        const auto out = fc::util::linkifyPlainText(
+            QStringLiteral("Click here [https://example.com/x] now."));
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://example.com/x\" title=\"https://example.com/x\">"
+            "Click here</a>")));
+        // The bracketed URL must NOT also appear as visible text.
+        QVERIFY(!out.contains(QStringLiteral("[https://example.com/x]")));
+    }
+
+    void labeledLinkInsideSentence() {
+        const auto out = fc::util::linkifyPlainText(
+            QStringLiteral("Read the docs [https://docs.example.com/page] for more."));
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://docs.example.com/page\" "
+            "title=\"https://docs.example.com/page\">Read the docs</a>")));
+    }
+
+    void truncatesLongBareUrl() {
+        const QString url = QStringLiteral(
+            "https://example.com/very/long/path/that/keeps/going/"
+            "and/going/until/it/exceeds/the/display/budget/leaf");
+        QVERIFY(url.size() > 60);
+        const auto out = fc::util::linkifyPlainText(url);
+        // Click target stays the full URL.
+        QVERIFY(out.contains(QStringLiteral("href=\"%1\"").arg(url)));
+        // But the visible text gets the start…end truncation.
+        QVERIFY(out.contains(QChar(0x2026)));   // ellipsis
+        QVERIFY(!out.contains(QStringLiteral(">%1<").arg(url)));   // not visibly full
+    }
+
+    void doesNotDoubleWrapWhenLabelLooksLikeUrl() {
+        // "https://a [https://b]" should leave each URL standalone — no
+        // labeled-link match where the label is itself a URL.
+        const auto out = fc::util::linkifyPlainText(
+            QStringLiteral("https://a.test [https://b.test]"));
+        // Both URLs ended up linkified (somewhere). The exact rendering
+        // depends on the bracket trim, but neither URL should appear as
+        // a label of the other.
+        QVERIFY(out.contains(QStringLiteral("href=\"https://a.test\"")));
+        QVERIFY(out.contains(QStringLiteral("href=\"https://b.test\"")));
+    }
+
+    // -------------------------------------------------------------- Entities
 
     void decodesNumericEntityReferences() {
         // Real-world bug: Gmail sometimes serves text/plain bodies that
