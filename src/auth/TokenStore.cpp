@@ -36,7 +36,20 @@ void TokenStore::load(Callback cb) {
             cb(false, {}, r->errorString());
             return;
         }
-        const auto doc = QJsonDocument::fromJson(r->textData().toUtf8());
+        QJsonParseError parseErr;
+        const auto doc = QJsonDocument::fromJson(r->textData().toUtf8(), &parseErr);
+        if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
+            // Treat parse failure as a real error rather than as
+            // "no credentials" — the latter would silently push the
+            // user back through the consent screen instead of
+            // surfacing the corruption. Caller flow (UI) shows
+            // a sign-in-failed banner so the user knows something
+            // is wrong with their keychain entry.
+            cb(false, {},
+               QStringLiteral("token store payload is not valid JSON: ") +
+                   parseErr.errorString());
+            return;
+        }
         const auto o = doc.object();
         Tokens t;
         t.accessToken    = o.value(QStringLiteral("access_token")).toString();

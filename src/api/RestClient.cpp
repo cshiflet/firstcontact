@@ -101,8 +101,23 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
         // SessionTransfer::record.
         SessionTransfer::instance().record(data.size(), body.size());
 
+        // Idempotent verbs are safe to retry blindly — the server
+        // can absorb duplicates without observable side effects.
+        // POST / PATCH / DELETE are NOT — retrying a transport-
+        // failed POST /messages/send could double-send mail (the
+        // server may have processed the request fully, just lost
+        // the response). For those we retry ONLY on explicit 429
+        // (server said "didn't process, try again") — never on
+        // transport or 5xx where the outcome is ambiguous.
+        const bool idempotent = (verb == Verb::Get || verb == Verb::Put);
+
         if (nerr != QNetworkReply::NoError && status == 0) {
             // Transport-level failure (no HTTP response).
+            if (!idempotent) {
+                cb({}, ApiError{ApiErrorKind::Network, 0,
+                                QStringLiteral("network error (not retried — non-idempotent verb)"), {}});
+                return;
+            }
             const qint64 delay = RateLimiter::nextDelayMs(attempt);
             if (delay > 0) {
                 QTimer::singleShot(int(delay), this,
@@ -131,7 +146,10 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
             return;
         }
 
-        if (err.kind == ApiErrorKind::RateLimited || err.kind == ApiErrorKind::Server) {
+        const bool retryableServerStatus =
+            err.kind == ApiErrorKind::RateLimited
+            || (err.kind == ApiErrorKind::Server && idempotent);
+        if (retryableServerStatus) {
             const qint64 delay = RateLimiter::nextDelayMs(attempt, retryAfter);
             if (delay > 0) {
                 QTimer::singleShot(int(delay), this,
