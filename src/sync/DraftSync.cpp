@@ -53,10 +53,15 @@ void DraftSync::flush() {
     if (drafts.empty()) return;
     d_->busy = true;
 
+    // Single QPointer guard reused across all in-flight callbacks
+    // for this flush. onDone previously captured raw `this`, which
+    // would UAF if the worker was destroyed between dispatch and
+    // every callback resolving (typical at sign-out or shutdown).
+    QPointer<DraftSync> self(this);
     auto remaining = std::make_shared<int>(int(drafts.size()));
-    auto onDone = [this, remaining]() {
+    auto onDone = [self, remaining]() {
         if (--(*remaining) > 0) return;
-        d_->busy = false;
+        if (self) self->d_->busy = false;
     };
 
     for (const auto& draft : drafts) {
@@ -64,7 +69,6 @@ void DraftSync::flush() {
         const QString localId = draft.id;
 
         if (draft.gmailDraftId.isEmpty()) {
-            QPointer<DraftSync> self(this);
             d_->gmail->createDraft(rfc, draft.threadId,
                 [self, localId, onDone](QString gmailDraftId, fc::api::ApiError err) {
                     if (err) {
