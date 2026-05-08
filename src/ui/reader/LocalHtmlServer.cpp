@@ -165,8 +165,30 @@ void LocalHtmlServer::onNewConnection() {
                 return;
             }
 
-            const QByteArray expected = "GET /" + token_.toLatin1();
-            if (!firstLine.startsWith(expected)) {
+            // Parse `GET <path> HTTP/x.x`. Token check is EXACT —
+            // path must equal `/<token>` (optional trailing `/` and
+            // query-string allowed). The previous startsWith match
+            // accepted `/<token>anything` which let probes for sub-
+            // resources (favicons / preconnects / random crawls)
+            // through if they happened to share our token's prefix.
+            const int methodEnd = firstLine.indexOf(' ');
+            const int pathEnd   = firstLine.indexOf(' ', methodEnd + 1);
+            if (methodEnd < 0 || pathEnd < methodEnd + 1) {
+                sendAndClose(sock,
+                    buildResponse(400, "Bad Request",
+                                  "Malformed request line.\n",
+                                  "text/plain; charset=utf-8"),
+                    400, "Bad Request");
+                return;
+            }
+            QByteArray reqPath = firstLine.mid(methodEnd + 1, pathEnd - methodEnd - 1);
+            // Strip the optional query string for the token-match check.
+            const int q = reqPath.indexOf('?');
+            const QByteArray pathOnly = q < 0 ? reqPath : reqPath.left(q);
+            const QByteArray expectedRoot = "/" + token_.toLatin1();
+            const bool isTokenRoot = (pathOnly == expectedRoot
+                                       || pathOnly == expectedRoot + "/");
+            if (!isTokenRoot) {
                 sendAndClose(sock,
                     buildResponse(404, "Not Found",
                                   "Not found.\n",

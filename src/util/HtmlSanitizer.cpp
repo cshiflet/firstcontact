@@ -197,9 +197,18 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
         // tail still got escaped) but ugly. Walk the input looking
         // for the close while toggling an `inQuote` flag on
         // unescaped `'`/`"`.
+        //
+        // Cap the scan at kMaxTagSpan bytes so a malformed input with
+        // an unclosed quote (e.g. `<a title="...`) can't swallow the
+        // rest of the document into one phantom tag and discard
+        // everything after it. Real HTML attributes are well under
+        // 64KiB; on overflow we treat the `<` as a literal text char
+        // and resume sanitising at i+1.
+        constexpr int kMaxTagSpan = 64 * 1024;
+        const int scanLimit = qMin<int>(dirty.size(), i + 1 + kMaxTagSpan);
         int gt = -1;
         QChar quote;
-        for (int j = i + 1; j < dirty.size(); ++j) {
+        for (int j = i + 1; j < scanLimit; ++j) {
             const QChar c = dirty[j];
             if (!quote.isNull()) {
                 if (c == quote) quote = QChar();
@@ -212,7 +221,9 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
             if (c == QLatin1Char('>')) { gt = j; break; }
         }
         if (gt < 0) {
-            // Unterminated `<`; treat as literal text (escaped).
+            // Unterminated `<` (or the scan ran off the cap). Treat
+            // as literal text (escaped) so the document tail still
+            // gets sanitised correctly.
             if (dropDepth == 0) out.append(QStringLiteral("&lt;"));
             ++i;
             continue;

@@ -479,9 +479,13 @@ void ComposeWindow::prefillFrom(const fc::Message& parent, Mode mode) {
 
     // Find the marker, select it (find returns the cursor with the
     // match selected), and remove it — cursor lands exactly where it
-    // was.
+    // was. Anchor the search at document start; the default overload
+    // searches from the CURRENT cursor position, which after setHtml
+    // can be anywhere — including past the marker, in which case
+    // find returns null and the cursor goes to Start unnecessarily.
+    QTextCursor searchStart(bodyEdit_->document());
     QTextCursor mark = bodyEdit_->document()->find(
-        QString::fromLatin1(kCursorMarker));
+        QString::fromLatin1(kCursorMarker), searchStart);
     if (!mark.isNull()) {
         mark.removeSelectedText();
         bodyEdit_->setTextCursor(mark);
