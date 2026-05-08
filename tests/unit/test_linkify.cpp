@@ -62,6 +62,26 @@ private slots:
         QVERIFY(!out.contains(QStringLiteral(">%1<").arg(url)));   // not visibly full
     }
 
+    void rendersHtmlAnchorAsLabelOnly() {
+        // Real-world bug: some senders dump literal HTML anchors into
+        // the text/plain alternative (UPS shipment notifications are
+        // a recurring example). Without a dedicated pre-pass the
+        // linkifier escapes the angle brackets and renders the whole
+        // tag as text noise.
+        const QString in = QStringLiteral(
+            "Track your shipment: <a href=\"https://wwwapps.ups.com/WebTracking/track?n=A&amp;tn=1Z9\" "
+            "target=\"_blank\" style=\"color:#fff;\">Track shipment</a> today.");
+        const auto out = fc::util::linkifyPlainText(in);
+        QVERIFY(out.contains(QStringLiteral(
+            "<a href=\"https://wwwapps.ups.com/WebTracking/track?n=A&amp;tn=1Z9\" "
+            "title=\"https://wwwapps.ups.com/WebTracking/track?n=A&amp;tn=1Z9\">"
+            "Track shipment</a>")));
+        // Raw HTML must NOT survive in the rendered output.
+        QVERIFY(!out.contains(QStringLiteral("&lt;a ")));
+        QVERIFY(!out.contains(QStringLiteral("target=")));
+        QVERIFY(!out.contains(QStringLiteral("&lt;/a&gt;")));
+    }
+
     void rendersMarkdownLinkAsLabelOnly() {
         // Some senders pre-convert HTML→markdown for the text/plain
         // alternative — Amazon transactional mail in particular emits

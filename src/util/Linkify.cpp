@@ -44,6 +44,20 @@ const QRegularExpression& markdownLinkRe() {
     return re;
 }
 
+// Literal HTML anchor — `<a href="...">label</a>`. Some senders dump
+// raw HTML into the text/plain alternative (UPS shipment mail is a
+// recurring example). Without this pre-pass the linkifier escapes
+// the angle-brackets and renders the whole anchor as text noise.
+// We detect these BEFORE HTML-escaping, decode entities in the href
+// + label, and rewrite to the markdown "[label](url)" shape so the
+// existing markdown pass handles the rendering.
+const QRegularExpression& htmlAnchorRe() {
+    static const QRegularExpression re(
+        QStringLiteral(R"(<a\b[^>]*?\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>)"),
+        QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
 const QRegularExpression& mailRe() {
     static const QRegularExpression re(
         QStringLiteral(R"(([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}))"));
@@ -150,9 +164,45 @@ constexpr int kMaxDisplayUrlLen = 60;
 }  // namespace
 
 QString linkifyPlainText(const QString& plain, LinkDisplayMode mode) {
+    // Pre-pass: some senders dump literal HTML anchors into the
+    // text/plain alternative. Convert each `<a href="X">Y</a>` to
+    // "[Y](X)" so the markdown pass below renders it as a clean
+    // link. Entities inside href / label are decoded here so the
+    // subsequent toHtmlEscaped() pass produces correctly-escaped
+    // output (a single round of escaping, not double).
+    QString preprocessed = plain;
+    {
+        QString out;
+        out.reserve(preprocessed.size());
+        qsizetype idx = 0;
+        for (auto it = htmlAnchorRe().globalMatch(preprocessed); it.hasNext(); ) {
+            const auto m = it.next();
+            out.append(preprocessed.mid(idx, m.capturedStart() - idx));
+            QString href  = decodeEntitiesInline(m.captured(1).trimmed());
+            QString label = decodeEntitiesInline(m.captured(2)).simplified();
+            // Only http(s) anchors are user-meaningful in plain text;
+            // the linkify regexes downstream require those schemes
+            // anyway. Skip everything else (mailto: still works via
+            // the email-address pass; tel: / ftp: / cid: rare in
+            // text-as-html, leave them as-is for the bare-URL pass).
+            if (!href.startsWith(QLatin1String("http://"), Qt::CaseInsensitive) &&
+                !href.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)) {
+                out.append(preprocessed.mid(m.capturedStart(),
+                                            m.capturedEnd() - m.capturedStart()));
+                idx = m.capturedEnd();
+                continue;
+            }
+            if (label.isEmpty()) label = href;
+            out.append(QStringLiteral("[%1](%2)").arg(label, href));
+            idx = m.capturedEnd();
+        }
+        out.append(preprocessed.mid(idx));
+        preprocessed = std::move(out);
+    }
+
     // Decode entity references BEFORE HTML-escaping so that &#847; etc. turn
     // into the actual Unicode character instead of being shown literally.
-    QString escaped = decodeEntitiesInline(plain).toHtmlEscaped();
+    QString escaped = decodeEntitiesInline(preprocessed).toHtmlEscaped();
 
     // Three-pass linkification, modelled on baremail-terminal with
     // an extra leading pass for markdown-style links:
