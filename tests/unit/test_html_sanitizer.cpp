@@ -107,6 +107,38 @@ private slots:
         const auto r2 = fc::util::sanitizeHtml(QStringLiteral("a<br/>b"));
         QVERIFY( r2.html.contains(QStringLiteral("<br />")));
     }
+
+    // Regression: a void <meta> tag in <head> must NOT eat the rest of
+    // the document. Earlier code set dropDepth=1 on the open and waited
+    // forever for </meta> — the body and everything inside it was
+    // suppressed silently, rendering marketing emails blank.
+    void voidDropTagDoesNotSwallowDocument() {
+        const auto r = fc::util::sanitizeHtml(QStringLiteral(
+            "<html><head><meta charset='utf-8'>"
+            "<style>.foo{}</style></head>"
+            "<body><p>visible content</p>"
+            "<table><tr><td>nested</td></tr></table></body></html>"));
+        QVERIFY(r.html.contains(QStringLiteral("visible content")));
+        QVERIFY(r.html.contains(QStringLiteral("nested")));
+        // Style block subtree still dropped (body's content lives
+        // outside the dropped subtree, so it's preserved).
+        QVERIFY(!r.html.contains(QStringLiteral(".foo")));
+    }
+
+    // The other void elements that appear in dropTags — link, base,
+    // input, embed — also must not swallow the rest of the doc.
+    void allVoidDropTagsAreNonSwallowing() {
+        for (const auto* tag : {"<link rel='stylesheet'>",
+                                "<base href='/foo'>",
+                                "<input type='text'>",
+                                "<embed src='x.swf'>"}) {
+            const auto r = fc::util::sanitizeHtml(QStringLiteral(
+                "<html><body>%1<p>after</p></body></html>").arg(QString::fromLatin1(tag)));
+            QVERIFY2(r.html.contains(QStringLiteral("after")),
+                     qPrintable(QStringLiteral("after-text disappeared with %1")
+                                .arg(QString::fromLatin1(tag))));
+        }
+    }
 };
 
 QTEST_APPLESS_MAIN(TestHtmlSanitizer)
