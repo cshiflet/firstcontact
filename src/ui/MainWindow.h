@@ -148,6 +148,11 @@ private slots:
 
     void reloadCurrentLabel();
     void reloadSidebar();
+
+    // Resets every cache-driven UI surface (message list, sidebar tree,
+    // reader pane, error banner) so a signed-out window doesn't keep
+    // rendering the previous account's data straight from cache.
+    void clearAccountUiState();
     void onNewMessages(int count);
 
 protected:

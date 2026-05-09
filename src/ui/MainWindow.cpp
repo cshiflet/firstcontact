@@ -38,6 +38,12 @@
 #include "util/DryRun.h"
 #include "util/MimeBuilder.h"
 
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
+
+namespace fc::cache { QSqlDatabase databaseHandle(); }
+
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
@@ -1124,43 +1130,141 @@ void MainWindow::onSignIn() {
     auth_->authorize();
 }
 
-void MainWindow::onSignOut() {
-    if (QMessageBox::question(this, tr("Sign out"),
-                              tr("Sign out and clear cached credentials?"))
-            == QMessageBox::Yes) {
-        auth_->signOut();
-        // Clear the cached profile email so the next sign-in's account
-        // menu doesn't briefly show the previous user's address before
-        // the new initial sync completes.
-        fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
-        sync_->stopScheduler();
-        outbox_->stop();
-        pending_->stop();
-        drafts_->stop();
-        // Reset transient session state so a stale "current message" /
-        // "current row" can't drive a shortcut press (r, e, #, etc.)
-        // into operating on cached data that no longer represents the
-        // signed-in user. Reader pane goes back to its empty hint.
-        currentMessage_ = {};
-        currentRow_     = -1;
-        if (reader_) reader_->showEmpty(tr("Not signed in."));
+// Wipe every row of cached user data. Keeps schema_version in `meta` so
+// the next initialize() doesn't try to re-run migrations from scratch.
+// Called from onSignOut and onSwitchAccount when the user opts in.
+//
+// SQLite has no TRUNCATE; we DELETE in dependency order so foreign keys
+// don't bite. The FTS5 virtual table is wiped via its own delete-all
+// command. messages_fts is content=messages so the message DELETE
+// already fires the sync triggers, but we issue an explicit rebuild
+// at the end to be defensive against a half-applied prior wipe.
+static void wipeCachedUserData() {
+    auto db = fc::cache::databaseHandle();
+    if (!db.isValid()) return;
+    QSqlQuery q(db);
+    db.transaction();
+    for (const char* sql : {
+        "DELETE FROM message_labels",
+        "DELETE FROM attachments",
+        "DELETE FROM messages",
+        "DELETE FROM threads",
+        "DELETE FROM labels",
+        "DELETE FROM drafts",
+        "DELETE FROM outbox",
+        "DELETE FROM pending_ops",
+        // history_id and email are the per-account meta keys; leave
+        // schema_version alone.
+        "DELETE FROM meta WHERE key IN ('history_id', 'email')",
+    }) {
+        if (!q.exec(QString::fromLatin1(sql))) {
+            qWarning("wipeCachedUserData: %s -> %s",
+                     sql, qUtf8Printable(q.lastError().text()));
+        }
     }
+    if (!db.commit()) {
+        qWarning("wipeCachedUserData: commit failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+    }
+    // Defensive rebuild — content=messages triggers should keep the FTS
+    // index in sync, but a partial prior wipe could leave orphan rows.
+    q.exec(QStringLiteral("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"));
+}
+
+// Resets every UI surface that was driven by the just-departed account
+// so signing out leaves the window looking signed-out, regardless of
+// whether the cache was wiped or kept. Without this the message list
+// + sidebar + reader pane all keep displaying the prior account's data
+// (rendered straight from cache) until the next sync rewrites them.
+void MainWindow::clearAccountUiState() {
+    currentMessage_ = {};
+    currentRow_     = -1;
+    currentLabelId_.clear();
+    if (listModel_) listModel_->replaceAll({});
+    if (sidebar_ && sidebar_->model()) sidebar_->model()->reload();
+    if (reader_) reader_->showEmpty(tr("Not signed in."));
+    if (errorBanner_) errorBanner_->hide();
+    refreshAccountMenu();
+}
+
+void MainWindow::onSignOut() {
+    if (!auth_->isAuthorized()) return;
+
+    QMessageBox box(this);
+    box.setWindowTitle(tr("Sign out"));
+    box.setIcon(QMessageBox::Question);
+    box.setText(tr("Sign out of %1?")
+        .arg(auth_->accountEmail().isEmpty()
+             ? tr("this account")
+             : auth_->accountEmail()));
+    box.setInformativeText(tr(
+        "Removing cached data deletes every locally-stored message, "
+        "label, attachment, draft, and pending action from your "
+        "computer. Your Gmail data is unaffected — it stays on "
+        "Google's servers and re-syncs when you sign in again."));
+    auto* keepBtn   = box.addButton(tr("Keep cached data"),
+                                     QMessageBox::AcceptRole);
+    auto* removeBtn = box.addButton(tr("Remove cached data"),
+                                     QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(keepBtn);
+    box.exec();
+    auto* clicked = box.clickedButton();
+    if (!clicked || clicked == box.button(QMessageBox::Cancel)) return;
+    const bool wipe = (clicked == removeBtn);
+
+    auth_->signOut();
+    fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
+    sync_->stopScheduler();
+    outbox_->stop();
+    pending_->stop();
+    drafts_->stop();
+    if (wipe) wipeCachedUserData();
+    clearAccountUiState();
+    statusBar()->showMessage(
+        wipe ? tr("Signed out. Cached data removed.")
+             : tr("Signed out."), 4000);
 }
 
 void MainWindow::onSwitchAccount() {
     // v1 is single-account: switching means signing out the current
     // account and starting the OAuth flow against whatever account the
-    // user picks in Google's consent screen. The caller is always an
-    // explicit user gesture (Account manager → "Add another account"),
-    // so we don't pop a confirmation dialog here — that'd be the third
-    // click in a row asking the same question.
+    // user picks in Google's consent screen. We always wipe the cache
+    // here — without that, the new account's sync writes on top of
+    // the previous account's rows in a schema that has no per-account
+    // key, and the result is a permanently mixed inbox. (Multi-account
+    // proper lives on claude/multi-account; that branch has the
+    // schema and AccountManager wiring.)
     if (auth_->isAuthorized()) {
+        const QString prior = auth_->accountEmail();
+        QMessageBox box(this);
+        box.setWindowTitle(tr("Switch account"));
+        box.setIcon(QMessageBox::Warning);
+        box.setText(prior.isEmpty()
+            ? tr("Sign out and sign in to a different account?")
+            : tr("Sign out of %1 and sign in to a different account?")
+                .arg(prior));
+        box.setInformativeText(tr(
+            "FirstContact v1 is single-account. Switching wipes the "
+            "current cached data so the new account's messages don't "
+            "land on top of the old account's rows. Your Gmail data "
+            "is unaffected — both accounts' messages stay on Google's "
+            "servers."));
+        auto* go = box.addButton(tr("Switch and wipe cache"),
+                                  QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(go);
+        box.exec();
+        if (box.clickedButton() != go) return;
+
         auth_->signOut();
         fc::cache::MetaRepository::set(QStringLiteral("email"), QString());
         sync_->stopScheduler();
         outbox_->stop();
         pending_->stop();
         drafts_->stop();
+        wipeCachedUserData();
+        clearAccountUiState();
     }
     onSignIn();
 }
