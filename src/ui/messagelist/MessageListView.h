@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QListView>
+#include <QString>
 
 namespace fc::ui {
 
@@ -11,6 +12,12 @@ class MessageListView : public QListView {
 public:
     explicit MessageListView(QWidget* parent = nullptr);
 
+    // Customises the centred placeholder shown when the model has zero
+    // rows. Defaults to "No messages" + a hint. Owners that know the
+    // current source (e.g. "search returned nothing", "label is empty")
+    // can pass a more specific message.
+    void setEmptyText(const QString& title, const QString& subtitle = {});
+
 signals:
     void messageActivated(const QString& messageId, int row);
     // Fired when the user clicks the star area of a row. We DON'T also
@@ -20,9 +27,14 @@ signals:
 
 protected:
     void mousePressEvent(QMouseEvent* e) override;
+    void paintEvent(QPaintEvent* e) override;
 
 private slots:
     void onActivated(const QModelIndex& idx);
+
+private:
+    QString emptyTitle_;
+    QString emptySubtitle_;
 };
 
 }  // namespace fc::ui

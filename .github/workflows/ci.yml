@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [claude/native-gmail-client-2bqtq, claude/multi-account, main]
+  pull_request:
+
+jobs:
+  linux-build-test:
+    name: Linux (Debug + sanitizers)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 6 + deps
+        # Mirrors `make setup-ubuntu`. Pinned to apt packages so we don't
+        # depend on the Qt online installer or the jurplel/install-qt action
+        # — system Qt on Ubuntu 24.04 is 6.4+ which satisfies our 6.4 floor.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+            qt6-networkauth-dev libqt6sql6-sqlite \
+            qt6-l10n-tools qt6-declarative-dev \
+            qt6-svg-dev libqt6svg6 \
+            libsecret-1-dev qtkeychain-qt6-dev \
+            libsqlite3-dev sqlite3 \
+            libxkbcommon-dev xvfb
+
+      - name: Configure (Debug + ASan/UBSan)
+        # FC_ENABLE_SANITIZERS turns on ASan + UBSan via cmake/Sanitizers.cmake.
+        # Debug build matches what `make build SANITIZERS=ON` produces locally.
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DFC_ENABLE_SANITIZERS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke launch (4s offscreen boot)
+        # Mirrors `make smoke`. Catches regressions where the binary builds
+        # but the event loop refuses to start (missing icon resources,
+        # QSettings org/app name not set, etc.).
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          rm -f $HOME/.local/share/FirstContact/firstcontact.lock
+          timeout --signal=TERM 4 build/src/app/firstcontact >/dev/null 2>&1 || rc=$?
+          if [ "${rc:-0}" -eq 124 ] || [ "${rc:-0}" -eq 143 ]; then
+            echo "smoke ok (event loop ran for 4s)"
+          else
+            echo "smoke FAILED: rc=${rc:-0}"
+            exit 1
+          fi
+
+  linux-release-appimage:
+    name: Linux (Release AppImage)
+    runs-on: ubuntu-24.04
+    # Only build the AppImage on push to a release branch — keeps PR feedback
+    # fast and avoids burning runner minutes on every commit.
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps + linuxdeploy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config curl file \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+            qt6-networkauth-dev libqt6sql6-sqlite \
+            qt6-svg-dev libqt6svg6 \
+            libsecret-1-dev qtkeychain-qt6-dev \
+            libsqlite3-dev sqlite3 \
+            librsvg2-bin appstream
+          mkdir -p $HOME/.local/bin
+          curl -fsSL -o $HOME/.local/bin/linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o $HOME/.local/bin/linuxdeploy-plugin-qt \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x $HOME/.local/bin/linuxdeploy $HOME/.local/bin/linuxdeploy-plugin-qt
+
+      - name: Build AppImage
+        run: |
+          PATH="$HOME/.local/bin:$PATH" make appimage
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: FirstContact-AppImage
+          path: FirstContact-*-x86_64.AppImage
+          retention-days: 14
+
+  # -----------------------------------------------------------------
+  # Windows + macOS jobs: stubbed for Phase 4. Both need:
+  #   - Qt online installer (jurplel/install-qt-action) since system Qt
+  #     isn't available on the GitHub-hosted runners
+  #   - Platform-specific keychain wiring (Credential Manager / Keychain)
+  #   - Code-signing once paid certs are in place — see
+  #     packaging/signing-strategy.md for the cert/notarisation costs and
+  #     interim "ship unsigned" plan.
+  #
+  # Enabling these without those preconditions burns runner minutes on
+  # red builds and produces unsigned artifacts users will SmartScreen-
+  # warn or Gatekeeper-block on. Defer until Phase 4 packaging lands the
+  # signing path.
+  #
+  # windows-build-test:
+  #   name: Windows (Release MSI)
+  #   runs-on: windows-2022
+  #   ...
+  #
+  # macos-build-test:
+  #   name: macOS (Release DMG)
+  #   runs-on: macos-14
+  #   ...

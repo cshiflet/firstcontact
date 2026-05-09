@@ -21,9 +21,11 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -182,11 +184,51 @@ QString humanSize(qint64 bytes) {
     return QStringLiteral("%1 GB").arg(bytes / GB, 0, 'f', 2);
 }
 
+// Some senders (notably marketers using ESPs that auto-generate text/plain
+// from text/html via naive tag-strip) produce a "plain text" part that is
+// one giant paragraph: thousands of characters, no newlines. Showing that
+// in the reader is worse than re-deriving plain text from the HTML body
+// (which we control via Html2Text and preserve paragraph breaks for).
+//
+// Heuristic: if any line in bodyText is longer than this and there's a
+// non-empty bodyHtml available, prefer html2text(bodyHtml). 600 chars is
+// well above any real prose paragraph; only auto-generated walls of text
+// trip it.
+constexpr int kLossyPlainTextLineThreshold = 600;
+
+bool plainTextLooksLossy(const QString& text) {
+    if (text.size() < kLossyPlainTextLineThreshold) return false;
+    int run = 0;
+    for (QChar c : text) {
+        if (c == QChar('\n')) { run = 0; continue; }
+        if (++run > kLossyPlainTextLineThreshold) return true;
+    }
+    return false;
+}
+
 QString bodyHtml(const fc::Message& m) {
-    if (!m.bodyText.isEmpty()) {
+    // Prefer the HTML body when the plain-text part looks auto-generated
+    // and lossy — we can re-derive plain text from HTML with paragraph
+    // structure intact via util::html2text. The original bodyText path
+    // still wins when text/plain is genuinely useful (most personal
+    // mail, mailing-list digests, and any sender who composed a
+    // text-first body).
+    const bool preferHtmlOverLossyText = !m.bodyHtml.isEmpty()
+        && plainTextLooksLossy(m.bodyText);
+
+    if (!m.bodyText.isEmpty() && !preferHtmlOverLossyText) {
         return util::linkifyPlainText(m.bodyText, Preferences::linkDisplayMode());
     }
     if (!m.bodyHtml.isEmpty()) {
+        if (preferHtmlOverLossyText) {
+            // Tier 1 of the "I'd rather see structured plain text" mode:
+            // tag-strip the HTML to a paragraph-preserving plain string,
+            // then linkify. Sanitisation isn't required here — html2text
+            // drops every tag — but we still feed the result through
+            // linkifyPlainText so URLs render as clickable anchors.
+            const QString rebuilt = util::html2text(m.bodyHtml);
+            return util::linkifyPlainText(rebuilt, Preferences::linkDisplayMode());
+        }
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;
         if (safe.remoteImagesBlocked) {
@@ -274,7 +316,80 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         header->setPalette(pal);
     }
     header->setText(headerHtml(m, /*full=*/initiallyExpanded));
-    cardLayout->addWidget(header);
+
+    // Per-card Gmail-web-style action row: a Reply icon button + a
+    // 3-dot overflow menu sit on the right side of the header. The
+    // header label takes the stretch on the left; buttons hug the
+    // right. Mirrors mail.google.com's per-message card chrome.
+    auto* headerRow = new QHBoxLayout();
+    headerRow->setContentsMargins(0, 0, 0, 0);
+    headerRow->setSpacing(4);
+    headerRow->addWidget(header, /*stretch=*/1);
+
+    auto* replyBtn = new QToolButton(card);
+    replyBtn->setIcon(IconLoader::themed(QStringLiteral("reply.svg")));
+    replyBtn->setIconSize(QSize(16, 16));
+    replyBtn->setAutoRaise(true);
+    replyBtn->setCursor(Qt::PointingHandCursor);
+    replyBtn->setToolTip(tr("Reply"));
+    replyBtn->setAccessibleName(tr("Reply to this message"));
+    {
+        const QString mid = m.id;
+        QObject::connect(replyBtn, &QToolButton::clicked, this,
+            [this, mid] { emit replyToMessageRequested(mid); });
+    }
+    headerRow->addWidget(replyBtn);
+
+    auto* moreBtn = new QToolButton(card);
+    moreBtn->setIcon(IconLoader::themed(QStringLiteral("menu.svg")));
+    moreBtn->setIconSize(QSize(16, 16));
+    moreBtn->setAutoRaise(true);
+    moreBtn->setCursor(Qt::PointingHandCursor);
+    moreBtn->setPopupMode(QToolButton::InstantPopup);
+    moreBtn->setToolTip(tr("More actions"));
+    moreBtn->setAccessibleName(tr("More actions for this message"));
+    auto* moreMenu = new QMenu(moreBtn);
+    {
+        const QString mid = m.id;
+        const bool isUnread = m.isUnread;
+
+        auto* aReplyAll = moreMenu->addAction(tr("Reply all"));
+        QObject::connect(aReplyAll, &QAction::triggered, this,
+            [this, mid] { emit replyAllToMessageRequested(mid); });
+
+        auto* aForward  = moreMenu->addAction(tr("Forward"));
+        QObject::connect(aForward, &QAction::triggered, this,
+            [this, mid] { emit forwardMessageRequested(mid); });
+
+        moreMenu->addSeparator();
+
+        auto* aArchive = moreMenu->addAction(tr("Archive"));
+        QObject::connect(aArchive, &QAction::triggered, this,
+            [this, mid] { emit archiveMessageRequested(mid); });
+
+        // Gmail web shows "Mark unread / Mark read" depending on state;
+        // mirror that.
+        auto* aRead = moreMenu->addAction(
+            isUnread ? tr("Mark read") : tr("Mark unread"));
+        QObject::connect(aRead, &QAction::triggered, this,
+            [this, mid, isUnread] {
+                emit markMessageReadRequested(mid, /*read=*/isUnread);
+            });
+
+        auto* aSnooze = moreMenu->addAction(tr("Snooze"));
+        QObject::connect(aSnooze, &QAction::triggered, this,
+            [this, mid] { emit snoozeMessageRequested(mid); });
+
+        moreMenu->addSeparator();
+
+        auto* aDelete = moreMenu->addAction(tr("Delete this message"));
+        QObject::connect(aDelete, &QAction::triggered, this,
+            [this, mid] { emit deleteMessageRequested(mid); });
+    }
+    moreBtn->setMenu(moreMenu);
+    headerRow->addWidget(moreBtn);
+
+    cardLayout->addLayout(headerRow);
 
     auto* body = new AutoSizeTextBrowser(card);
     // Trim the QTextDocument's default 4-pt margin: combined with the
@@ -619,19 +734,24 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         cardLayout->addWidget(bottomBrowserRow);
     }
 
-    if (!initiallyExpanded) {
-        // Click anywhere on a collapsed card's header to expand.
+    {
+        // Show/Hide toggle on every card — including initially-expanded
+        // ones. Without it, the user couldn't collapse a card once it
+        // had opened, leading to indefinitely-tall threads. The toggle
+        // sits at the bottom-right of the card; its label tracks the
+        // current visibility state.
         header->setCursor(Qt::PointingHandCursor);
         QObject::connect(header, &QLabel::linkActivated,
                          body, [](const QString&) { /* let body handle */ });
-        // We don't have a click signal on QLabel; wrap via event filter using
-        // a button-like approach: add a small ▾ toggle.
-        auto* toggle = new QPushButton(QStringLiteral("Show"), card);
+        auto* toggle = new QPushButton(
+            initiallyExpanded ? QStringLiteral("Hide")
+                              : QStringLiteral("Show"),
+            card);
         toggle->setFlat(true);
         toggle->setCursor(Qt::PointingHandCursor);
         cardLayout->addWidget(toggle, 0, Qt::AlignRight);
         QObject::connect(toggle, &QPushButton::clicked,
-                         body, [body, header, m, toggle,
+                         body, [this, body, header, m, toggle,
                                  topBrowserRow, bottomBrowserRow]() {
             const bool now = !body->isVisible();
             body->setVisible(now);
@@ -640,6 +760,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
             header->setText(headerHtml(m, /*full=*/now));
             toggle->setText(now ? QStringLiteral("Hide")
                                 : QStringLiteral("Show"));
+            // Remember the user's choice for this message in this
+            // thread. Next time showThread renders the same thread
+            // (e.g. the user clicks a different message in the
+            // conversation), this card stays in the same state.
+            if (now) expandedInCurrentThread_.insert(m.id);
+            else      expandedInCurrentThread_.remove(m.id);
         });
     }
 
@@ -655,6 +781,8 @@ void ReaderPane::showLoading() {
 
 void ReaderPane::showEmpty(const QString& reason) {
     clearStack();
+    currentThreadId_.clear();
+    expandedInCurrentThread_.clear();
     auto* l = new QLabel(reason.isEmpty()
         ? QStringLiteral("<i>Select a message.</i>")
         : QStringLiteral("<i>%1</i>").arg(reason.toHtmlEscaped()), content_);
@@ -664,6 +792,10 @@ void ReaderPane::showEmpty(const QString& reason) {
 
 void ReaderPane::showMessage(const fc::Message& m) {
     clearStack();
+    // Single-message render is its own context; drop any thread-scoped
+    // expansion memory so a later showThread starts fresh.
+    currentThreadId_.clear();
+    expandedInCurrentThread_.clear();
     // The body in each card now sizes to its rendered document height,
     // so we do NOT stretch the card to fill the pane vertically — that
     // would just inflate the body back to a giant empty box for short
@@ -679,6 +811,15 @@ void ReaderPane::showThread(const std::vector<fc::Message>& messages,
     clearStack();
     if (messages.empty()) { showEmpty(); return; }
 
+    // Same-thread re-render? Preserve the user's expanded set; on a
+    // different thread, reset. messages all share a threadId (showThread
+    // is invoked from byThread() which is single-thread by definition).
+    const QString threadId = messages.front().threadId;
+    if (threadId != currentThreadId_) {
+        expandedInCurrentThread_.clear();
+        currentThreadId_ = threadId;
+    }
+
     // Pick which card starts expanded. focusedId wins when it matches
     // one of the thread's messages; otherwise we fall back to "latest"
     // (the last entry, since byThread sorts ascending by date).
@@ -692,23 +833,33 @@ void ReaderPane::showThread(const std::vector<fc::Message>& messages,
 
     QWidget* focusedCard = nullptr;
     for (int i = 0; i < int(messages.size()); ++i) {
-        QWidget* card = buildMessageCard(messages[i], i == focusIdx);
+        // Initially expanded if: it's the focused card, OR the user
+        // already expanded it in this thread on a prior render.
+        const bool expanded = (i == focusIdx)
+            || expandedInCurrentThread_.contains(messages[i].id);
+        QWidget* card = buildMessageCard(messages[i], expanded);
         if (i == focusIdx) focusedCard = card;
+        if (expanded) expandedInCurrentThread_.insert(messages[i].id);
         contentLayout_->insertWidget(i, card);
     }
 
-    // Centre the focused card in the viewport once Qt has had a tick
-    // to lay everything out — at this synchronous point the cards'
-    // y() values are still 0. ensureWidgetVisible(card, x, y) takes
-    // a margin in pixels; we pass half the viewport height so the
-    // card lands roughly centred rather than glued to the top.
+    // Top-align the focused card: scroll so its top edge sits at the
+    // viewport's top edge. Mirrors Gmail web's behaviour when you click
+    // a message in the threadlist — the chosen card snaps to the top
+    // rather than landing wherever ensureWidgetVisible decides. We
+    // wait one event-loop tick because at this synchronous point the
+    // cards' y() values are still 0; QScrollArea hasn't laid them out
+    // yet. clamp to maximum so we don't try to scroll past the end on
+    // very short threads.
     if (focusedCard) {
         QPointer<QScrollArea> s = scroll_;
         QPointer<QWidget> c = focusedCard;
         QTimer::singleShot(0, this, [s, c] {
             if (!s || !c) return;
-            const int margin = qMax(40, s->viewport()->height() / 2);
-            s->ensureWidgetVisible(c, /*xMargin=*/0, /*yMargin=*/margin);
+            auto* bar = s->verticalScrollBar();
+            if (!bar) return;
+            const int target = qBound(bar->minimum(), c->y(), bar->maximum());
+            bar->setValue(target);
         });
     }
 }

@@ -20,6 +20,8 @@ class QMenu;
 class QSplitter;
 class QToolButton;
 
+namespace fc::ui { class SpinningToolButton; }
+
 namespace fc { class MessageListModel; }
 namespace fc::auth  { class OAuthClient; class ClientConfig; }
 namespace fc::api   { class GmailClient; }
@@ -138,8 +140,26 @@ private slots:
                             const QString& filename);
     void onDownloadAllAttachments(const QString& messageId);
 
+    // Per-message handlers triggered by the per-card action row. Unlike
+    // their *Current siblings (which operate on the focused message and
+    // typically apply thread-wide), these target the SPECIFIC messageId
+    // and apply label diffs to that one message only — Gmail-web's per-
+    // card "Delete this message" / "Mark unread" semantics.
+    void onReplyToMessage(const QString& messageId);
+    void onReplyAllToMessage(const QString& messageId);
+    void onForwardMessage(const QString& messageId);
+    void onArchiveMessage(const QString& messageId);
+    void onMarkMessageRead(const QString& messageId, bool read);
+    void onDeleteMessage(const QString& messageId);
+    void onSnoozeMessage(const QString& messageId);
+
     void reloadCurrentLabel();
     void reloadSidebar();
+
+    // Resets every cache-driven UI surface (message list, sidebar tree,
+    // reader pane, error banner) so a signed-out window doesn't keep
+    // rendering the previous account's data straight from cache.
+    void clearAccountUiState();
     void onNewMessages(int count);
     // Multi-account notify path: routes to Notifier with the
     // account's email + per-account notification_mode pref. Wired to
@@ -222,6 +242,7 @@ private:
     QAction*                 searchIconAction_ = nullptr;
     QList<QPair<QAction*, QString>> iconActions_;
     QToolButton*             accountButton_ = nullptr;
+    fc::ui::SpinningToolButton* syncBtn_     = nullptr;   // refresh button — spins during sync
     QMenu*                   accountMenu_   = nullptr;
 
     // Sync indicator state. We drive the main status-bar message

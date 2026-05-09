@@ -2,6 +2,8 @@
 
 #include "models/Message.h"
 
+#include <QSet>
+#include <QString>
 #include <QWidget>
 
 #include <vector>
@@ -71,6 +73,19 @@ signals:
     // every file there with collision-safe naming.
     void downloadAllRequested(const QString& messageId);
 
+    // Per-card action row signals — one per Gmail-web-style action.
+    // The reply icon and the 3-dot overflow menu inside each card emit
+    // these so MainWindow can route to the per-message handlers.
+    // All target the *specific* message the card represents, never the
+    // whole thread (use the toolbar buttons for thread-level ops).
+    void replyToMessageRequested(const QString& messageId);
+    void replyAllToMessageRequested(const QString& messageId);
+    void forwardMessageRequested(const QString& messageId);
+    void archiveMessageRequested(const QString& messageId);
+    void markMessageReadRequested(const QString& messageId, bool read);
+    void deleteMessageRequested(const QString& messageId);
+    void snoozeMessageRequested(const QString& messageId);
+
 private:
     void clearStack();
     QWidget* buildMessageCard(const fc::Message& m, bool initiallyExpanded);
@@ -78,6 +93,15 @@ private:
     QScrollArea* scroll_;
     QWidget*     content_;
     QVBoxLayout* contentLayout_;
+
+    // Per-thread expansion memory. When showThread is called twice
+    // for the same thread (typical: clicking a different message in
+    // an open conversation in the threadlist), cards the user
+    // previously expanded stay expanded — mirrors Gmail web's
+    // behaviour. Cleared on a different-thread render and on
+    // showMessage / showEmpty.
+    QString       currentThreadId_;
+    QSet<QString> expandedInCurrentThread_;
 };
 
 }  // namespace fc::ui

@@ -22,6 +22,7 @@
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
 #include "common/Shortcuts.h"
+#include "common/SpinningToolButton.h"
 #include "common/Theme.h"
 #include "compose/ComposeWindow.h"
 #include "messagelist/MessageListView.h"
@@ -39,6 +40,12 @@
 #include "util/Browser.h"
 #include "util/DryRun.h"
 #include "util/MimeBuilder.h"
+
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
+
+namespace fc::cache { QSqlDatabase databaseHandle(); }
 
 #include <QAction>
 #include <QApplication>
@@ -142,6 +149,12 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         dismiss->setFlat(true);
         dismiss->setFixedSize(20, 20);
         dismiss->setToolTip(tr("Dismiss"));
+        // Button text "✕" reads to screen readers as "x" — give it a
+        // proper name. Description echoes the banner role so the user
+        // knows what they're dismissing.
+        dismiss->setAccessibleName(tr("Dismiss error"));
+        dismiss->setAccessibleDescription(
+            tr("Hide the error banner above. Does not retry the failed action."));
         dismiss->setCursor(Qt::PointingHandCursor);
         row->addWidget(icon);
         row->addWidget(errorBannerLabel_, /*stretch=*/1);
@@ -374,7 +387,30 @@ void MainWindow::buildToolBar() {
     });
     tb->addSeparator();
 
-    auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
+    // Refresh: a SpinningToolButton instead of the auto-created QToolButton
+    // from withIcon, so the icon can rotate during sync. We still go
+    // through a real QAction (for shortcut + menu reuse), but the toolbar
+    // hosts our subclass directly via addWidget. Tradeoff: refresh no
+    // longer overflows into the hamburger when the toolbar is narrow —
+    // acceptable, since refresh is the most-used action and the spinner
+    // wouldn't render meaningfully in a menu item anyway.
+    auto* refresh = new QAction(IconLoader::themed(QStringLiteral("refresh.svg")),
+                                 tr("Refresh"), this);
+    refresh->setToolTip(tr("Refresh"));
+    syncBtn_ = new SpinningToolButton(tb);
+    syncBtn_->setDefaultAction(refresh);
+    syncBtn_->setBaseIcon(IconLoader::themed(QStringLiteral("refresh.svg")));
+    syncBtn_->setAutoRaise(true);
+    syncBtn_->setToolButtonStyle(Preferences::toolbarShowText()
+        ? Qt::ToolButtonTextBesideIcon
+        : Qt::ToolButtonIconOnly);
+    syncBtn_->setCursor(Qt::PointingHandCursor);
+    syncBtn_->setAccessibleName(tr("Refresh"));
+    syncBtn_->setAccessibleDescription(tr(
+        "Trigger a sync now. The icon spins while a sync is in flight."));
+    tb->addWidget(syncBtn_);
+    iconActions_.append({refresh, QStringLiteral("refresh.svg")});
+
     auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 1);
     // Search bar's leading-icon tooltip — same pattern: pressing `/`
     // anywhere in the window pops focus back into the search box.
@@ -382,6 +418,14 @@ void MainWindow::buildToolBar() {
         searchIconAction_->setToolTip(tr("Search (/)"));
     }
     searchEdit_->setToolTip(tr("Search mail — Gmail syntax. Press / to focus."));
+    // Screen-reader name + hint for the search field. The leading icon
+    // action inherits its description from the QLineEdit's accessible
+    // name automatically.
+    searchEdit_->setAccessibleName(tr("Search mail"));
+    searchEdit_->setAccessibleDescription(tr(
+        "Gmail search syntax — for example "
+        "'from:alice subject:invoice has:attachment'. "
+        "Press slash anywhere in the window to focus this field."));
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
@@ -396,6 +440,12 @@ void MainWindow::buildToolBar() {
         : Qt::ToolButtonIconOnly);
     accountButton_->setAutoRaise(true);
     accountButton_->setCursor(Qt::PointingHandCursor);
+    // Tooltip alone doesn't reach screen readers — set the accessible
+    // name explicitly so Orca / Narrator / VoiceOver announce something
+    // useful when this icon-only button takes focus. The dynamic
+    // "Signed in as <email>" tooltip is also pushed to the accessible
+    // description in refreshAccountMenu().
+    accountButton_->setAccessibleName(tr("Account"));
     accountMenu_ = new QMenu(accountButton_);
     accountButton_->setMenu(accountMenu_);
     iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
@@ -413,6 +463,7 @@ void MainWindow::buildToolBar() {
     overflowButton_->setAutoRaise(true);
     overflowButton_->setCursor(Qt::PointingHandCursor);
     overflowButton_->setToolTip(tr("More actions"));
+    overflowButton_->setAccessibleName(tr("More actions"));
     overflowMenu_ = new QMenu(overflowButton_);
     overflowButton_->setMenu(overflowMenu_);
     overflowAction_ = tb->addWidget(overflowButton_);
@@ -560,6 +611,12 @@ void MainWindow::refreshToolbarIcons() {
     if (searchIconAction_) {
         searchIconAction_->setIcon(IconLoader::themed(QStringLiteral("search.svg")));
     }
+    // Sync button keeps its own pre-rendered base pixmap for rotation —
+    // refresh that too so a theme switch mid-session picks up the new
+    // tint when the spin starts.
+    if (syncBtn_) {
+        syncBtn_->setBaseIcon(IconLoader::themed(QStringLiteral("refresh.svg")));
+    }
 }
 
 void MainWindow::refreshToolbarStyle() {
@@ -589,6 +646,25 @@ void MainWindow::wireSignals() {
             this,    &MainWindow::onSaveAsAttachment);
     connect(reader_, &ReaderPane::downloadAllRequested,
             this,    &MainWindow::onDownloadAllAttachments);
+
+    // Per-card Gmail-web-style action row in each message card. Each
+    // signal carries the messageId of the SPECIFIC message the card
+    // represents; handlers operate on that single message rather than
+    // the whole thread (the toolbar buttons stay thread-scoped).
+    connect(reader_, &ReaderPane::replyToMessageRequested,
+            this,    &MainWindow::onReplyToMessage);
+    connect(reader_, &ReaderPane::replyAllToMessageRequested,
+            this,    &MainWindow::onReplyAllToMessage);
+    connect(reader_, &ReaderPane::forwardMessageRequested,
+            this,    &MainWindow::onForwardMessage);
+    connect(reader_, &ReaderPane::archiveMessageRequested,
+            this,    &MainWindow::onArchiveMessage);
+    connect(reader_, &ReaderPane::markMessageReadRequested,
+            this,    &MainWindow::onMarkMessageRead);
+    connect(reader_, &ReaderPane::deleteMessageRequested,
+            this,    &MainWindow::onDeleteMessage);
+    connect(reader_, &ReaderPane::snoozeMessageRequested,
+            this,    &MainWindow::onSnoozeMessage);
     // Hover a link in any message body → show its target in the
     // status bar; the existing messageChanged restorer puts the
     // signed-in-as / sync-progress baseline back when the cursor
@@ -926,6 +1002,19 @@ void MainWindow::wireSignals() {
     // message wins.
     connect(sync_, &fc::sync::SyncService::stateChanged, this,
             [this](fc::sync::SyncService::State s) {
+                // Toolbar refresh icon: spin while a sync is active so
+                // the user has a visual cue that we're talking to the
+                // server. Stops on Idle.
+                if (syncBtn_) {
+                    syncBtn_->setSpinning(s != fc::sync::SyncService::State::Idle);
+                }
+                // Sidebar unread counts get an ellipsis hint while
+                // sync is in flight, so the brief gap inside reload()
+                // doesn't show up as flashing/empty parens.
+                if (sidebar_ && sidebar_->model()) {
+                    sidebar_->model()->setSyncing(
+                        s != fc::sync::SyncService::State::Idle);
+                }
                 switch (s) {
                     case fc::sync::SyncService::State::InitialSync:
                         isSyncing_ = true;
@@ -1092,6 +1181,7 @@ void MainWindow::refreshBandwidthLabel() {
     const qint64 up   = s.bytesOut();
     const int reqs    = s.requestCount();
     bandwidthLabel_->setText(QStringLiteral("↓ %1").arg(humanBytes(down)));
+    bandwidthLabel_->setAccessibleName(tr("Bandwidth used this session"));
     bandwidthLabel_->setToolTip(tr(
         "Session transfer since launch:\n"
         "↓ %1 received\n"
@@ -1247,6 +1337,27 @@ void MainWindow::onSignIn() {
     auth_->authorize();
 }
 
+// Resets every cache-driven UI surface (message list, sidebar tree,
+// reader pane, error banner) so a window with no active account
+// doesn't keep rendering the previous account's data straight from
+// cache. Called on sign-out, on the last-account-removed transition,
+// and at startup when the active accountId is empty.
+void MainWindow::clearAccountUiState() {
+    currentAccountId_.clear();
+    currentMessage_ = {};
+    currentRow_     = -1;
+    currentLabelId_.clear();
+    if (sync_)     sync_->setAccountId({});
+    if (sidebar_ && sidebar_->model()) sidebar_->model()->setAccountId({});
+    if (listModel_) listModel_->replaceAll({});
+    if (reader_)    reader_->showEmpty(tr("Not signed in."));
+    if (errorBanner_) errorBanner_->hide();
+    if (outbox_)  outbox_->stop();
+    if (pending_) pending_->stop();
+    if (drafts_)  drafts_->stop();
+    refreshAccountIndicator();
+}
+
 void MainWindow::onSignOut() {
     // Legacy single-account hook: routes to the per-account form for
     // the active account.
@@ -1333,18 +1444,9 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
         if (!next.isEmpty()) {
             accounts_->setCurrentAccountId(next);
         } else {
-            currentAccountId_.clear();
-            if (sync_) sync_->setAccountId({});
-            if (sidebar_ && sidebar_->model()) {
-                sidebar_->model()->setAccountId({});
-            }
-            listModel_->replaceAll({});
-            reader_->showEmpty();
-            currentMessage_ = {};
-            currentRow_ = -1;
-            outbox_->stop();
-            pending_->stop();
-            drafts_->stop();
+            // Last account signed out — reset every UI surface so the
+            // window stops rendering whichever account was active.
+            clearAccountUiState();
         }
     }
     refreshAccountIndicator();
@@ -1812,6 +1914,145 @@ void MainWindow::onReplyAllCurrent() {
 void MainWindow::onForwardCurrent() {
     if (currentMessage_.id.isEmpty()) return;
     openComposeWindow(&currentMessage_, int(ComposeWindow::Mode::Forward));
+}
+
+// ---- Per-card (per-message) handlers ----------------------------------
+//
+// The card's reply button + 3-dot overflow menu fire signals that route
+// here. Unlike on*Current, these target the SPECIFIC messageId carried
+// by the signal — Gmail web's per-card semantics. Reply / Reply-all /
+// Forward open compose with that exact message as the parent (instead
+// of the focused message). Archive / Mark-read / Delete / Snooze apply
+// the label diff to ONE message instead of looping across the whole
+// thread.
+
+void MainWindow::onReplyToMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::Reply));
+}
+
+void MainWindow::onReplyAllToMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::ReplyAll));
+}
+
+void MainWindow::onForwardMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::Forward));
+}
+
+void MainWindow::onArchiveMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("archive-message-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: archive blocked."), 4000);
+        return;
+    }
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    pending_->flush();
+    statusBar()->showMessage(tr("Message archived."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onMarkMessageRead(const QString& messageId, bool read) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-read-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: mark read/unread blocked."), 4000);
+        return;
+    }
+    QStringList add, rem;
+    if (read) rem << QStringLiteral("UNREAD");
+    else      add << QStringLiteral("UNREAD");
+    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    pending_->flush();
+    statusBar()->showMessage(read ? tr("Marked read.") : tr("Marked unread."),
+                              3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onDeleteMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("delete-message-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: move-to-Trash blocked."), 4000);
+        return;
+    }
+    if (QMessageBox::question(this, tr("Delete this message"),
+            tr("Move just this message to Trash? "
+               "Other messages in the conversation are unaffected."),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    const QStringList add{QStringLiteral("TRASH")};
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    pending_->flush();
+    statusBar()->showMessage(tr("Message moved to Trash."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onSnoozeMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("snooze-message-card"))) {
+        statusBar()->showMessage(tr("Dry-run mode: snooze blocked."), 4000);
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Snooze message"));
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr(
+        "Pick a wake-up time. This message drops out of Inbox now and "
+        "reappears at the chosen time. Other messages in the same "
+        "thread are unaffected."), &dlg));
+    auto* picker = new QDateTimeEdit(
+        QDateTime::currentDateTime().addSecs(60 * 60 * 3), &dlg);
+    picker->setCalendarPopup(true);
+    picker->setMinimumDateTime(QDateTime::currentDateTime().addSecs(60));
+    picker->setDisplayFormat(QStringLiteral("ddd MMM d, yyyy  h:mm AP"));
+    layout->addWidget(picker);
+
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* okBtn     = new QPushButton(tr("Snooze"), &dlg);
+    okBtn->setObjectName(QStringLiteral("primary"));
+    okBtn->setDefault(true);
+    auto* cancelBtn = new QPushButton(tr("Cancel"), &dlg);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(okBtn);
+    layout->addLayout(btnRow);
+    QObject::connect(okBtn,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QDateTime when = picker->dateTime();
+    if (when <= QDateTime::currentDateTime()) {
+        statusBar()->showMessage(tr("Pick a time in the future."), 4000);
+        return;
+    }
+
+    const qint64 wakeAt = when.toMSecsSinceEpoch();
+    fc::cache::MessageRepository::setSnoozeUntil(messageId, wakeAt);
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    pending_->flush();
+    statusBar()->showMessage(
+        tr("Snoozed until %1.").arg(when.toString(QStringLiteral("MMM d, h:mm AP"))),
+        4000);
+    reloadCurrentLabel();
 }
 
 void MainWindow::onCreateLabel(const QString& parentLabelId) {

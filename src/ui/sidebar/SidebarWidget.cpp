@@ -106,6 +106,10 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
 
     tree_  = new QTreeView(this);
     tree_->setObjectName(QStringLiteral("SidebarTree"));
+    tree_->setAccessibleName(tr("Labels and folders"));
+    tree_->setAccessibleDescription(tr(
+        "Tree of system labels (Inbox, Sent, Drafts, …) and your user labels. "
+        "Use arrow keys to navigate; Enter opens the label."));
     model_ = new fc::LabelTreeModel(this);
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);

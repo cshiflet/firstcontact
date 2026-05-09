@@ -40,16 +40,20 @@ Branch: `claude/native-gmail-client-2bqtq`. Pushed after each commit.
 
 ## Items deliberately deferred
 
-These came up across the four reviews and are documented here so they're not re-reviewed by accident:
+These came up across the four reviews and are documented here so they're not re-reviewed by accident. Re-triaged 2026-05-09 — every item below is still applicable; nothing was implicitly closed by the round-3/4 fixes.
 
-- **OAuthClient redirect-URI hardcode to `127.0.0.1`** (RFC 8252). Would risk breaking existing user OAuth registrations against `localhost`. Marginal security benefit on the user's own loopback.
-- **OAuthClient refresh-race serialization**. The existing race is wasteful (two concurrent refreshes possible) but produces no data corruption — both writers land valid tokens via the existing mutex. Fix is invasive (cross-thread waiting on a nested QEventLoop is fragile in Qt).
-- **MimeBuilder `formatAddressList` non-ASCII display names**. Recipients are passed pre-formatted as plain strings; encoded-word handling is on the caller. Document-the-contract rather than auto-encode.
-- **MessageRepository.cpp:269 silent error on listByLabel `q.exec`**. Low-impact; UI sees empty list either way.
-- **Logger.cpp:32-39 rotation race on Windows**. Linux path is fine; Windows isn't a primary target yet.
-- **Browser.cpp non-WSL fallback chain**. Synchronous `tryRunSync` already used on the WSL branch; non-WSL path uses Qt defaults and rarely fails.
-- **Helper extraction for the worker `flush()` skeleton** (OutboxWorker / DraftSync / PendingOpsWorker share ~30 lines each). Saves duplication but doesn't fix any bug.
+- **OAuthClient redirect-URI hardcode to `127.0.0.1`** (RFC 8252). Qt's `QOAuthHttpServerReplyHandler` default is already `127.0.0.1`, so the practical risk is small; explicit-set would risk breaking existing user OAuth registrations that point at `localhost`. Marginal security benefit on the user's own loopback. Status: still deferred.
+- **OAuthClient refresh-race serialization**. The existing race is wasteful (two concurrent refreshes possible) but produces no data corruption — both writers land valid tokens via the existing mutex. Fix is invasive (cross-thread waiting on a nested QEventLoop is fragile in Qt). Status: still deferred.
+- **MimeBuilder `formatAddressList` non-ASCII display names**. Recipients are passed pre-formatted as plain strings; encoded-word handling is on the caller. Document-the-contract rather than auto-encode. Status: still deferred.
+- **MessageRepository.cpp:269 silent error on listByLabel `q.exec`**. Low-impact; UI sees empty list either way. Status: still deferred.
+- **Logger.cpp:32-39 rotation race on Windows**. Linux path is fine; Windows isn't a primary target yet. Status: still deferred.
+- **Browser.cpp non-WSL fallback chain**. Synchronous `tryRunSync` already used on the WSL branch; non-WSL path uses Qt defaults and rarely fails. Status: still deferred.
+- **Helper extraction for the worker `flush()` skeleton** (OutboxWorker / DraftSync / PendingOpsWorker share ~30 lines each). Saves duplication but doesn't fix any bug. Status: still deferred.
+
+### Added 2026-05-09 (post-pass)
+
+- **Qt 6.4 QNAM transparent retry on POST/PATCH/DELETE transport failure.** Surfaced while writing `test_rest_client`. When the TCP connection drops before any HTTP response bytes, QNAM transparently retries the request — for ALL verbs, including non-idempotent ones — by calling `reset()` on the upload byte device. This happens BELOW our application-layer retry policy: we never see the original failure. Concretely, a flaky network that drops the connection before Gmail responds to `messages.send` could silently double-send. The round-3 idempotent-only guard still protects against the more common 5xx case (server wrote bytes → QNAM does not auto-retry), so the residual hole is "TCP dropped before any response" — rare on Gmail's well-provisioned endpoints but not impossible. `test_rest_client::qnamTransparentlyRetriesPostOnTransportFailure_documented` is the canary; if a future Qt release changes the behaviour, that test starts failing and we revisit. Possible mitigations to investigate when this becomes worth fixing: send `Connection: close` on non-idempotent verbs to defeat keep-alive reuse, route those verbs through a custom `QIODevice` whose `reset()` returns false, or move to a different HTTP client for the send path.
 
 ## Build / test status
 
-All 12 unit tests pass under `QT_QPA_PLATFORM=offscreen ctest`. Build clean with `-Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wold-style-cast -Wcast-align -Wunused`.
+13 unit tests pass under `QT_QPA_PLATFORM=offscreen ctest` (test_rest_client added 2026-05-09). Build clean with `-Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wold-style-cast -Wcast-align -Wunused`.
