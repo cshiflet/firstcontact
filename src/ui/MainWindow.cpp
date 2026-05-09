@@ -1278,16 +1278,29 @@ void MainWindow::refreshAccountMenu() {
         ? tr("Signed in as %1").arg(email)
         : tr("Manage Google accounts"));
 
-    // One menu entry per signed-in account. The active account gets a
-    // checkmark; selecting another flips currentAccountId via
-    // AccountManager::setCurrentAccountId, which retargets sidebar /
-    // list / reader. Accounts without a persisted email show as
-    // "Unknown account" until the next initial sync runs.
+    // One menu entry per *signed-in* account — i.e., accounts whose
+    // per-account OAuthClient currently has valid tokens. The accounts
+    // table can also hold rows for accounts that were signed in once
+    // and signed out (sign-out keeps the row by default), plus a
+    // synthetic "legacy@local" row that migration 0006 inserts on
+    // every fresh install. Listing all of them in the toolbar would
+    // surface a "legacy@local" entry on a launch with no real
+    // accounts; filter to authorized ones here.
+    //
+    // The active account gets a checkmark; selecting another flips
+    // currentAccountId via AccountManager::setCurrentAccountId, which
+    // retargets sidebar / list / reader.
     //
     // v3: each entry's icon is a small filled circle in the account's
     // accent colour (or a transparent placeholder when no accent is
     // assigned, so the menu rows stay aligned).
-    const auto allAccounts = accounts_->accounts();
+    QList<fc::account::AccountInfo> allAccounts;
+    for (const auto& a : accounts_->accounts()) {
+        auto* ctx = accounts_->contextFor(a.id);
+        if (ctx && ctx->auth() && ctx->auth()->isAuthorized()) {
+            allAccounts.append(a);
+        }
+    }
     if (!allAccounts.isEmpty()) {
         for (const auto& a : allAccounts) {
             QString label = a.email.isEmpty() ? tr("Unknown account") : a.email;

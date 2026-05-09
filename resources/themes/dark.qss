@@ -24,6 +24,17 @@ QWidget {
     selection-color: #1a1a1a;
 }
 
+/* QLabels inherit the QWidget rule above and paint themselves with the
+ * dark base colour, even when nested inside a card (#232323) or any
+ * other surface that has its own background. The visible result is a
+ * darker rectangle behind every QLabel — most obvious on AccountManager
+ * rows, where "legacy@local" / "Active" / the avatar icon all sat in
+ * dark squares against the lighter card. Force every QLabel to a
+ * transparent background so it inherits whatever its parent painted.
+ * Specific objectName-scoped QLabel rules below (e.g. ErrorBannerIcon)
+ * still win because their selectors are more specific. */
+QLabel { background: transparent; }
+
 QMainWindow {
     background-color: #1a1a1a;
 }

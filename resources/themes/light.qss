@@ -28,6 +28,13 @@ QWidget {
     selection-color: #ffffff;
 }
 
+/* QLabels inherit the QWidget rule above and paint themselves with the
+ * page-base colour (#fafafa), creating visible squares against any
+ * non-default surface (cards, hover backgrounds, accent strips). Force
+ * every QLabel transparent so it inherits its parent's paint.
+ * objectName-scoped overrides below still win on specificity. */
+QLabel { background: transparent; }
+
 QMainWindow {
     background-color: #fafafa;
 }
