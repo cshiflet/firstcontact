@@ -277,6 +277,25 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
             continue;
         }
 
+        // Pre-scan for blocked remote <img>: when the src would be
+        // dropped (remote and !allowRemoteImages), skip the entire
+        // tag rather than emit a srcless <img width="640" height="200">.
+        // QTextBrowser renders that as an UPSCALED broken-image
+        // placeholder filling the box — uglier than no element at all,
+        // and we already show a "Remote images blocked." banner above
+        // the body so the user still knows there's hidden content.
+        bool skipBlockedImg = false;
+        if (t.name == QLatin1String("img") && !opts.allowRemoteImages) {
+            for (const auto& [aname, avalue] : t.attrs) {
+                if (aname == QLatin1String("src") && isRemoteHttpUrl(avalue)) {
+                    res.remoteImagesBlocked = true;
+                    skipBlockedImg = true;
+                    break;
+                }
+            }
+        }
+        if (skipBlockedImg) continue;
+
         // Open tag with attributes.
         QString attrsOut;
         for (const auto& [aname, avalue] : t.attrs) {
@@ -288,6 +307,11 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
                 if (!isSafeUrl(value)) continue;
                 if (t.name == QLatin1String("img") && !opts.allowRemoteImages
                     && isRemoteHttpUrl(value)) {
+                    // Defensive: pre-scan above should have caught this
+                    // and skipped the whole tag; if we reach here for any
+                    // reason (e.g. a non-src attribute also named "src"
+                    // — vanishingly rare), drop the src and continue so
+                    // we don't emit a remote URL.
                     res.remoteImagesBlocked = true;
                     continue;
                 }

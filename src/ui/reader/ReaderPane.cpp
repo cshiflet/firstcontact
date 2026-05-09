@@ -24,6 +24,7 @@
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -314,7 +315,80 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         header->setPalette(pal);
     }
     header->setText(headerHtml(m, /*full=*/initiallyExpanded));
-    cardLayout->addWidget(header);
+
+    // Per-card Gmail-web-style action row: a Reply icon button + a
+    // 3-dot overflow menu sit on the right side of the header. The
+    // header label takes the stretch on the left; buttons hug the
+    // right. Mirrors mail.google.com's per-message card chrome.
+    auto* headerRow = new QHBoxLayout();
+    headerRow->setContentsMargins(0, 0, 0, 0);
+    headerRow->setSpacing(4);
+    headerRow->addWidget(header, /*stretch=*/1);
+
+    auto* replyBtn = new QToolButton(card);
+    replyBtn->setIcon(IconLoader::themed(QStringLiteral("reply.svg")));
+    replyBtn->setIconSize(QSize(16, 16));
+    replyBtn->setAutoRaise(true);
+    replyBtn->setCursor(Qt::PointingHandCursor);
+    replyBtn->setToolTip(tr("Reply"));
+    replyBtn->setAccessibleName(tr("Reply to this message"));
+    {
+        const QString mid = m.id;
+        QObject::connect(replyBtn, &QToolButton::clicked, this,
+            [this, mid] { emit replyToMessageRequested(mid); });
+    }
+    headerRow->addWidget(replyBtn);
+
+    auto* moreBtn = new QToolButton(card);
+    moreBtn->setIcon(IconLoader::themed(QStringLiteral("menu.svg")));
+    moreBtn->setIconSize(QSize(16, 16));
+    moreBtn->setAutoRaise(true);
+    moreBtn->setCursor(Qt::PointingHandCursor);
+    moreBtn->setPopupMode(QToolButton::InstantPopup);
+    moreBtn->setToolTip(tr("More actions"));
+    moreBtn->setAccessibleName(tr("More actions for this message"));
+    auto* moreMenu = new QMenu(moreBtn);
+    {
+        const QString mid = m.id;
+        const bool isUnread = m.isUnread;
+
+        auto* aReplyAll = moreMenu->addAction(tr("Reply all"));
+        QObject::connect(aReplyAll, &QAction::triggered, this,
+            [this, mid] { emit replyAllToMessageRequested(mid); });
+
+        auto* aForward  = moreMenu->addAction(tr("Forward"));
+        QObject::connect(aForward, &QAction::triggered, this,
+            [this, mid] { emit forwardMessageRequested(mid); });
+
+        moreMenu->addSeparator();
+
+        auto* aArchive = moreMenu->addAction(tr("Archive"));
+        QObject::connect(aArchive, &QAction::triggered, this,
+            [this, mid] { emit archiveMessageRequested(mid); });
+
+        // Gmail web shows "Mark unread / Mark read" depending on state;
+        // mirror that.
+        auto* aRead = moreMenu->addAction(
+            isUnread ? tr("Mark read") : tr("Mark unread"));
+        QObject::connect(aRead, &QAction::triggered, this,
+            [this, mid, isUnread] {
+                emit markMessageReadRequested(mid, /*read=*/isUnread);
+            });
+
+        auto* aSnooze = moreMenu->addAction(tr("Snooze"));
+        QObject::connect(aSnooze, &QAction::triggered, this,
+            [this, mid] { emit snoozeMessageRequested(mid); });
+
+        moreMenu->addSeparator();
+
+        auto* aDelete = moreMenu->addAction(tr("Delete this message"));
+        QObject::connect(aDelete, &QAction::triggered, this,
+            [this, mid] { emit deleteMessageRequested(mid); });
+    }
+    moreBtn->setMenu(moreMenu);
+    headerRow->addWidget(moreBtn);
+
+    cardLayout->addLayout(headerRow);
 
     auto* body = new AutoSizeTextBrowser(card);
     // Trim the QTextDocument's default 4-pt margin: combined with the
@@ -652,14 +726,19 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         cardLayout->addWidget(bottomBrowserRow);
     }
 
-    if (!initiallyExpanded) {
-        // Click anywhere on a collapsed card's header to expand.
+    {
+        // Show/Hide toggle on every card — including initially-expanded
+        // ones. Without it, the user couldn't collapse a card once it
+        // had opened, leading to indefinitely-tall threads. The toggle
+        // sits at the bottom-right of the card; its label tracks the
+        // current visibility state.
         header->setCursor(Qt::PointingHandCursor);
         QObject::connect(header, &QLabel::linkActivated,
                          body, [](const QString&) { /* let body handle */ });
-        // We don't have a click signal on QLabel; wrap via event filter using
-        // a button-like approach: add a small ▾ toggle.
-        auto* toggle = new QPushButton(QStringLiteral("Show"), card);
+        auto* toggle = new QPushButton(
+            initiallyExpanded ? QStringLiteral("Hide")
+                              : QStringLiteral("Show"),
+            card);
         toggle->setFlat(true);
         toggle->setCursor(Qt::PointingHandCursor);
         cardLayout->addWidget(toggle, 0, Qt::AlignRight);

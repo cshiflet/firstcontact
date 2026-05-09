@@ -1,5 +1,7 @@
 #include "SpinningToolButton.h"
 
+#include <QPainter>
+#include <QPixmap>
 #include <QTransform>
 
 #include <cmath>
@@ -44,14 +46,38 @@ void SpinningToolButton::onTick() {
     // enough to feel "active", slow enough that the icon shape
     // stays readable through the rotation.
     angle_ = std::fmod(angle_ + 12.0, 360.0);
-    QTransform t;
-    t.rotate(angle_);
-    QPixmap rotated = basePixmap_.transformed(t, Qt::SmoothTransformation);
-    // QPixmap::transformed grows the bounding box to fit the rotated
-    // shape; for a square source the diagonal can be up to ~1.41x
-    // the side. The QToolButton scales the icon to fit its iconSize
-    // box automatically when we hand it a QIcon, so visual size
-    // stays consistent across angles.
+
+    // Render the rotated icon into a fixed-size QPixmap matching
+    // iconSize() so the apparent visual size stays CONSTANT through
+    // the rotation. QPixmap::transformed grows the bounding box to
+    // fit the rotated shape — at 45° the diagonal of a square is
+    // 1.41x the side, so QToolButton then scales 1.41x-sized pixmaps
+    // back into iconSize, producing a "pulsing" effect (icon grows
+    // and shrinks once per revolution). Drawing into a same-size
+    // canvas with center-rotation clips to a constant footprint.
+    const QSize sz = iconSize();
+    if (sz.isEmpty() || basePixmap_.isNull()) {
+        setIcon(baseIcon_);
+        return;
+    }
+    QPixmap rotated(sz);
+    rotated.setDevicePixelRatio(basePixmap_.devicePixelRatio());
+    rotated.fill(Qt::transparent);
+
+    QPainter p(&rotated);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    // Rotate around the canvas centre, then draw the basePixmap
+    // (already iconSize-sized) centred. The basePixmap's corners
+    // sweep outside the canvas at non-axis angles and get clipped —
+    // exactly what we want for a constant footprint.
+    p.translate(sz.width() / 2.0, sz.height() / 2.0);
+    p.rotate(angle_);
+    p.translate(-basePixmap_.width() / (2.0 * basePixmap_.devicePixelRatio()),
+                -basePixmap_.height() / (2.0 * basePixmap_.devicePixelRatio()));
+    p.drawPixmap(0, 0, basePixmap_);
+    p.end();
+
     setIcon(QIcon(rotated));
 }
 

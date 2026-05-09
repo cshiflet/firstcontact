@@ -612,6 +612,25 @@ void MainWindow::wireSignals() {
             this,    &MainWindow::onSaveAsAttachment);
     connect(reader_, &ReaderPane::downloadAllRequested,
             this,    &MainWindow::onDownloadAllAttachments);
+
+    // Per-card Gmail-web-style action row in each message card. Each
+    // signal carries the messageId of the SPECIFIC message the card
+    // represents; handlers operate on that single message rather than
+    // the whole thread (the toolbar buttons stay thread-scoped).
+    connect(reader_, &ReaderPane::replyToMessageRequested,
+            this,    &MainWindow::onReplyToMessage);
+    connect(reader_, &ReaderPane::replyAllToMessageRequested,
+            this,    &MainWindow::onReplyAllToMessage);
+    connect(reader_, &ReaderPane::forwardMessageRequested,
+            this,    &MainWindow::onForwardMessage);
+    connect(reader_, &ReaderPane::archiveMessageRequested,
+            this,    &MainWindow::onArchiveMessage);
+    connect(reader_, &ReaderPane::markMessageReadRequested,
+            this,    &MainWindow::onMarkMessageRead);
+    connect(reader_, &ReaderPane::deleteMessageRequested,
+            this,    &MainWindow::onDeleteMessage);
+    connect(reader_, &ReaderPane::snoozeMessageRequested,
+            this,    &MainWindow::onSnoozeMessage);
     // Hover a link in any message body → show its target in the
     // status bar; the existing messageChanged restorer puts the
     // signed-in-as / sync-progress baseline back when the cursor
@@ -1469,6 +1488,145 @@ void MainWindow::onReplyAllCurrent() {
 void MainWindow::onForwardCurrent() {
     if (currentMessage_.id.isEmpty()) return;
     openComposeWindow(&currentMessage_, int(ComposeWindow::Mode::Forward));
+}
+
+// ---- Per-card (per-message) handlers ----------------------------------
+//
+// The card's reply button + 3-dot overflow menu fire signals that route
+// here. Unlike on*Current, these target the SPECIFIC messageId carried
+// by the signal — Gmail web's per-card semantics. Reply / Reply-all /
+// Forward open compose with that exact message as the parent (instead
+// of the focused message). Archive / Mark-read / Delete / Snooze apply
+// the label diff to ONE message instead of looping across the whole
+// thread.
+
+void MainWindow::onReplyToMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::Reply));
+}
+
+void MainWindow::onReplyAllToMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::ReplyAll));
+}
+
+void MainWindow::onForwardMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    if (m.id.isEmpty()) return;
+    openComposeWindow(&m, int(ComposeWindow::Mode::Forward));
+}
+
+void MainWindow::onArchiveMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("archive-message-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: archive blocked."), 4000);
+        return;
+    }
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    pending_->flush();
+    statusBar()->showMessage(tr("Message archived."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onMarkMessageRead(const QString& messageId, bool read) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-read-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: mark read/unread blocked."), 4000);
+        return;
+    }
+    QStringList add, rem;
+    if (read) rem << QStringLiteral("UNREAD");
+    else      add << QStringLiteral("UNREAD");
+    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    pending_->flush();
+    statusBar()->showMessage(read ? tr("Marked read.") : tr("Marked unread."),
+                              3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onDeleteMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("delete-message-card"))) {
+        statusBar()->showMessage(
+            tr("Dry-run mode: move-to-Trash blocked."), 4000);
+        return;
+    }
+    if (QMessageBox::question(this, tr("Delete this message"),
+            tr("Move just this message to Trash? "
+               "Other messages in the conversation are unaffected."),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    const QStringList add{QStringLiteral("TRASH")};
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    pending_->flush();
+    statusBar()->showMessage(tr("Message moved to Trash."), 3000);
+    reloadCurrentLabel();
+}
+
+void MainWindow::onSnoozeMessage(const QString& messageId) {
+    if (messageId.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("snooze-message-card"))) {
+        statusBar()->showMessage(tr("Dry-run mode: snooze blocked."), 4000);
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Snooze message"));
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr(
+        "Pick a wake-up time. This message drops out of Inbox now and "
+        "reappears at the chosen time. Other messages in the same "
+        "thread are unaffected."), &dlg));
+    auto* picker = new QDateTimeEdit(
+        QDateTime::currentDateTime().addSecs(60 * 60 * 3), &dlg);
+    picker->setCalendarPopup(true);
+    picker->setMinimumDateTime(QDateTime::currentDateTime().addSecs(60));
+    picker->setDisplayFormat(QStringLiteral("ddd MMM d, yyyy  h:mm AP"));
+    layout->addWidget(picker);
+
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* okBtn     = new QPushButton(tr("Snooze"), &dlg);
+    okBtn->setObjectName(QStringLiteral("primary"));
+    okBtn->setDefault(true);
+    auto* cancelBtn = new QPushButton(tr("Cancel"), &dlg);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(okBtn);
+    layout->addLayout(btnRow);
+    QObject::connect(okBtn,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QDateTime when = picker->dateTime();
+    if (when <= QDateTime::currentDateTime()) {
+        statusBar()->showMessage(tr("Pick a time in the future."), 4000);
+        return;
+    }
+
+    const qint64 wakeAt = when.toMSecsSinceEpoch();
+    fc::cache::MessageRepository::setSnoozeUntil(messageId, wakeAt);
+    const QStringList rem{QStringLiteral("INBOX")};
+    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    pending_->flush();
+    statusBar()->showMessage(
+        tr("Snoozed until %1.").arg(when.toString(QStringLiteral("MMM d, h:mm AP"))),
+        4000);
+    reloadCurrentLabel();
 }
 
 void MainWindow::onCreateLabel(const QString& parentLabelId) {

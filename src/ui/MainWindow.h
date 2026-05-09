@@ -133,6 +133,19 @@ private slots:
                             const QString& filename);
     void onDownloadAllAttachments(const QString& messageId);
 
+    // Per-message handlers triggered by the per-card action row. Unlike
+    // their *Current siblings (which operate on the focused message and
+    // typically apply thread-wide), these target the SPECIFIC messageId
+    // and apply label diffs to that one message only — Gmail-web's per-
+    // card "Delete this message" / "Mark unread" semantics.
+    void onReplyToMessage(const QString& messageId);
+    void onReplyAllToMessage(const QString& messageId);
+    void onForwardMessage(const QString& messageId);
+    void onArchiveMessage(const QString& messageId);
+    void onMarkMessageRead(const QString& messageId, bool read);
+    void onDeleteMessage(const QString& messageId);
+    void onSnoozeMessage(const QString& messageId);
+
     void reloadCurrentLabel();
     void reloadSidebar();
     void onNewMessages(int count);
