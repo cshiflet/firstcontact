@@ -1462,9 +1462,10 @@ void MainWindow::onSignOut() {
 void MainWindow::onSignOutAccount(const QString& accountId) {
     if (accountId.isEmpty()) return;
 
-    // Pop the cache-disposition prompt: yes / no / cancel. yes
-    // wipes the per-account cache rows (re-sign-in does a fresh
-    // initial sync); no keeps them; cancel aborts.
+    // Pop the cache-disposition prompt. Custom button labels make the
+    // two sign-out variants explicit (delete-data vs keep-data) instead
+    // of the older Yes/No mapping which the user had to read the body
+    // copy to disambiguate.
     QMessageBox box(this);
     box.setIcon(QMessageBox::Question);
     box.setWindowTitle(tr("Sign out"));
@@ -1473,18 +1474,21 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
                     .arg(info.email.isEmpty()
                          ? tr("this account") : info.email));
     box.setInformativeText(tr(
-        "Drop the local cache for this account?\n\n"
-        "Yes — wipe cached messages, drafts, outbox, and labels for this "
-        "account. The next sign-in will do a full initial sync.\n\n"
-        "No — keep the cache. The next sign-in resumes from where it "
-        "left off, no re-download.\n\n"
-        "Cancel — leave everything alone."));
-    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No
-                           | QMessageBox::Cancel);
-    box.setDefaultButton(QMessageBox::No);
-    const int result = box.exec();
-    if (result == QMessageBox::Cancel) return;
-    const bool dropCache = result == QMessageBox::Yes;
+        "Deleting local account data will wipe cached messages, drafts, "
+        "outbox, and labels for this account. The next sign-in will do "
+        "a full initial sync."));
+    auto* dropBtn = box.addButton(
+        tr("Sign out and delete local account data"),
+        QMessageBox::DestructiveRole);
+    auto* keepBtn = box.addButton(tr("Sign out"),
+                                   QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(keepBtn);
+    box.exec();
+    auto* clicked = box.clickedButton();
+    if (!clicked || clicked == box.button(QMessageBox::Cancel)) return;
+    const bool dropCache = (clicked == dropBtn);
+    Q_UNUSED(keepBtn);
 
     // Sign out the OAuth side. The OAuthClient currently aliases the
     // active account; signing out a non-active account via this path
