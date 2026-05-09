@@ -46,6 +46,12 @@ LabelTreeModel::LabelTreeModel(QObject* parent)
 LabelTreeModel::~LabelTreeModel() { delete root_; }
 
 void LabelTreeModel::reload() {
+    // Capture the current per-label unread counts BEFORE we wipe the
+    // tree. If the cache hasn't been rewritten yet (sync still in
+    // flight), the post-reset rebuild will see aggUnread=0 for some
+    // nodes; the shadow lets the display fall through to the last
+    // known-good count + ellipsis instead of flashing empty.
+    captureShadow();
     beginResetModel();
     root_->children.clear();
 
@@ -188,9 +194,20 @@ QVariant LabelTreeModel::data(const QModelIndex& idx, int role) const {
             // synthetic intermediate rows that have no real label id of
             // their own. Leaves keep their own count (which equals the
             // aggregate when there are no children).
-            const int u = n->aggUnread;
-            return u > 0 ? QStringLiteral("%1 (%2)").arg(n->name).arg(u)
-                         : n->name;
+            int u = n->aggUnread;
+            // Sync-in-flight fallback: if a fresh reload has reset this
+            // node's count to 0 but we had a positive count before sync
+            // started, show the last known value with an ellipsis. Keeps
+            // the sidebar steady through the brief "(empty)" gap that
+            // reload() introduces between begin/endResetModel.
+            if (syncing_ && u == 0 && !n->fullName.isEmpty()) {
+                const auto it = shadowUnread_.constFind(n->fullName);
+                if (it != shadowUnread_.constEnd()) u = it.value();
+            }
+            if (u <= 0) return n->name;
+            return syncing_
+                ? QStringLiteral("%1 (%2…)").arg(n->name).arg(u)
+                : QStringLiteral("%1 (%2)").arg(n->name).arg(u);
         }
         case IdRole:        return n->id;
         case NameRole:      return n->fullName;
@@ -216,6 +233,43 @@ QHash<int, QByteArray> LabelTreeModel::roleNames() const {
 QString LabelTreeModel::labelIdAt(const QModelIndex& idx) const {
     if (!idx.isValid()) return {};
     return static_cast<Node*>(idx.internalPointer())->id;
+}
+
+void LabelTreeModel::setSyncing(bool on) {
+    if (syncing_ == on) return;
+    syncing_ = on;
+    if (on) {
+        // Snapshot current counts so the upcoming reload(s) can fall
+        // back to them when the cache momentarily reports zero.
+        captureShadow();
+    }
+    // Trigger a re-render of every visible row so the suffix updates.
+    // Sidebar trees are tiny — walking each section + child is cheap.
+    const int sections = rowCount();
+    if (sections > 0) {
+        emit dataChanged(index(0, 0), index(sections - 1, 0),
+                         {Qt::DisplayRole});
+        for (int i = 0; i < sections; ++i) {
+            const auto sec = index(i, 0);
+            const int kids = rowCount(sec);
+            if (kids > 0) {
+                emit dataChanged(index(0, 0, sec), index(kids - 1, 0, sec),
+                                 {Qt::DisplayRole});
+            }
+        }
+    }
+}
+
+void LabelTreeModel::captureShadow() {
+    shadowUnread_.clear();
+    std::function<void(Node*)> visit = [&](Node* n) {
+        if (!n) return;
+        if (!n->fullName.isEmpty()) {
+            shadowUnread_.insert(n->fullName, n->aggUnread);
+        }
+        for (auto& c : n->children) visit(c.get());
+    };
+    visit(root_);
 }
 
 }  // namespace fc

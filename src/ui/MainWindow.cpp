@@ -874,6 +874,13 @@ void MainWindow::wireSignals() {
                 if (syncBtn_) {
                     syncBtn_->setSpinning(s != fc::sync::SyncService::State::Idle);
                 }
+                // Sidebar unread counts get an ellipsis hint while
+                // sync is in flight, so the brief gap inside reload()
+                // doesn't show up as flashing/empty parens.
+                if (sidebar_ && sidebar_->model()) {
+                    sidebar_->model()->setSyncing(
+                        s != fc::sync::SyncService::State::Idle);
+                }
                 switch (s) {
                     case fc::sync::SyncService::State::InitialSync:
                         isSyncing_ = true;

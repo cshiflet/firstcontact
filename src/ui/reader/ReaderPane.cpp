@@ -21,6 +21,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTimer>
@@ -835,18 +836,23 @@ void ReaderPane::showThread(const std::vector<fc::Message>& messages,
         contentLayout_->insertWidget(i, card);
     }
 
-    // Centre the focused card in the viewport once Qt has had a tick
-    // to lay everything out — at this synchronous point the cards'
-    // y() values are still 0. ensureWidgetVisible(card, x, y) takes
-    // a margin in pixels; we pass half the viewport height so the
-    // card lands roughly centred rather than glued to the top.
+    // Top-align the focused card: scroll so its top edge sits at the
+    // viewport's top edge. Mirrors Gmail web's behaviour when you click
+    // a message in the threadlist — the chosen card snaps to the top
+    // rather than landing wherever ensureWidgetVisible decides. We
+    // wait one event-loop tick because at this synchronous point the
+    // cards' y() values are still 0; QScrollArea hasn't laid them out
+    // yet. clamp to maximum so we don't try to scroll past the end on
+    // very short threads.
     if (focusedCard) {
         QPointer<QScrollArea> s = scroll_;
         QPointer<QWidget> c = focusedCard;
         QTimer::singleShot(0, this, [s, c] {
             if (!s || !c) return;
-            const int margin = qMax(40, s->viewport()->height() / 2);
-            s->ensureWidgetVisible(c, /*xMargin=*/0, /*yMargin=*/margin);
+            auto* bar = s->verticalScrollBar();
+            if (!bar) return;
+            const int target = qBound(bar->minimum(), c->y(), bar->maximum());
+            bar->setValue(target);
         });
     }
 }

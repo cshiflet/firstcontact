@@ -3,6 +3,8 @@
 #include "cache/LabelRepository.h"
 
 #include <QAbstractItemModel>
+#include <QHash>
+#include <QString>
 
 #include <memory>
 #include <vector>
@@ -38,12 +40,26 @@ public:
 
     void reload();
 
+    // While a sync is active, the unread-count suffix changes from
+    // "Inbox (3)" to "Inbox (3…)". Without this hint the suffix
+    // briefly disappeared during reload() (beginResetModel wipes the
+    // tree, then endResetModel rebuilds it from cache — counts are
+    // empty between the two). The shadow map captured before each
+    // reload survives the reset, so even if the fresh tree has
+    // aggUnread=0 momentarily we still show the user's last
+    // known-good count with the ellipsis hint.
+    void setSyncing(bool on);
+
     QString labelIdAt(const QModelIndex& idx) const;
 
 private:
     struct Node;
     using NodePtr = std::unique_ptr<Node>;
     Node* root_;
+
+    bool                syncing_ = false;
+    QHash<QString, int> shadowUnread_;   // by fullName, survives reload()
+    void captureShadow();
 };
 
 }  // namespace fc
