@@ -68,12 +68,21 @@ public:
     // the cache forward. setSearchSource pins to FTS5 search results
     // (no pagination — the FTS API is top-K only).
     //
+    // setCrossAccountLabelSource pins to the cross-account ("All
+    // Inboxes") view: per-account scoping is dropped, the
+    // *AllAccounts repository variants drive both the first page
+    // and every fetchMore. Each row carries its source accountId
+    // through AccountIdRole so a click can route back to the right
+    // context.
+    //
     // unreadOnly applies to the label source: when true, only messages
     // currently carrying UNREAD (or threads with at least one unread
     // message in conversation view) appear in the listing.
     void setLabelSource(const QString& labelId, bool conversationView,
                          bool unreadOnly = false);
     void setSearchSource(const QString& query, bool conversationView);
+    void setCrossAccountLabelSource(const QString& labelId,
+                                     bool conversationView);
 
     // Re-queries the active source for offset=0, limit=loadedRows — used by
     // messagesUpdated handlers to refresh in place without losing the
@@ -111,7 +120,7 @@ signals:
     void cacheExhausted(const QString& labelId);
 
 private:
-    enum class Source { None, ByLabel, BySearch };
+    enum class Source { None, ByLabel, BySearch, CrossAccountLabel };
 
     int  pageSize() const { return 100; }
     void loadFirstPage();

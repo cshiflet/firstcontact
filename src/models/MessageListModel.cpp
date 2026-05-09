@@ -75,8 +75,12 @@ bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
     if (parent.isValid()) return false;
     // Search has no offset support in our FTS API (top-K only). Sticking
     // to false for search keeps Qt from poking fetchMore in a loop the
-    // model can't actually fulfill.
-    if (source_ != Source::ByLabel) return false;
+    // model can't actually fulfill. Both per-account ByLabel and
+    // cross-account CrossAccountLabel sources DO paginate; the
+    // underlying repository variants take limit/offset and walk
+    // newest-first.
+    if (source_ != Source::ByLabel
+        && source_ != Source::CrossAccountLabel) return false;
     // The cache is drained for this source — wait for messagesUpdated /
     // a server top-up to bring back new rows. (loadFirstPage / explicit
     // refresh resets this flag.)
@@ -85,13 +89,21 @@ bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
 
 void MessageListModel::fetchMore(const QModelIndex& parent) {
     if (parent.isValid()) return;
-    if (source_ != Source::ByLabel) return;
+    if (source_ != Source::ByLabel
+        && source_ != Source::CrossAccountLabel) return;
     if (cacheDrained_) return;
 
     const int offset = static_cast<int>(rows_.size());
-    auto more = conversationView_
-        ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset, unreadOnly_)
-        : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset, unreadOnly_);
+    std::vector<Message> more;
+    if (source_ == Source::CrossAccountLabel) {
+        more = conversationView_
+            ? cache::MessageRepository::listThreadsByLabelAllAccounts(sourceParam_, pageSize(), offset)
+            : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, pageSize(), offset);
+    } else {
+        more = conversationView_
+            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset, unreadOnly_)
+            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset, unreadOnly_);
+    }
 
     if (more.empty()) {
         cacheDrained_ = true;
@@ -112,7 +124,10 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
     // owner kicks off a server top-up — Qt's view controllers won't ask
     // for fetchMore again once canFetchMore goes false, so without the
     // signal here the user would be stuck whenever the very last cache
-    // page came back short.
+    // page came back short. (For cross-account the owner's
+    // cacheExhausted handler is a no-op since INBOX — the only
+    // cross-account label today — is a seed kept fresh by every
+    // account's incremental sync.)
     if (static_cast<int>(more.size()) < pageSize()) {
         cacheDrained_ = true;
         emit cacheExhausted(sourceParam_);
@@ -127,6 +142,10 @@ void MessageListModel::resumeAfterTopUp() {
     // for the next page if user scrolls) or a sane cap, so a single
     // server round-trip's worth of fresh rows lands in the view
     // without forcing the user to scroll-poke for each chunk.
+    //
+    // Cross-account doesn't go through topUpLabel today (every
+    // contributing account's incremental sync keeps INBOX fresh on
+    // its own), so resumeAfterTopUp is a per-account-only thing.
     if (source_ != Source::ByLabel) return;
     // Re-entry guard. fetchMore inside the loop emits cacheExhausted
     // on short pages, which the owner connects to topUpLabel ->
@@ -158,6 +177,19 @@ void MessageListModel::setSearchSource(const QString& query, bool conversationVi
     sourceParam_      = query;
     conversationView_ = conversationView;
     unreadOnly_       = false;   // search results aren't unread-filtered
+    loadFirstPage();
+}
+
+void MessageListModel::setCrossAccountLabelSource(const QString& labelId,
+                                                    bool conversationView) {
+    source_           = Source::CrossAccountLabel;
+    sourceParam_      = labelId;
+    conversationView_ = conversationView;
+    // Unread-only filtering isn't wired through the *AllAccounts
+    // repository variants yet; cross-account view always shows
+    // everything for the label. Re-evaluate when v2 grows beyond
+    // INBOX as the only cross-account label.
+    unreadOnly_       = false;
     loadFirstPage();
 }
 
@@ -201,6 +233,12 @@ void MessageListModel::refreshFromSource() {
             : cache::MessageRepository::listByLabel(sourceParam_, probe, 0, unreadOnly_);
         moreInCache = static_cast<int>(rows.size()) > limit;
         if (moreInCache) rows.pop_back();   // we only show `limit` rows
+    } else if (source_ == Source::CrossAccountLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabelAllAccounts(sourceParam_, probe, 0)
+            : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, probe, 0);
+        moreInCache = static_cast<int>(rows.size()) > limit;
+        if (moreInCache) rows.pop_back();
     } else {
         // Search has no offset support, so the probe doesn't apply —
         // FTS top-K returns however many results match, capped at
@@ -220,7 +258,12 @@ void MessageListModel::refreshFromSource() {
     beginResetModel();
     rows_ = std::move(rows);
     expandedThreads_.clear();
-    cacheDrained_ = (source_ == Source::BySearch) || !moreInCache;
+    if (source_ == Source::BySearch) {
+        cacheDrained_ = true;
+    } else {
+        // ByLabel and CrossAccountLabel both rely on the probe.
+        cacheDrained_ = !moreInCache;
+    }
     endResetModel();
 
     if (savedExpansions.isEmpty()) return;
@@ -244,6 +287,10 @@ void MessageListModel::loadFirstPage() {
         rows = conversationView_
             ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), 0, unreadOnly_)
             : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), 0, unreadOnly_);
+    } else if (source_ == Source::CrossAccountLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabelAllAccounts(sourceParam_, pageSize(), 0)
+            : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, pageSize(), 0);
     } else if (source_ == Source::BySearch) {
         rows = conversationView_
             ? cache::MessageRepository::searchFtsThreads(sourceParam_, pageSize())
@@ -259,7 +306,9 @@ void MessageListModel::loadFirstPage() {
 }
 
 QString MessageListModel::sourceLabelId() const {
-    return source_ == Source::ByLabel ? sourceParam_ : QString();
+    if (source_ == Source::ByLabel
+        || source_ == Source::CrossAccountLabel) return sourceParam_;
+    return {};
 }
 
 void MessageListModel::replaceAll(std::vector<Message> messages) {

@@ -796,12 +796,15 @@ qint64 MessageRepository::upsert(const fc::Message& m) {
     return upsert(aid, m);
 }
 std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
-                                                        int limit, int offset) {
-    return listByLabel(Database::defaultAccountId(), labelId, limit, offset);
+                                                        int limit, int offset,
+                                                        bool unreadOnly) {
+    return listByLabel(Database::defaultAccountId(), labelId, limit, offset,
+                        unreadOnly);
 }
 std::vector<fc::Message> MessageRepository::listThreadsByLabel(
-        const QString& labelId, int limit, int offset) {
-    return listThreadsByLabel(Database::defaultAccountId(), labelId, limit, offset);
+        const QString& labelId, int limit, int offset, bool unreadOnly) {
+    return listThreadsByLabel(Database::defaultAccountId(), labelId,
+                               limit, offset, unreadOnly);
 }
 std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int limit) {
     return searchFts(Database::defaultAccountId(), query, limit);

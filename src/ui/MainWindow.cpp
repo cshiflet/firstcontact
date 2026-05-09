@@ -1469,21 +1469,21 @@ void MainWindow::reloadCurrentLabel() {
     const QString preservedId       = currentMessage_.id;
     const QString preservedThreadId = currentMessage_.threadId;
 
-    if (crossAccountView_) {
-        // v2 unified inbox: cross-account view uses the *AllAccounts
-        // variants. The model's source-pinned pagination doesn't yet
-        // know how to route per-account fetchMore calls in this mode,
-        // so feed the first page via replaceAll and let the user
-        // re-click the label or scroll a non-cross-account label
-        // for paginated browsing.
-        auto rows = currentSearchQuery_.isEmpty()
-            ? (conv
-                ? fc::cache::MessageRepository::listThreadsByLabelAllAccounts(currentLabelId_, kPageSize, 0)
-                : fc::cache::MessageRepository::listByLabelAllAccounts(currentLabelId_, kPageSize, 0))
-            : (conv
-                ? fc::cache::MessageRepository::searchFtsThreadsAllAccounts(currentSearchQuery_, kPageSize)
-                : fc::cache::MessageRepository::searchFtsAllAccounts(currentSearchQuery_, kPageSize));
+    if (crossAccountView_ && !currentSearchQuery_.isEmpty()) {
+        // Cross-account search still uses replaceAll — searchFts is
+        // top-K only, no offset support, so pagination doesn't apply.
+        auto rows = conv
+            ? fc::cache::MessageRepository::searchFtsThreadsAllAccounts(currentSearchQuery_, kPageSize)
+            : fc::cache::MessageRepository::searchFtsAllAccounts(currentSearchQuery_, kPageSize);
         listModel_->replaceAll(std::move(rows));
+    } else if (crossAccountView_) {
+        // v2 unified inbox: cross-account label browsing now uses
+        // the source-pinned cross-account mode so fetchMore walks
+        // the *AllAccounts repository variants page-by-page just
+        // like the per-account path. No top-up wiring is needed —
+        // every contributing account's incremental sync keeps INBOX
+        // (the only cross-account label today) fresh on its own.
+        listModel_->setCrossAccountLabelSource(currentLabelId_, conv);
     } else if (currentSearchQuery_.isEmpty()) {
         // Single-account, label browsing: paginated source-pinned
         // mode. The legacy zero-arg listByLabel inside the model
