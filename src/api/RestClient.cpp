@@ -50,7 +50,14 @@ ApiError parseErrorBody(int status, const QByteArray& body) {
 }  // namespace
 
 RestClient::RestClient(fc::auth::OAuthClient* auth, QObject* parent)
-    : QObject(parent), auth_(auth), nam_(new QNetworkAccessManager(this)) {}
+    : QObject(parent),
+      getToken_([auth]() { return auth->accessTokenBlocking(); }),
+      nam_(new QNetworkAccessManager(this)) {}
+
+RestClient::RestClient(TokenGetter tokenGetter, QObject* parent)
+    : QObject(parent),
+      getToken_(std::move(tokenGetter)),
+      nam_(new QNetworkAccessManager(this)) {}
 
 void RestClient::send(Verb verb, const QUrl& url, const QByteArray& body,
                       const QByteArray& contentType, DoneCb cb) {
@@ -61,7 +68,7 @@ void RestClient::send(Verb verb, const QUrl& url, const QByteArray& body,
 void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
                           const QByteArray& contentType,
                           int attempt, bool refreshedOnce, DoneCb cb) {
-    const QString token = auth_->accessTokenBlocking();
+    const QString token = getToken_();
     if (token.isEmpty()) {
         cb({}, ApiError{ApiErrorKind::Auth, 0, QStringLiteral("no token"), {}});
         return;
@@ -107,8 +114,17 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
         // failed POST /messages/send could double-send mail (the
         // server may have processed the request fully, just lost
         // the response). For those we retry ONLY on explicit 429
-        // (server said "didn't process, try again") — never on
-        // transport or 5xx where the outcome is ambiguous.
+        // (server said "didn't process, try again") — never on 5xx
+        // where the outcome is ambiguous.
+        //
+        // Caveat: Qt 6.4 QNAM does its own transparent retry below
+        // this layer when the TCP connection drops before any HTTP
+        // response bytes. That retry is method-agnostic and we
+        // never see the original failure. The guard here still
+        // protects against the more common 5xx case (where the
+        // server DID write bytes, so QNAM does not auto-retry).
+        // See test_rest_client.cpp::qnamTransparentlyRetries…
+        // for the documenting test.
         const bool idempotent = (verb == Verb::Get || verb == Verb::Put);
 
         if (nerr != QNetworkReply::NoError && status == 0) {
