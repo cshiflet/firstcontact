@@ -182,11 +182,51 @@ QString humanSize(qint64 bytes) {
     return QStringLiteral("%1 GB").arg(bytes / GB, 0, 'f', 2);
 }
 
+// Some senders (notably marketers using ESPs that auto-generate text/plain
+// from text/html via naive tag-strip) produce a "plain text" part that is
+// one giant paragraph: thousands of characters, no newlines. Showing that
+// in the reader is worse than re-deriving plain text from the HTML body
+// (which we control via Html2Text and preserve paragraph breaks for).
+//
+// Heuristic: if any line in bodyText is longer than this and there's a
+// non-empty bodyHtml available, prefer html2text(bodyHtml). 600 chars is
+// well above any real prose paragraph; only auto-generated walls of text
+// trip it.
+constexpr int kLossyPlainTextLineThreshold = 600;
+
+bool plainTextLooksLossy(const QString& text) {
+    if (text.size() < kLossyPlainTextLineThreshold) return false;
+    int run = 0;
+    for (QChar c : text) {
+        if (c == QChar('\n')) { run = 0; continue; }
+        if (++run > kLossyPlainTextLineThreshold) return true;
+    }
+    return false;
+}
+
 QString bodyHtml(const fc::Message& m) {
-    if (!m.bodyText.isEmpty()) {
+    // Prefer the HTML body when the plain-text part looks auto-generated
+    // and lossy — we can re-derive plain text from HTML with paragraph
+    // structure intact via util::html2text. The original bodyText path
+    // still wins when text/plain is genuinely useful (most personal
+    // mail, mailing-list digests, and any sender who composed a
+    // text-first body).
+    const bool preferHtmlOverLossyText = !m.bodyHtml.isEmpty()
+        && plainTextLooksLossy(m.bodyText);
+
+    if (!m.bodyText.isEmpty() && !preferHtmlOverLossyText) {
         return util::linkifyPlainText(m.bodyText, Preferences::linkDisplayMode());
     }
     if (!m.bodyHtml.isEmpty()) {
+        if (preferHtmlOverLossyText) {
+            // Tier 1 of the "I'd rather see structured plain text" mode:
+            // tag-strip the HTML to a paragraph-preserving plain string,
+            // then linkify. Sanitisation isn't required here — html2text
+            // drops every tag — but we still feed the result through
+            // linkifyPlainText so URLs render as clickable anchors.
+            const QString rebuilt = util::html2text(m.bodyHtml);
+            return util::linkifyPlainText(rebuilt, Preferences::linkDisplayMode());
+        }
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;
         if (safe.remoteImagesBlocked) {
