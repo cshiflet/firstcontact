@@ -451,6 +451,36 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     contentLayout->addLayout(composeForm);
 
+    // Storage — small section with a single button that opens the
+    // cache-manager dialog. Lives near the end so it sits below the
+    // common compose / appearance / html knobs the user is more
+    // likely to be tweaking.
+    auto* storageTitle = new QLabel(
+        tr("<h3 style='margin:0'>Storage</h3>"), content);
+    storageTitle->setTextFormat(Qt::RichText);
+    contentLayout->addSpacing(12);
+    contentLayout->addWidget(storageTitle);
+
+    auto* storageHint = new QLabel(tr(
+        "View the on-disk cache footprint per account. From there "
+        "you can drop a single account's cache, drop messages older "
+        "than N days, reduce a cache to a target size, or wipe "
+        "orphaned data left behind by removed accounts."), content);
+    storageHint->setObjectName(QStringLiteral("FormHint"));
+    storageHint->setWordWrap(true);
+    storageHint->setTextFormat(Qt::RichText);
+    contentLayout->addWidget(storageHint);
+
+    auto* cacheBtn = new QPushButton(tr("Manage cache…"), content);
+    cacheBtn->setCursor(Qt::PointingHandCursor);
+    auto* cacheRow = new QHBoxLayout;
+    cacheRow->addWidget(cacheBtn);
+    cacheRow->addStretch(1);
+    contentLayout->addLayout(cacheRow);
+    connect(cacheBtn, &QPushButton::clicked, this, [this] {
+        emit cacheManagerRequested();
+    });
+
     contentLayout->addStretch(1);
 
     // Buttons live OUTSIDE the scroll area so they're always visible at

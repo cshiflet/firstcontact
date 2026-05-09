@@ -2,6 +2,7 @@
 
 #include <QDialog>
 
+class QLabel;
 class QTableWidget;
 
 namespace fc::account { class AccountManager; }
@@ -28,6 +29,7 @@ private:
 
     fc::account::AccountManager* accounts_;
     QTableWidget* table_ = nullptr;
+    QLabel*       totalLabel_ = nullptr;
 };
 
 }  // namespace fc::ui

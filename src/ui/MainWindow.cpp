@@ -525,6 +525,13 @@ void MainWindow::buildToolBar() {
 
 void MainWindow::onOpenSettings() {
     SettingsDialog dlg(this);
+    // Settings → Storage → "Manage cache…" pops the cache-manager
+    // dialog. SettingsDialog stays AccountManager-free; we host the
+    // launch here where accounts_ is in scope.
+    connect(&dlg, &SettingsDialog::cacheManagerRequested, this, [this] {
+        CacheManagerDialog cdlg(accounts_, this);
+        cdlg.exec();
+    });
     dlg.exec();
     // Settings can flip Preferences::conversationView() (changes the
     // grouping in the message list), the toolbar layout, attachment

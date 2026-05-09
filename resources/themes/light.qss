@@ -170,6 +170,7 @@ QToolBar QLineEdit:focus {
 }
 
 QTextEdit,
+QPlainTextEdit,
 QTextBrowser {
     background-color: #ffffff;
     color: #202124;

@@ -13,6 +13,13 @@ class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(QWidget* parent = nullptr);
 
+signals:
+    // Emitted when the user clicks "Manage cache…" in the Storage
+    // section. The owning window (MainWindow) opens
+    // CacheManagerDialog — SettingsDialog itself doesn't take an
+    // AccountManager dependency.
+    void cacheManagerRequested();
+
 private slots:
     void onThemeChanged(int idx);
     void onHtmlPreviewChanged(int idx);

@@ -127,6 +127,30 @@ public:
     // number of deleted message rows.
     int clearMessagesOlderThan(const QString& id, int days);
 
+    // Deletes oldest-first messages in the named account until the
+    // approximate cache size (cacheSizeFor) drops to `targetBytes`.
+    // Returns the number of messages deleted. Useful for the cache
+    // manager's "Reduce to <N> MB" action.
+    int clearMessagesToTargetSize(const QString& id, qint64 targetBytes);
+
+    // Per-account cache statistics — what cacheSizeFor returns plus
+    // counts the dialog wants to display: messages, threads,
+    // labels (folders), attachments, drafts, outbox, pending_ops.
+    // Populated for an existing account or an orphaned account_id;
+    // either way the row counts come straight from the per-account
+    // tables.
+    struct AccountCacheStats {
+        qint64 sizeBytes        = 0;
+        int    messageCount     = 0;
+        int    threadCount      = 0;
+        int    labelCount       = 0;
+        int    attachmentCount  = 0;
+        int    draftCount       = 0;
+        int    outboxCount      = 0;
+        int    pendingOpsCount  = 0;
+    };
+    AccountCacheStats statsFor(const QString& id) const;
+
     // Convenience: lookup by id. Returns an empty-id AccountInfo when
     // the id isn't known.
     AccountInfo accountById(const QString& id) const;

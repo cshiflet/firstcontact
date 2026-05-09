@@ -429,6 +429,94 @@ int AccountManager::clearMessagesOlderThan(const QString& id, int days) {
     return q.numRowsAffected();
 }
 
+int AccountManager::clearMessagesToTargetSize(const QString& id,
+                                                qint64 targetBytes) {
+    if (id.isEmpty() || targetBytes < 0) return 0;
+    const qint64 currentBytes = cacheSizeFor(id);
+    if (currentBytes <= targetBytes) return 0;
+
+    auto db = fc::cache::databaseHandle();
+    int deleted = 0;
+    qint64 freed = 0;
+    const qint64 toFree = currentBytes - targetBytes;
+
+    // Walk messages oldest first, accumulating bytes_cached, deleting
+    // each row until we've freed enough. We delete one row at a time
+    // (rather than computing a cutoff timestamp) because bytes_cached
+    // varies wildly per message — a single 50 MB attachment can
+    // overshoot a fixed-time cutoff. Loop instead.
+    QSqlQuery sel(db);
+    sel.prepare(QStringLiteral(
+        "SELECT id, COALESCE(bytes_cached, 0) FROM messages "
+        "WHERE account_id = :a "
+        "ORDER BY internal_date ASC"));
+    sel.bindValue(QStringLiteral(":a"), id);
+    if (!sel.exec()) {
+        qWarning("clearMessagesToTargetSize (select): %s",
+                 qUtf8Printable(sel.lastError().text()));
+        return 0;
+    }
+
+    QStringList toDelete;
+    toDelete.reserve(64);
+    while (sel.next() && freed < toFree) {
+        toDelete << sel.value(0).toString();
+        freed += sel.value(1).toLongLong();
+    }
+    if (toDelete.isEmpty()) return 0;
+
+    // Delete in batches to keep individual statements small.
+    constexpr int kBatch = 200;
+    for (int i = 0; i < toDelete.size(); i += kBatch) {
+        const int upper = qMin(i + kBatch, int(toDelete.size()));
+        QStringList placeholders;
+        placeholders.reserve(upper - i);
+        for (int j = i; j < upper; ++j) {
+            placeholders << QStringLiteral("?");
+        }
+        QSqlQuery del(db);
+        del.prepare(QStringLiteral(
+            "DELETE FROM messages WHERE account_id = ? AND id IN (%1)")
+                        .arg(placeholders.join(QLatin1Char(','))));
+        del.addBindValue(id);
+        for (int j = i; j < upper; ++j) del.addBindValue(toDelete.at(j));
+        if (!del.exec()) {
+            qWarning("clearMessagesToTargetSize (delete): %s",
+                     qUtf8Printable(del.lastError().text()));
+            break;
+        }
+        deleted += del.numRowsAffected();
+    }
+    return deleted;
+}
+
+AccountManager::AccountCacheStats AccountManager::statsFor(
+        const QString& id) const {
+    AccountCacheStats s;
+    if (id.isEmpty()) return s;
+    auto db = fc::cache::databaseHandle();
+
+    s.sizeBytes = cacheSizeFor(id);
+
+    auto countOf = [&](const char* table) {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral("SELECT COUNT(*) FROM %1 "
+                                  "WHERE account_id = :a").arg(
+                                      QString::fromLatin1(table)));
+        q.bindValue(QStringLiteral(":a"), id);
+        if (q.exec() && q.next()) return q.value(0).toInt();
+        return 0;
+    };
+    s.messageCount    = countOf("messages");
+    s.threadCount     = countOf("threads");
+    s.labelCount      = countOf("labels");
+    s.attachmentCount = countOf("attachments");
+    s.draftCount      = countOf("drafts");
+    s.outboxCount     = countOf("outbox");
+    s.pendingOpsCount = countOf("pending_ops");
+    return s;
+}
+
 AccountInfo AccountManager::accountById(const QString& id) const {
     for (const auto& a : accounts_) {
         if (a.id == id) return a;
