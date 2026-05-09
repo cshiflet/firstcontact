@@ -128,6 +128,12 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         dismiss->setFlat(true);
         dismiss->setFixedSize(20, 20);
         dismiss->setToolTip(tr("Dismiss"));
+        // Button text "✕" reads to screen readers as "x" — give it a
+        // proper name. Description echoes the banner role so the user
+        // knows what they're dismissing.
+        dismiss->setAccessibleName(tr("Dismiss error"));
+        dismiss->setAccessibleDescription(
+            tr("Hide the error banner above. Does not retry the failed action."));
         dismiss->setCursor(Qt::PointingHandCursor);
         row->addWidget(icon);
         row->addWidget(errorBannerLabel_, /*stretch=*/1);
@@ -354,6 +360,14 @@ void MainWindow::buildToolBar() {
         searchIconAction_->setToolTip(tr("Search (/)"));
     }
     searchEdit_->setToolTip(tr("Search mail — Gmail syntax. Press / to focus."));
+    // Screen-reader name + hint for the search field. The leading icon
+    // action inherits its description from the QLineEdit's accessible
+    // name automatically.
+    searchEdit_->setAccessibleName(tr("Search mail"));
+    searchEdit_->setAccessibleDescription(tr(
+        "Gmail search syntax — for example "
+        "'from:alice subject:invoice has:attachment'. "
+        "Press slash anywhere in the window to focus this field."));
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
@@ -368,6 +382,12 @@ void MainWindow::buildToolBar() {
         : Qt::ToolButtonIconOnly);
     accountButton_->setAutoRaise(true);
     accountButton_->setCursor(Qt::PointingHandCursor);
+    // Tooltip alone doesn't reach screen readers — set the accessible
+    // name explicitly so Orca / Narrator / VoiceOver announce something
+    // useful when this icon-only button takes focus. The dynamic
+    // "Signed in as <email>" tooltip is also pushed to the accessible
+    // description in refreshAccountMenu().
+    accountButton_->setAccessibleName(tr("Account"));
     accountMenu_ = new QMenu(accountButton_);
     accountButton_->setMenu(accountMenu_);
     iconActions_.append({accountButton_->defaultAction(), QStringLiteral("user.svg")});
@@ -385,6 +405,7 @@ void MainWindow::buildToolBar() {
     overflowButton_->setAutoRaise(true);
     overflowButton_->setCursor(Qt::PointingHandCursor);
     overflowButton_->setToolTip(tr("More actions"));
+    overflowButton_->setAccessibleName(tr("More actions"));
     overflowMenu_ = new QMenu(overflowButton_);
     overflowButton_->setMenu(overflowMenu_);
     overflowAction_ = tb->addWidget(overflowButton_);
@@ -955,6 +976,7 @@ void MainWindow::refreshBandwidthLabel() {
     const qint64 up   = s.bytesOut();
     const int reqs    = s.requestCount();
     bandwidthLabel_->setText(QStringLiteral("↓ %1").arg(humanBytes(down)));
+    bandwidthLabel_->setAccessibleName(tr("Bandwidth used this session"));
     bandwidthLabel_->setToolTip(tr(
         "Session transfer since launch:\n"
         "↓ %1 received\n"
