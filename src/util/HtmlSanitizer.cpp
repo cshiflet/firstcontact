@@ -188,10 +188,42 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
             continue;
         }
 
-        // Tag.
-        const int gt = dirty.indexOf(QChar('>'), i);
+        // Tag. Scan to the matching `>`, but skip over any `>` that
+        // sits inside a quoted attribute value — naive indexOf('>')
+        // would terminate parsing early on inputs like
+        //   <a title="a>b" href="javascript:…">
+        // and leak the tail back into the output as escaped text.
+        // The result was rendering noise (script never executed —
+        // tail still got escaped) but ugly. Walk the input looking
+        // for the close while toggling an `inQuote` flag on
+        // unescaped `'`/`"`.
+        //
+        // Cap the scan at kMaxTagSpan bytes so a malformed input with
+        // an unclosed quote (e.g. `<a title="...`) can't swallow the
+        // rest of the document into one phantom tag and discard
+        // everything after it. Real HTML attributes are well under
+        // 64KiB; on overflow we treat the `<` as a literal text char
+        // and resume sanitising at i+1.
+        constexpr int kMaxTagSpan = 64 * 1024;
+        const int scanLimit = qMin<int>(dirty.size(), i + 1 + kMaxTagSpan);
+        int gt = -1;
+        QChar quote;
+        for (int j = i + 1; j < scanLimit; ++j) {
+            const QChar c = dirty[j];
+            if (!quote.isNull()) {
+                if (c == quote) quote = QChar();
+                continue;
+            }
+            if (c == QLatin1Char('"') || c == QLatin1Char('\'')) {
+                quote = c;
+                continue;
+            }
+            if (c == QLatin1Char('>')) { gt = j; break; }
+        }
         if (gt < 0) {
-            // Unterminated `<`; treat as literal text (escaped).
+            // Unterminated `<` (or the scan ran off the cap). Treat
+            // as literal text (escaped) so the document tail still
+            // gets sanitised correctly.
             if (dropDepth == 0) out.append(QStringLiteral("&lt;"));
             ++i;
             continue;
@@ -252,7 +284,12 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
         }
 
         out.append(QChar('<')).append(t.name).append(attrsOut);
-        if (t.selfClose || voidTags().contains(t.name)) {
+        // HTML5 only treats VOID elements as self-closing when written
+        // `<tag />`. For non-void tags an XHTML-style `<div/>` parses
+        // as an open `<div>` (with no matching close), which leaves
+        // the document tree imbalanced. Honour selfClose only when
+        // the element is in our void-tag list.
+        if (voidTags().contains(t.name)) {
             out.append(QStringLiteral(" />"));
         } else {
             out.append(QChar('>'));

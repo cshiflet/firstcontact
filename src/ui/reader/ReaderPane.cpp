@@ -23,6 +23,7 @@
 #include <QScrollArea>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -89,29 +90,38 @@ ThemeColors themeColors() {
 QString headerHtml(const fc::Message& m, bool full) {
     const ThemeColors c = themeColors();
     const QString subject = util::decodeHtmlEntities(m.subject);
+    // Scale the inline pt sizes by the user's UI scale preference —
+    // these are inline HTML styles, NOT QSS rules, so the regex pass
+    // in Theme::loadStylesheet doesn't reach them.
+    const double scale = Preferences::uiFontScale();
+    auto pt = [scale](int n) { return qMax(1, qRound(n * scale)); };
     QString h = QStringLiteral(
-        "<div style='font-weight:600; font-size:13pt; line-height:1.3; color:%1;'>%2</div>"
-        "<div style='color:%3; font-size:10pt; margin-top:2px;'>"
-        "<span style='font-weight:500; color:%1;'>%4</span> &nbsp;·&nbsp; %5</div>")
-        .arg(c.primary,
-             subject.isEmpty()
+        "<div style='font-weight:600; font-size:%1pt; line-height:1.3; color:%2;'>%3</div>"
+        "<div style='color:%4; font-size:%5pt; margin-top:2px;'>"
+        "<span style='font-weight:500; color:%2;'>%6</span> &nbsp;·&nbsp; %7</div>")
+        .arg(pt(13))
+        .arg(c.primary)
+        .arg(subject.isEmpty()
                  ? QStringLiteral("<i>(no subject)</i>")
-                 : subject.toHtmlEscaped(),
-             c.secondary,
-             fromDisplay(m),
-             formatDate(m.internalDate));
+                 : subject.toHtmlEscaped())
+        .arg(c.secondary)
+        .arg(pt(10))
+        .arg(fromDisplay(m))
+        .arg(formatDate(m.internalDate));
     if (full) {
         if (!m.toAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:%1; font-size:9pt; margin-top:4px;'>"
-                                "<b>to</b> %2</div>")
-                    .arg(c.secondary,
-                         m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:%2pt; margin-top:4px;'>"
+                                "<b>to</b> %3</div>")
+                    .arg(c.secondary)
+                    .arg(pt(9))
+                    .arg(m.toAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
         if (!m.ccAddrs.isEmpty()) {
-            h += QStringLiteral("<div style='color:%1; font-size:9pt;'>"
-                                "<b>cc</b> %2</div>")
-                    .arg(c.secondary,
-                         m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
+            h += QStringLiteral("<div style='color:%1; font-size:%2pt;'>"
+                                "<b>cc</b> %3</div>")
+                    .arg(c.secondary)
+                    .arg(pt(9))
+                    .arg(m.ccAddrs.join(QStringLiteral(", ")).toHtmlEscaped());
         }
     }
     return h;
@@ -173,7 +183,9 @@ QString humanSize(qint64 bytes) {
 }
 
 QString bodyHtml(const fc::Message& m) {
-    if (!m.bodyText.isEmpty()) return util::linkifyPlainText(m.bodyText);
+    if (!m.bodyText.isEmpty()) {
+        return util::linkifyPlainText(m.bodyText, Preferences::linkDisplayMode());
+    }
     if (!m.bodyHtml.isEmpty()) {
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;
@@ -228,6 +240,11 @@ void ReaderPane::clearStack() {
 QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpanded) {
     auto* card = new QFrame(content_);
     card->setObjectName(QStringLiteral("MessageCard"));
+    // Tag the card with its message id so showThread's focus-and-scroll
+    // pass can find it after layout settles. Plain QString property —
+    // findChild walks by objectName, but we filter on this property
+    // because objectName is shared across all cards.
+    card->setProperty("messageId", m.id);
     card->setFrameShape(QFrame::NoFrame);
     auto* cardLayout = new QVBoxLayout(card);
     cardLayout->setContentsMargins(12, 10, 12, 10);
@@ -277,6 +294,16 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                          if (!clicked.isValid()) return;
                          fc::util::launchBrowser(clicked);
                      });
+    // Forward link-hover events up so MainWindow can show the URL
+    // in the status bar — QTextBrowser's `highlighted` fires with
+    // the link's URL on enter and an empty/invalid QUrl on leave.
+    // We pass the link target through unchanged; the title="…"
+    // attribute we attached in linkifyPlainText is what carries
+    // the real destination for "label [URL]" patterns.
+    QObject::connect(body, &QTextBrowser::highlighted, this,
+                     [this](const QUrl& u) {
+                         emit urlHovered(u.isValid() ? u.toString() : QString());
+                     });
     body->setReadOnly(true);
     body->setFrameShape(QFrame::NoFrame);
     body->setStyleSheet(QStringLiteral("background: transparent;"));
@@ -317,10 +344,17 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // Strict and proxy modes share LocalHtmlServer holders so a re-click
     // reuses the same server / URL token.
     const auto previewMode = Preferences::htmlPreview();
-    const bool offerBrowserButtons =
-        initiallyExpanded
-        && (!m.bodyHtml.isEmpty() || m.bodyHtmlPresent)
-        && previewMode != Preferences::HtmlPreview::Disabled;
+    // The button row appears whenever the message would have ANY
+    // useful action available. "Open in Gmail" is universal — it
+    // doesn't render HTML locally, just opens the thread on
+    // mail.google.com — so we want it reachable even when the user
+    // explicitly disabled HTML preview. The strict / images openers
+    // ARE local-rendering paths, so those still respect the
+    // previewMode == Disabled choice and stay disabled (with a
+    // tooltip) in that mode.
+    const bool offerBrowserButtons = true;
+    const bool hasHtml = !m.bodyHtml.isEmpty() || m.bodyHtmlPresent;
+    const bool localPreviewOk = previewMode != Preferences::HtmlPreview::Disabled;
     auto srvHolderStrict = std::make_shared<QPointer<LocalHtmlServer>>();
     auto srvHolderImages = std::make_shared<QPointer<LocalHtmlServer>>();
     auto htmlForServer = m.bodyHtml.isEmpty()
@@ -333,26 +367,49 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // pre-date the multi-account migration.
     const QString accountIdForGmail = m.accountId;
 
-    auto buildBrowserRow = [&]() -> QHBoxLayout* {
-        auto* row = new QHBoxLayout;
+    auto buildBrowserRow = [&]() -> QWidget* {
+        // Wrap the QHBoxLayout in a QWidget so the toggle below can
+        // show/hide the whole strip in one call. Layouts can't be
+        // hidden directly without iterating their children.
+        auto* host = new QWidget(card);
+        auto* row  = new QHBoxLayout(host);
+        row->setContentsMargins(0, 0, 0, 0);
         row->addStretch(1);
 
-        auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), card);
+        auto* strictBtn = new QPushButton(QObject::tr("Open in browser"), host);
         strictBtn->setObjectName(QStringLiteral("link"));
         strictBtn->setCursor(Qt::PointingHandCursor);
-        strictBtn->setToolTip(QObject::tr(
-            "Render in your system browser. Strict CSP — no remote "
-            "images, no scripts, no iframes."));
+        strictBtn->setToolTip(!localPreviewOk
+            ? QObject::tr(
+                "HTML preview is disabled in Settings — "
+                "set HTML preview to \"Open in external browser\" to "
+                "enable this.")
+            : hasHtml
+                ? QObject::tr(
+                    "Render in your system browser. Strict CSP — no remote "
+                    "images, no scripts, no iframes.")
+                : QObject::tr(
+                    "Plain-text message — no HTML body to render."));
+        strictBtn->setEnabled(localPreviewOk && hasHtml);
         row->addWidget(strictBtn);
 
         auto* imagesBtn = new QPushButton(QObject::tr("Open with images"), card);
         imagesBtn->setObjectName(QStringLiteral("link"));
         imagesBtn->setCursor(Qt::PointingHandCursor);
-        imagesBtn->setToolTip(QObject::tr(
-            "Same as 'Open in browser' but image URLs are routed through "
-            "the configured image proxy (Settings → HTML preview) so the "
-            "marketer's CDN never sees your IP. Scripts / iframes / forms "
-            "still blocked."));
+        imagesBtn->setToolTip(!localPreviewOk
+            ? QObject::tr(
+                "HTML preview is disabled in Settings — "
+                "set HTML preview to \"Open in external browser\" to "
+                "enable this.")
+            : hasHtml
+                ? QObject::tr(
+                    "Same as 'Open in browser' but image URLs are routed through "
+                    "the configured image proxy (Settings → HTML preview) so the "
+                    "marketer's CDN never sees your IP. Scripts / iframes / forms "
+                    "still blocked.")
+                : QObject::tr(
+                    "Plain-text message — no HTML body to render."));
+        imagesBtn->setEnabled(localPreviewOk && hasHtml);
         row->addWidget(imagesBtn);
 
         auto* gmailBtn = new QPushButton(QObject::tr("Open in Gmail"), card);
@@ -453,11 +510,14 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                 fc::util::launchBrowser(QUrl(url));
             });
 
-        return row;
+        return host;
     };
 
+    QWidget* topBrowserRow = nullptr;
     if (offerBrowserButtons) {
-        cardLayout->addLayout(buildBrowserRow());
+        topBrowserRow = buildBrowserRow();
+        topBrowserRow->setVisible(initiallyExpanded);
+        cardLayout->addWidget(topBrowserRow);
     }
 
     // No vertical stretch: AutoSizeTextBrowser reports the exact height
@@ -552,8 +612,11 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
     // row so the link is reachable when the user is at the bottom of a
     // long message. Same shared holders → same servers → same URL/token
     // when re-clicked from either copy.
+    QWidget* bottomBrowserRow = nullptr;
     if (offerBrowserButtons) {
-        cardLayout->addLayout(buildBrowserRow());
+        bottomBrowserRow = buildBrowserRow();
+        bottomBrowserRow->setVisible(initiallyExpanded);
+        cardLayout->addWidget(bottomBrowserRow);
     }
 
     if (!initiallyExpanded) {
@@ -568,9 +631,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         toggle->setCursor(Qt::PointingHandCursor);
         cardLayout->addWidget(toggle, 0, Qt::AlignRight);
         QObject::connect(toggle, &QPushButton::clicked,
-                         body, [body, header, m, toggle]() {
+                         body, [body, header, m, toggle,
+                                 topBrowserRow, bottomBrowserRow]() {
             const bool now = !body->isVisible();
             body->setVisible(now);
+            if (topBrowserRow)    topBrowserRow->setVisible(now);
+            if (bottomBrowserRow) bottomBrowserRow->setVisible(now);
             header->setText(headerHtml(m, /*full=*/now));
             toggle->setText(now ? QStringLiteral("Hide")
                                 : QStringLiteral("Show"));
@@ -608,14 +674,42 @@ void ReaderPane::showMessage(const fc::Message& m) {
     contentLayout_->insertWidget(0, card);
 }
 
-void ReaderPane::showThread(const std::vector<fc::Message>& messages) {
+void ReaderPane::showThread(const std::vector<fc::Message>& messages,
+                              const QString& focusedId) {
     clearStack();
     if (messages.empty()) { showEmpty(); return; }
 
-    // All messages collapsed except the most recent.
+    // Pick which card starts expanded. focusedId wins when it matches
+    // one of the thread's messages; otherwise we fall back to "latest"
+    // (the last entry, since byThread sorts ascending by date).
+    int focusIdx = -1;
+    if (!focusedId.isEmpty()) {
+        for (int i = 0; i < int(messages.size()); ++i) {
+            if (messages[i].id == focusedId) { focusIdx = i; break; }
+        }
+    }
+    if (focusIdx < 0) focusIdx = int(messages.size()) - 1;
+
+    QWidget* focusedCard = nullptr;
     for (int i = 0; i < int(messages.size()); ++i) {
-        const bool isLatest = (i == int(messages.size()) - 1);
-        contentLayout_->insertWidget(i, buildMessageCard(messages[i], isLatest));
+        QWidget* card = buildMessageCard(messages[i], i == focusIdx);
+        if (i == focusIdx) focusedCard = card;
+        contentLayout_->insertWidget(i, card);
+    }
+
+    // Centre the focused card in the viewport once Qt has had a tick
+    // to lay everything out — at this synchronous point the cards'
+    // y() values are still 0. ensureWidgetVisible(card, x, y) takes
+    // a margin in pixels; we pass half the viewport height so the
+    // card lands roughly centred rather than glued to the top.
+    if (focusedCard) {
+        QPointer<QScrollArea> s = scroll_;
+        QPointer<QWidget> c = focusedCard;
+        QTimer::singleShot(0, this, [s, c] {
+            if (!s || !c) return;
+            const int margin = qMax(40, s->viewport()->height() / 2);
+            s->ensureWidgetVisible(c, /*xMargin=*/0, /*yMargin=*/margin);
+        });
     }
 }
 

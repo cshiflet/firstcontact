@@ -51,10 +51,16 @@ void PendingOpsWorker::flush() {
     if (ops.empty()) return;
     d_->busy = true;
 
+    // Single QPointer reused by every callback for this flush. The
+    // inner modifyMessage callbacks already used `self`, but the
+    // shared onDone captured raw `this` and would UAF on the d_->busy
+    // dereference if the worker died while callbacks were still in
+    // flight (sign-out, shutdown).
+    QPointer<PendingOpsWorker> self(this);
     auto remaining = std::make_shared<int>(int(ops.size()));
-    auto onDone = [this, remaining]() {
+    auto onDone = [self, remaining]() {
         if (--(*remaining) > 0) return;
-        d_->busy = false;
+        if (self) self->d_->busy = false;
     };
 
     for (const auto& op : ops) {
@@ -77,7 +83,6 @@ void PendingOpsWorker::flush() {
             continue;
         }
 
-        QPointer<PendingOpsWorker> self(this);
         client->modifyMessage(op.messageId, op.addLabels, op.removeLabels,
             [self, id = op.id, attempts = op.attempts, onDone]
             (fc::api::ApiError err) {

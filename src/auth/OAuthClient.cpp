@@ -219,7 +219,15 @@ void OAuthClient::authorize() {
     q.addQueryItem(QStringLiteral("prompt"),                QStringLiteral("consent"));
     authUrl.setQuery(q);
 
-    qInfo("OAuth authorize URL: %s", qUtf8Printable(authUrl.toString()));
+    // Log only the path, not the query — `state` and `code_challenge`
+    // are present in the query and should not land in plaintext logs
+    // that might be shared with support / pasted into bug reports.
+    {
+        QUrl scrubbed = authUrl;
+        scrubbed.setQuery(QString());
+        qInfo("OAuth authorize URL: %s (query redacted)",
+              qUtf8Printable(scrubbed.toString()));
+    }
     // Show the dialog immediately (with the URL so the user can copy/paste
     // if the auto-launch fails downstream); we no longer block here waiting
     // for the launcher chain to finish. Pre-async, this call could freeze
@@ -267,8 +275,12 @@ void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {
     }
 
     if (receivedState != d_->state) {
-        qWarning("OAuth state mismatch: got '%s', expected '%s'",
-                 qUtf8Printable(receivedState), qUtf8Printable(d_->state));
+        // Log the FACT of the mismatch but never the state values
+        // themselves — those are short-lived secrets and pasting
+        // them into a support thread would be a real footgun.
+        qWarning("OAuth state mismatch — sign-in aborted (state lengths %lld vs %lld)",
+                 static_cast<long long>(receivedState.size()),
+                 static_cast<long long>(d_->state.size()));
         d_->callbackConsumed = true;
         emit failed(tr("OAuth state mismatch — sign-in aborted for safety."));
         return;
@@ -317,9 +329,16 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
         reply->deleteLater();
 
         if (nerr != QNetworkReply::NoError) {
-            qWarning("Token exchange failed: HTTP %d, error %d (%s), body: %s",
+            // Log the high-level shape but NEVER the raw response
+            // body — Google's token-exchange responses occasionally
+            // echo back fields containing the client_secret in
+            // verbatim error_description text, and we don't want
+            // those landing in user-shareable logs. JSON-shape
+            // metadata is safe to log.
+            const auto errObj = QJsonDocument::fromJson(data).object();
+            qWarning("Token exchange failed: HTTP %d, error %d (%s), error=%s",
                      status, int(nerr), qUtf8Printable(errString),
-                     data.constData());
+                     qUtf8Printable(errObj.value(QStringLiteral("error")).toString()));
             // Even on HTTP errors Google typically returns a JSON error body —
             // surface it to the user verbatim so they can act on it.
             QString message = errString;

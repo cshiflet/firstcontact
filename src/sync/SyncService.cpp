@@ -6,6 +6,7 @@
 #include "cache/MessageRepository.h"
 #include "cache/MetaRepository.h"
 
+#include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -230,51 +231,190 @@ void SyncService::doIncrementalSync() {
         });
 }
 
+namespace {
+
+// Per-label top-up state: where to resume the next listMessages page
+// for that label. We key the meta column with a label-scoped prefix so
+// every label gets its own page-walk independent of the others.
+QString topUpTokenKey(const QString& labelId) {
+    return QStringLiteral("labelTopUp/%1/pageToken").arg(labelId);
+}
+
+// Marks the label as fully walked once the server returns no more
+// pages, so the next click resets to the start instead of yielding
+// nothing. 500 is the Gmail API's per-page maximum — we use the
+// largest single page to minimise the number of round-trips a user
+// has to scroll-trigger before a deep label finishes catching up.
+constexpr int kTopUpPageSize = 500;
+
+}  // namespace
+
+void SyncService::topUpLabel(const QString& labelId) {
+    if (labelId.isEmpty()) return;
+    // Skip if a sync is already in progress — top-up shares the same
+    // busy / state machinery as incremental sync, so two paths racing
+    // each other to set State and emit messagesUpdated would scramble
+    // the FSM. The user can click the label again once the in-flight
+    // sync settles.
+    if (d_->busy) return;
+    // Skip the round-trip for labels that incremental sync already
+    // keeps up to date; they're guaranteed complete from the initial
+    // seed onward.
+    for (const auto& seed : seedLabels()) {
+        if (seed == labelId) return;
+    }
+
+    // Claim the busy slot synchronously BEFORE the async listMessages
+    // call. Without this, a 60s sync timer firing between this point
+    // and the callback would also see busy=false, race past, and end
+    // up calling fetchAndStoreMessages from two paths concurrently.
+    d_->busy = true;
+    setState(State::IncrementalSync);
+    emit topUpStarted(labelId);
+
+    const QString tokenKey = topUpTokenKey(labelId);
+    const QString pageToken = fc::cache::MetaRepository::get(tokenKey);
+
+    QPointer<SyncService> self(this);
+    d_->gmail->listMessages(labelId, /*q=*/QString(), pageToken,
+        kTopUpPageSize,
+        [self, labelId, tokenKey]
+        (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
+            if (!self) return;   // we were destroyed in flight
+            if (err) {
+                // Don't escalate — top-up is best-effort. The user
+                // still sees whatever's in the cache. DO NOT advance
+                // the saved pageToken: we never actually got the next
+                // page, so the next attempt should retry the same
+                // window.
+                self->d_->busy = false;
+                self->setState(State::Idle);
+                emit self->topUpFinished(labelId, 0, /*serverExhausted=*/false);
+                return;
+            }
+            const bool serverExhausted = page.nextPageToken.isEmpty();
+
+            // Skip ids we already have in the cache to avoid a wasted
+            // getMessage round-trip per known message.
+            QStringList missing;
+            missing.reserve(page.ids.size());
+            for (const auto& id : page.ids) {
+                if (!fc::cache::MessageRepository::exists(id)) {
+                    missing << id;
+                }
+            }
+            if (missing.isEmpty()) {
+                // Nothing to fetch — the page is fully cached. Safe
+                // to advance the cursor right now since no fetch can
+                // fail downstream of this branch.
+                fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
+                self->d_->busy = false;
+                self->setState(State::Idle);
+                emit self->messagesUpdated();
+                emit self->topUpFinished(labelId, 0, serverExhausted);
+                return;
+            }
+            // The completion callback fires AFTER all per-message
+            // getMessage round-trips have settled, so the
+            // topUpFinished signal lines up with the moment the user
+            // actually has the new rows. fetchAndStoreMessages clears
+            // busy / state on its way out (we set them already to
+            // hold the slot through the listMessages await). Advance
+            // the saved pageToken ONLY when the fetch finishes — if
+            // the per-message fetches blow up partway, the next call
+            // can retry the same window rather than skipping ids
+            // permanently.
+            const int storeCount = static_cast<int>(missing.size());
+            const QString nextToken = page.nextPageToken;
+            self->fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
+                [self, labelId, tokenKey, nextToken, storeCount, serverExhausted] {
+                    if (!self) return;
+                    fc::cache::MetaRepository::set(tokenKey, nextToken);
+                    emit self->topUpFinished(labelId, storeCount, serverExhausted);
+                });
+        });
+}
+
 void SyncService::fetchAndStoreMessages(const QStringList& ids,
                                         int newCount,
-                                        bool isInitial) {
+                                        bool isInitial,
+                                        std::function<void()> done) {
     if (ids.isEmpty()) {
         d_->busy = false;
         setState(State::Idle);
         if (newCount > 0 && !isInitial) emit newMessages(newCount);
+        if (done) done();
         return;
     }
+
+    // QPointer guard threaded through every async callback so a
+    // SyncService destroyed mid-flight (shutdown, sign-out) doesn't
+    // dereference a dead `d_->gmail` / `d_->busy` or emit signals
+    // on a freed object. The earlier topUpLabel guard was useless if
+    // the inner onOne / next captured `this` raw — fixed here.
+    QPointer<SyncService> self(this);
 
     auto remaining = std::make_shared<int>(ids.size());
     auto stored    = std::make_shared<int>(0);
 
-    auto onOne = [this, remaining, stored, newCount, isInitial]
+    auto onOne = [self, remaining, stored, newCount, isInitial,
+                   done = std::move(done)]
         (fc::Message m, fc::api::ApiError err) {
-        if (!err && !m.id.isEmpty()) {
-            m.accountId = d_->accountId;
-            fc::cache::MessageRepository::upsert(d_->accountId, m);
+        // We may have been destroyed mid-flight; the per-message
+        // upsert still goes to the cache (keyed by accountId we
+        // captured implicitly via `self`) only when self is alive,
+        // since accountId lives on the Impl.
+        if (!err && !m.id.isEmpty() && self) {
+            m.accountId = self->d_->accountId;
+            fc::cache::MessageRepository::upsert(self->d_->accountId, m);
             ++(*stored);
         }
         if (--(*remaining) > 0) return;
-        fc::cache::LabelRepository::recomputeCounts(d_->accountId);
-        emit labelsUpdated();
-        emit messagesUpdated();
-        if (!isInitial && newCount > 0) emit newMessages(newCount);
-        d_->busy = false;
-        setState(State::Idle);
+        if (!self) {
+            // Service destroyed; still run the completion callback so
+            // caller-side state (topUpFinished, etc.) settles.
+            if (done) done();
+            return;
+        }
+        fc::cache::LabelRepository::recomputeCounts(self->d_->accountId);
+        emit self->labelsUpdated();
+        emit self->messagesUpdated();
+        if (!isInitial && newCount > 0) emit self->newMessages(newCount);
+        self->d_->busy = false;
+        self->setState(State::Idle);
+        if (done) done();
     };
 
     // Concurrency limiter: kick off kSerialGetBatch and queue the rest.
     auto queue = std::make_shared<QStringList>(ids);
     auto inflight = std::make_shared<int>(0);
 
-    // Function that pulls the next id and dispatches.
+    // Function that pulls the next id and dispatches itself again
+    // when each callback fires. The original code captured `next`
+    // (the shared_ptr to the std::function) BY VALUE inside the
+    // outer lambda body itself, producing a reference cycle:
+    //   shared_ptr → std::function (lambda) → captures shared_ptr
+    // The outer lambda kept itself alive forever, leaking the chain
+    // even after all inflight callbacks completed. Fix:
+    //   - The outer lambda captures only a weak_ptr (no own ref).
+    //   - Each inner getMessage callback captures a strong shared
+    //     (via lock), anchoring the chain to the in-flight requests.
+    // Once every inner callback resolves and drops its strong copy,
+    // the std::function reaches refcount zero and is freed cleanly.
     auto next = std::make_shared<std::function<void()>>();
-    *next = [this, queue, inflight, onOne, next]() mutable {
+    std::weak_ptr<std::function<void()>> nextWeak = next;
+    *next = [self, queue, inflight, onOne, nextWeak]() {
+        if (!self) return;   // service died; abandon the queue
         while (*inflight < kSerialGetBatch && !queue->isEmpty()) {
             const QString id = queue->takeFirst();
             ++(*inflight);
-            d_->gmail->getMessage(id,
-                [inflight, next, onOne]
+            auto strong = nextWeak.lock();
+            self->d_->gmail->getMessage(id,
+                [inflight, strong, onOne]
                 (fc::Message m, fc::api::ApiError err) {
                     --(*inflight);
                     onOne(m, err);
-                    (*next)();
+                    if (strong) (*strong)();
                 });
         }
     };

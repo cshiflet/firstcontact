@@ -131,9 +131,15 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     tree_->expandAll();
 
     // Re-expand on reload — beginResetModel/endResetModel collapses the
-    // tree back to its default state.
+    // tree back to its default state. Same handler also re-applies the
+    // cached selection because Qt drops the QTreeView's currentIndex
+    // through a model reset; without this the highlighted label
+    // disappears every time a sync brings new label data back.
     connect(model_, &QAbstractItemModel::modelReset, tree_,
-            [this] { tree_->expandAll(); });
+            [this] {
+                tree_->expandAll();
+                if (!selectedId_.isEmpty()) selectLabel(selectedId_);
+            });
 
     layout->addWidget(tree_);
 
@@ -152,6 +158,11 @@ void SidebarWidget::refreshAppearance() {
 }
 
 void SidebarWidget::selectLabel(const QString& id) {
+    // Always remember what the caller asked for, even if the model
+    // doesn't yet have the row — the modelReset handler will retry
+    // once the labels load.
+    selectedId_ = id;
+
     // Walk the tree; depth is small.
     std::function<bool(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
         const int n = model_->rowCount(parent);
@@ -179,7 +190,10 @@ void SidebarWidget::onClicked(const QModelIndex& idx) {
         return;
     }
     const QString id = idx.data(fc::LabelTreeModel::IdRole).toString();
-    if (!id.isEmpty()) emit labelSelected(id);
+    if (!id.isEmpty()) {
+        selectedId_ = id;
+        emit labelSelected(id);
+    }
 }
 
 void SidebarWidget::onContextMenu(const QPoint& p) {

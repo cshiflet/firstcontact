@@ -2,6 +2,7 @@
 
 #include "models/Message.h"
 
+#include <QHash>
 #include <QList>
 #include <QMainWindow>
 #include <QPair>
@@ -79,6 +80,47 @@ private slots:
     // message in the thread carries UNREAD we drop UNREAD from every
     // message; otherwise we add UNREAD to every message.
     void onToggleReadCurrent();
+    // Explicit Gmail-web bindings: Shift+I always marks the current
+    // thread as read, Shift+U always marks it unread (no toggle).
+    void onMarkReadCurrent();
+    void onMarkUnreadCurrent();
+    // Gmail-web `u`: return focus to the threadlist. Doesn't change
+    // selection or read state — just yanks keyboard focus away from
+    // whatever child widget had it (typically the reader pane).
+    void onBackToList();
+    // Gmail-web `?`: show a proper grouped keyboard shortcuts dialog.
+    void onShowShortcutsHelp();
+    // Gmail-web `o` / Enter: open the currently-selected message.
+    void onOpenCurrent();
+    // Gmail-web `[` / `]`: archive the current conversation, then move
+    // selection to the prev / next row in the threadlist.
+    void onArchiveAndPrev();
+    void onArchiveAndNext();
+    // Gmail-web `m`: mute the current thread (apply MUTE label, then
+    // archive). Gmail's server-side filtering doesn't apply to our
+    // cache, but the label stamp matches Gmail's data shape so the
+    // user can find it under "Muted" and unmute on the server.
+    void onMuteThread();
+    // Gmail-web `!`: move conversation to Spam. Adds SPAM, drops INBOX.
+    void onReportSpam();
+    // Gmail-web `=` / `-`: toggle IMPORTANT for every message in the
+    // current thread.
+    void onMarkImportant();
+    void onMarkNotImportant();
+    // Gmail-web `g i / s / t / d`: jump the sidebar selection to a
+    // system label without leaving the keyboard.
+    void onGoToLabel(const QString& labelId);
+    // Shift+L — flip Preferences::linkDisplayMode and re-render the
+    // active reader content so the change is immediately visible.
+    void onToggleLinkDisplay();
+    // Gmail-web `l` (Apply labels…): pop the LabelChooserDialog in
+    // multi-select mode pre-filled with the thread's current label
+    // set; on accept, push the diff through applyLabelDiffToThread.
+    void onApplyLabelsCurrent();
+    // Gmail-web `v` (Move to label…): single-select picker; on accept,
+    // add the chosen label and drop the active sidebar label (so the
+    // conversation moves rather than gains a label).
+    void onMoveToLabelCurrent();
     // Snooze the current thread: pop a time-picker, drop INBOX, stamp
     // every message's snooze_until. A periodic wake-up timer in
     // MainWindow re-applies INBOX once the snooze window lapses.
@@ -111,6 +153,10 @@ private:
     void buildToolBar();
     void buildLayout();
     void wireSignals();
+    // Recomputes the "Loading more messages…" / "No more messages"
+    // footer text and visibility from the current model + top-up
+    // state. Cheap — call from any place that touches those.
+    void refreshListFooter();
     void refreshAccountIndicator();
     void refreshAccountMenu();    // (re)builds the Account toolbar dropdown
     void refreshToolbarIcons();   // re-bake icons from the active palette
@@ -128,6 +174,24 @@ private:
                                  const QStringList& add,
                                  const QStringList& remove);
 
+    // Common shape for the toolbar / shortcut handlers that apply
+    // a label diff to the current thread:
+    //   1. bail if no thread is selected
+    //   2. honour FC_DRY_RUN with a transient status-bar message
+    //   3. push the diff through applyLabelDiffToThread
+    //   4. show a success status, refresh the list view (and
+    //      optionally the sidebar's unread counts).
+    // Returns true if the action ran (false on empty-current /
+    // dry-run skip), so the caller can apply any local-state
+    // tweaks (e.g. flipping currentMessage_.isUnread) only when
+    // the diff actually went through.
+    bool guardedThreadAction(const QString& dryRunKey,
+                              const QString& blockedStatus,
+                              const QString& successStatus,
+                              const QStringList& add,
+                              const QStringList& remove,
+                              bool refreshSidebar = false);
+
     fc::auth::ClientConfig*    config_;
     fc::auth::OAuthClient*     auth_;
     fc::api::GmailClient*      gmail_;
@@ -142,6 +206,17 @@ private:
     MessageListView*         list_;
     ReaderPane*              reader_;
     fc::MessageListModel*    listModel_;
+    // Loading footer below the message list. Three states:
+    //   "" / hidden       — idle (more cache rows can be scrolled to)
+    //   "Loading more…"    — a server top-up is in flight for the
+    //                        currently-visible label
+    //   "No more messages" — cache is fully drained AND the server
+    //                        reported no more pages, OR the visible
+    //                        label is one of the seed labels that
+    //                        incremental sync keeps complete.
+    QLabel*                  listFooter_       = nullptr;
+    bool                     topUpInFlight_    = false;
+    QHash<QString, bool>     serverExhaustedByLabel_;
 
     QLineEdit*               searchEdit_;
     QAction*                 searchIconAction_ = nullptr;

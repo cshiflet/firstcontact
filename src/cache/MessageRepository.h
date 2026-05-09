@@ -18,8 +18,10 @@ namespace fc::cache {
 // zero-arg overloads exist for callers still being walked through the
 // step-3 fan-out (they route through Database::defaultAccountId()).
 //
-// TODO(v2): cross-account variants for searchFts / searchFtsThreads (and
-// possibly listByLabel for an "All Inboxes" synthetic node).
+// `unreadOnly` (where present) filters the listing to messages
+// currently carrying the UNREAD label (or in conversation view,
+// threads with at least one unread message). Mirrors Gmail web's
+// filter chip.
 class MessageRepository {
 public:
     // ---------- Per-account API ----------
@@ -29,10 +31,12 @@ public:
 
     static std::vector<fc::Message> listByLabel(const QString& accountId,
                                                 const QString& labelId,
-                                                int limit, int offset);
+                                                int limit, int offset,
+                                                bool unreadOnly = false);
     static std::vector<fc::Message> listThreadsByLabel(const QString& accountId,
                                                        const QString& labelId,
-                                                       int limit, int offset);
+                                                       int limit, int offset,
+                                                       bool unreadOnly = false);
     static std::vector<fc::Message> searchFts(const QString& accountId,
                                               const QString& query, int limit);
     static std::vector<fc::Message> searchFtsThreads(const QString& accountId,
@@ -81,9 +85,11 @@ public:
 
     static qint64                   upsert(const fc::Message& m);
     static std::vector<fc::Message> listByLabel(const QString& labelId,
-                                                int limit, int offset);
+                                                int limit, int offset,
+                                                bool unreadOnly = false);
     static std::vector<fc::Message> listThreadsByLabel(const QString& labelId,
-                                                       int limit, int offset);
+                                                       int limit, int offset,
+                                                       bool unreadOnly = false);
     static std::vector<fc::Message> searchFts(const QString& query, int limit);
     static std::vector<fc::Message> searchFtsThreads(const QString& query,
                                                       int limit);

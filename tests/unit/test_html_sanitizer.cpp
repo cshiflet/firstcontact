@@ -61,6 +61,52 @@ private slots:
         QVERIFY(!r.html.contains(QStringLiteral("form")));
         QVERIFY(!r.html.contains(QStringLiteral("nope")));
     }
+
+    void handlesGreaterThanInsideQuotedAttribute() {
+        // Tag-end scanner used to use indexOf('>') which terminated
+        // the tag at the first `>` even when it sat inside a quoted
+        // attribute value. The malicious tail then leaked into the
+        // output as escaped text — not exploitable, but visibly
+        // garbage. Now the scanner respects `'`/`"` quoting.
+        const auto r = fc::util::sanitizeHtml(
+            QStringLiteral("<a title=\"a>b\" href=\"https://example.com/x\">link</a>"));
+        QVERIFY( r.html.contains(QStringLiteral("href=\"https://example.com/x\"")));
+        QVERIFY( r.html.contains(QStringLiteral(">link</a>")));
+        // The tail of the original tag must NOT have leaked as text.
+        QVERIFY(!r.html.contains(QStringLiteral("href=&quot;")));
+        QVERIFY(!r.html.contains(QStringLiteral("&gt;link")));
+    }
+
+    void nestedDropTagDepthTrackedCorrectly() {
+        // The drop-subtree state machine increments depth on a
+        // matching open inside a drop region and decrements on each
+        // close. A nested same-name pair must not prematurely
+        // re-enable output.
+        const auto r = fc::util::sanitizeHtml(
+            QStringLiteral("<p>before</p>"
+                           "<script>outer<script>inner</script>still-dropped"
+                           "</script><p>after</p>"));
+        QVERIFY( r.html.contains(QStringLiteral("before")));
+        QVERIFY( r.html.contains(QStringLiteral("after")));
+        QVERIFY(!r.html.contains(QStringLiteral("outer")));
+        QVERIFY(!r.html.contains(QStringLiteral("inner")));
+        QVERIFY(!r.html.contains(QStringLiteral("still-dropped")));
+        QVERIFY(!r.html.contains(QStringLiteral("script")));
+    }
+
+    void doesNotSelfCloseDivLikeVoid() {
+        // XHTML-style `<div/>` parses as an OPEN `<div>` in HTML5;
+        // emitting it as `<div />` would leave an orphan opener.
+        // Only true void elements (br, hr, img, col) get the
+        // self-closing suffix.
+        const auto r = fc::util::sanitizeHtml(
+            QStringLiteral("<div/>hello"));
+        QVERIFY( r.html.contains(QStringLiteral("<div>")));
+        QVERIFY(!r.html.contains(QStringLiteral("<div />")));
+        // br SHOULD still self-close.
+        const auto r2 = fc::util::sanitizeHtml(QStringLiteral("a<br/>b"));
+        QVERIFY( r2.html.contains(QStringLiteral("<br />")));
+    }
 };
 
 QTEST_APPLESS_MAIN(TestHtmlSanitizer)

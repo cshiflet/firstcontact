@@ -24,6 +24,9 @@ TrayController::TrayController(QMainWindow* main, QObject* parent)
     tray_->setIcon(qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation));
     tray_->setToolTip(QStringLiteral("FirstContact"));
 
+    // Parentless QMenu is fine here — setContextMenu below transfers
+    // ownership to tray_, which is a child of this QObject, so the
+    // menu is reaped on TrayController destruction.
     auto* menu = new QMenu();
     auto* compose = menu->addAction(tr("Compose…"));
     auto* refresh = menu->addAction(tr("Refresh"));

@@ -345,19 +345,32 @@ qint64 MessageRepository::upsert(const QString& accountId, const fc::Message& m)
 
 std::vector<fc::Message> MessageRepository::listByLabel(
         const QString& accountId, const QString& labelId,
-        int limit, int offset) {
+        int limit, int offset, bool unreadOnly) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
     if (accountId.isEmpty()) return out;
 
     QSqlQuery q(db);
-    q.prepare(QStringLiteral(
-        "SELECT m.* FROM messages m "
-        "JOIN message_labels ml "
-        "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
-        "WHERE m.account_id = :a AND ml.label_id = :l "
-        "ORDER BY m.internal_date DESC "
-        "LIMIT :lim OFFSET :off"));
+    // Two SQL variants — SQLite optimizes literal AND clauses much
+    // better than dynamic flag expressions, and the unread filter
+    // wants to make use of the is_unread column index.
+    if (unreadOnly) {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "JOIN message_labels ml "
+            "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+            "WHERE m.account_id = :a AND ml.label_id = :l AND m.is_unread = 1 "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    } else {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "JOIN message_labels ml "
+            "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
+            "WHERE m.account_id = :a AND ml.label_id = :l "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    }
     q.bindValue(QStringLiteral(":a"),   accountId);
     q.bindValue(QStringLiteral(":l"),   labelId);
     q.bindValue(QStringLiteral(":lim"), limit);
@@ -370,20 +383,45 @@ std::vector<fc::Message> MessageRepository::listByLabel(
 
 std::vector<fc::Message> MessageRepository::listThreadsByLabel(
         const QString& accountId, const QString& labelId,
-        int limit, int offset) {
+        int limit, int offset, bool unreadOnly) {
     auto db = databaseHandle();
     std::vector<fc::Message> out;
     if (accountId.isEmpty()) return out;
 
-    QSqlQuery q(db);
-    q.prepare(buildThreadRollupSql(QStringLiteral(
+    // Inner WHERE selects which messages (across this account) feed
+    // the per-thread rollup. We wrap it in an extra SELECT for the
+    // unread-only path so the t_unread aggregate (computed by the
+    // rollup) can drive row visibility — pushing the unread filter
+    // into the inner WHERE would skew t_count / t_starred / t_attach.
+    QString sql = buildThreadRollupSql(QStringLiteral(
         "JOIN message_labels ml "
         "  ON ml.account_id = m.account_id AND ml.message_id = m.id "
-        "WHERE m.account_id = :a AND ml.label_id = :l")));
-    q.bindValue(QStringLiteral(":a"),   accountId);
-    q.bindValue(QStringLiteral(":l"),   labelId);
-    q.bindValue(QStringLiteral(":lim"), limit);
-    q.bindValue(QStringLiteral(":off"), offset);
+        "WHERE m.account_id = :a AND ml.label_id = :l"));
+    if (unreadOnly) {
+        // Wrap; inner LIMIT becomes a large upper bound to cap
+        // resource use on huge mailboxes, outer LIMIT/OFFSET is the
+        // user-visible page. 10× headroom is plenty unless 90% of a
+        // mailbox is read, in which case a follow-up query covers
+        // the gap.
+        sql = QStringLiteral(
+            "SELECT * FROM (%1) WHERE t_unread > 0 "
+            "ORDER BY internal_date DESC "
+            "LIMIT :outerLim OFFSET :outerOff").arg(sql);
+    }
+
+    QSqlQuery q(db);
+    q.prepare(sql);
+    q.bindValue(QStringLiteral(":a"), accountId);
+    q.bindValue(QStringLiteral(":l"), labelId);
+    if (unreadOnly) {
+        q.bindValue(QStringLiteral(":lim"),       qMax(limit * 10, 200));
+        q.bindValue(QStringLiteral(":off"),       0);
+        q.bindValue(QStringLiteral(":outerLim"),  limit);
+        q.bindValue(QStringLiteral(":outerOff"),  offset);
+    } else {
+        q.bindValue(QStringLiteral(":lim"), limit);
+        q.bindValue(QStringLiteral(":off"), offset);
+    }
     if (!q.exec()) {
         qWarning("listThreadsByLabel: %s",
                  qUtf8Printable(q.lastError().text()));
@@ -518,6 +556,23 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
                                        const QStringList& removed) {
     if (accountId.isEmpty()) return;
     auto db = databaseHandle();
+    // Wrap the three-statement label-edge update in a single
+    // transaction so a crash mid-call doesn't leave the cache in
+    // a state where the edges and the derived is_unread / is_starred
+    // flags disagree. Without the transaction a partial failure
+    // produced an inbox where a row was sometimes shown as unread
+    // even though UNREAD had just been removed, until the next
+    // sync recomputed.
+    //
+    // If begin-transaction itself fails, abandon the operation
+    // rather than fall through to non-atomic writes — the whole
+    // point of the transaction was to avoid the half-committed
+    // state. The next user action will retry.
+    if (!db.transaction()) {
+        qWarning("applyLabelDiff: failed to begin txn: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return;
+    }
 
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
@@ -527,7 +582,12 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
         ins.bindValue(QStringLiteral(":a"), accountId);
         ins.bindValue(QStringLiteral(":m"), messageId);
         ins.bindValue(QStringLiteral(":l"), l);
-        ins.exec();
+        if (!ins.exec()) {
+            qWarning("applyLabelDiff add %s/%s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(messageId),
+                     qUtf8Printable(l),
+                     qUtf8Printable(ins.lastError().text()));
+        }
     }
 
     QSqlQuery del(db);
@@ -538,7 +598,12 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
         del.bindValue(QStringLiteral(":a"), accountId);
         del.bindValue(QStringLiteral(":m"), messageId);
         del.bindValue(QStringLiteral(":l"), l);
-        del.exec();
+        if (!del.exec()) {
+            qWarning("applyLabelDiff del %s/%s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(messageId),
+                     qUtf8Printable(l),
+                     qUtf8Printable(del.lastError().text()));
+        }
     }
 
     QSqlQuery flags(db);
@@ -551,7 +616,17 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
         "WHERE account_id = :a AND id = :m"));
     flags.bindValue(QStringLiteral(":a"), accountId);
     flags.bindValue(QStringLiteral(":m"), messageId);
-    flags.exec();
+    if (!flags.exec()) {
+        qWarning("applyLabelDiff flags %s/%s: %s",
+                 qUtf8Printable(accountId), qUtf8Printable(messageId),
+                 qUtf8Printable(flags.lastError().text()));
+    }
+
+    if (!db.commit()) {
+        qWarning("applyLabelDiff: commit failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        db.rollback();
+    }
 }
 
 void MessageRepository::markAccessed(const QString& accountId, const QString& id) {
@@ -746,6 +821,8 @@ std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
 void MessageRepository::applyLabelDiff(const QString& messageId,
                                        const QStringList& added,
                                        const QStringList& removed) {
+    // Legacy zero-arg overload — route through the per-account
+    // version, which carries the transaction-wrap + error logging.
     applyLabelDiff(Database::defaultAccountId(), messageId, added, removed);
 }
 void MessageRepository::markAccessed(const QString& id) {

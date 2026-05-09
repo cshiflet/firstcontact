@@ -1,10 +1,13 @@
 #include "Theme.h"
 
+#include "Preferences.h"
+
 #include <QApplication>
 #include <QFile>
 #include <QFont>
 #include <QFontDatabase>
 #include <QPalette>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QString>
 #include <QStringList>
@@ -86,7 +89,34 @@ void Theme::loadStylesheet(Mode resolved) {
         qWarning("Theme: failed to open %s", qUtf8Printable(path));
         return;
     }
-    qApp->setStyleSheet(QString::fromUtf8(f.readAll()));
+    QString qss = QString::fromUtf8(f.readAll());
+
+    // Scale every `font-size: Npt` (or Npx) rule by the user's font
+    // scale preference. Without this pass the QSS rules clobber any
+    // larger font baked into QApplication::font() — Preferences's
+    // uiFontScale only takes hold for widgets that aren't otherwise
+    // styled, which on this app is almost nothing.
+    const double scale = Preferences::uiFontScale();
+    if (qAbs(scale - 1.0) > 0.001) {
+        static const QRegularExpression re(
+            QStringLiteral("font-size:\\s*(\\d+)(pt|px)"));
+        QString result;
+        int last = 0;
+        auto it = re.globalMatch(qss);
+        while (it.hasNext()) {
+            auto m = it.next();
+            result += qss.mid(last, m.capturedStart() - last);
+            const int orig   = m.captured(1).toInt();
+            const int scaled = qMax(1, qRound(orig * scale));
+            result += QStringLiteral("font-size: %1%2")
+                       .arg(scaled).arg(m.captured(2));
+            last = m.capturedEnd();
+        }
+        result += qss.mid(last);
+        qss = result;
+    }
+
+    qApp->setStyleSheet(qss);
 }
 
 void Theme::apply(Mode mode) {

@@ -39,6 +39,21 @@ public:
     void startScheduler(int intervalMs = 60'000);
     void stopScheduler();
 
+    // Pulls one server-side page of message ids for the given label,
+    // dedupes against the cache, and fetches full bodies for any
+    // entries we don't already have. Used to fill cache gaps for
+    // labels that weren't part of the initial-sync seed set (every
+    // user label, plus any system label outside INBOX / SENT / DRAFT
+    // / STARRED).
+    //
+    // Pagination state lives in the meta table — successive calls
+    // walk older pages until the label is exhausted, at which point
+    // the saved token resets and the cycle starts over from the most
+    // recent message. Skips the round-trip entirely for labels that
+    // were already in the initial-sync seed set, since incremental
+    // sync keeps them up to date.
+    void topUpLabel(const QString& labelId);
+
 signals:
     void stateChanged(fc::sync::SyncService::State s);
     void labelsUpdated();
@@ -50,12 +65,23 @@ signals:
     // OAuth token response). Wired up in MainWindow.
     void profileFetched(const QString& email);
 
+    // Per-label top-up bracket: emitted around topUpLabel so the UI
+    // can show a label-specific "Syncing <name>…" / "<name>: Done"
+    // status instead of the generic stateChanged message. Fire-and-
+    // forget — listening is optional. `serverExhausted` tells the
+    // caller whether the server returned an empty nextPageToken,
+    // i.e., we've walked the label end-to-end.
+    void topUpStarted(const QString& labelId);
+    void topUpFinished(const QString& labelId, int newRowsStored,
+                        bool serverExhausted);
+
 private:
     void doInitialSync();
     void doIncrementalSync();
     void fetchAndStoreMessages(const QStringList& ids,
                                int newCount,
-                               bool isInitial);
+                               bool isInitial,
+                               std::function<void()> done = {});
     void setState(State s);
 
     struct Impl;

@@ -11,6 +11,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
@@ -86,6 +87,64 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     themeHint->setObjectName(QStringLiteral("FormHint"));
     themeHint->setWordWrap(true);
     form->addRow(QString(), themeHint);
+
+    // Text scale — covers HiDPI environments where the system DPI is
+    // wrong (WSL especially). Stored as a percentage and applied to
+    // QApplication::font() at startup; widget metrics fully recompute
+    // on next launch.
+    auto* scaleBox = new QComboBox(content);
+    const QList<QPair<QString, double>> scaleOpts = {
+        { tr("100% (system default)"), 1.0 },
+        { tr("110%"),                   1.1 },
+        { tr("125%"),                   1.25 },
+        { tr("150%"),                   1.5 },
+        { tr("175%"),                   1.75 },
+        { tr("200%"),                   2.0 },
+    };
+    for (const auto& [label, value] : scaleOpts) {
+        scaleBox->addItem(label, value);
+    }
+    scaleBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    scaleBox->setMinimumWidth(280);
+    {
+        const double current = Preferences::uiFontScale();
+        // Pick the closest option — if a user set something custom via
+        // QSettings directly, we still highlight a sensible match.
+        int bestIdx = 0;
+        double bestDelta = 1e9;
+        for (int i = 0; i < scaleBox->count(); ++i) {
+            const double delta = qAbs(scaleBox->itemData(i).toDouble() - current);
+            if (delta < bestDelta) { bestDelta = delta; bestIdx = i; }
+        }
+        scaleBox->setCurrentIndex(bestIdx);
+    }
+    connect(scaleBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [scaleBox](int idx) {
+                Preferences::setUiFontScale(scaleBox->itemData(idx).toDouble());
+                // Re-apply the active theme — Theme::loadStylesheet
+                // bakes the scale into every "font-size" QSS rule at
+                // load time, so re-running it picks up the new value
+                // without requiring the user to restart. Widget
+                // METRICS (toolbar height, list row height) only
+                // recompute on the next launch though, so the hint
+                // below still calls a restart out for the cleanest
+                // result.
+                Theme::apply(Theme::currentMode());
+            });
+    form->addRow(tr("Text scale:"), scaleBox);
+
+    auto* scaleHint = new QLabel(tr(
+        "Bumps the application font size on HiDPI displays where the "
+        "system-reported DPI doesn't match the physical scale (notably "
+        "WSL). <b>Restart FirstContact</b> for the change to fully "
+        "apply — text resizes immediately, but toolbar / row heights "
+        "only recompute on the next launch."),
+        content);
+    scaleHint->setObjectName(QStringLiteral("FormHint"));
+    scaleHint->setWordWrap(true);
+    scaleHint->setTextFormat(Qt::RichText);
+    form->addRow(QString(), scaleHint);
+
     contentLayout->addLayout(form);
 
     // ------------------------------------------------------------- HTML preview
@@ -168,6 +227,36 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     stripHint->setWordWrap(true);
     stripHint->setTextFormat(Qt::RichText);
     htmlForm->addRow(QString(), stripHint);
+
+    auto* linkBox = new QComboBox(content);
+    linkBox->addItem(tr("Label only — hover to see URL"),
+                     int(fc::util::LinkDisplayMode::Labeled));
+    linkBox->addItem(tr("Label and full URL"),
+                     int(fc::util::LinkDisplayMode::FullUrl));
+    linkBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    linkBox->setMinimumWidth(280);
+    {
+        const int idx = linkBox->findData(int(Preferences::linkDisplayMode()));
+        if (idx >= 0) linkBox->setCurrentIndex(idx);
+    }
+    connect(linkBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [linkBox](int idx) {
+                Preferences::setLinkDisplayMode(
+                    static_cast<fc::util::LinkDisplayMode>(
+                        linkBox->itemData(idx).toInt()));
+            });
+    htmlForm->addRow(tr("Link display:"), linkBox);
+
+    auto* linkHint = new QLabel(tr(
+        "When emails arrive in the <code>label [https://url]</code> shape "
+        "(common for marketing / transactional mail), the label-only "
+        "mode hides the URL behind a hover tooltip / status-bar preview "
+        "for cleaner reading. Toggle live with <b>Shift+L</b>."),
+        content);
+    linkHint->setObjectName(QStringLiteral("FormHint"));
+    linkHint->setWordWrap(true);
+    linkHint->setTextFormat(Qt::RichText);
+    htmlForm->addRow(QString(), linkHint);
 
     contentLayout->addLayout(htmlForm);
 
@@ -291,6 +380,76 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     labelsHint->setTextFormat(Qt::RichText);
     labelsForm->addRow(QString(), labelsHint);
     contentLayout->addLayout(labelsForm);
+
+    // ------------------------------------------------------------- Compose
+    auto* composeTitle = new QLabel(
+        tr("<h3 style='margin:0'>Compose</h3>"), content);
+    composeTitle->setTextFormat(Qt::RichText);
+    contentLayout->addWidget(composeTitle);
+
+    auto* composeForm = new QFormLayout;
+    composeForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    composeForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    // Signature: multi-line plain text. Saved on focus-out so users
+    // don't lose work if they close the dialog without clicking Close.
+    auto* sigEdit = new QPlainTextEdit(content);
+    sigEdit->setPlainText(Preferences::signatureText());
+    sigEdit->setMinimumHeight(110);
+    sigEdit->setPlaceholderText(tr(
+        "e.g.\nJane Doe\nSenior Engineer\njane@example.com"));
+    sigEdit->setTabChangesFocus(true);
+    connect(sigEdit, &QPlainTextEdit::textChanged, this, [sigEdit] {
+        Preferences::setSignatureText(sigEdit->toPlainText());
+    });
+    composeForm->addRow(tr("Signature:"), sigEdit);
+
+    auto* sigHint = new QLabel(tr(
+        "Appended to every new message after a <code>-- </code> "
+        "delimiter (RFC 3676). Most clients hide signatures when "
+        "quoting your reply, so chains stay tidy."),
+        content);
+    sigHint->setObjectName(QStringLiteral("FormHint"));
+    sigHint->setWordWrap(true);
+    sigHint->setTextFormat(Qt::RichText);
+    composeForm->addRow(QString(), sigHint);
+
+    auto* replyBox = new QComboBox(content);
+    replyBox->addItem(tr("Above the original (Gmail / Outlook default)"), true);
+    replyBox->addItem(tr("Below the original (mailing-list convention)"), false);
+    replyBox->setCurrentIndex(Preferences::replyAboveOriginal() ? 0 : 1);
+    connect(replyBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [replyBox](int idx) {
+        Preferences::setReplyAboveOriginal(replyBox->itemData(idx).toBool());
+    });
+    composeForm->addRow(tr("Reply position:"), replyBox);
+
+    auto* quoteBox = new QComboBox(content);
+    quoteBox->addItem(tr("Indented blockquote (HTML reply)"),
+                      int(Preferences::QuoteStyle::BlockQuote));
+    quoteBox->addItem(tr("Greater-than prefix (\"> line\")"),
+                      int(Preferences::QuoteStyle::GreaterPrefix));
+    const int quoteIdx = quoteBox->findData(int(Preferences::quoteStyle()));
+    if (quoteIdx >= 0) quoteBox->setCurrentIndex(quoteIdx);
+    connect(quoteBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [quoteBox](int idx) {
+        Preferences::setQuoteStyle(static_cast<Preferences::QuoteStyle>(
+            quoteBox->itemData(idx).toInt()));
+    });
+    composeForm->addRow(tr("Quoted text:"), quoteBox);
+
+    auto* quoteHint = new QLabel(tr(
+        "<b>Indented blockquote</b> renders as a real <code>&lt;blockquote&gt;</code> "
+        "in HTML replies (and as <code>&gt; </code> in plain text). "
+        "<b>Greater-than prefix</b> uses <code>&gt; </code> in both — useful "
+        "for mailing lists or anyone who reads in a plain-text client."),
+        content);
+    quoteHint->setObjectName(QStringLiteral("FormHint"));
+    quoteHint->setWordWrap(true);
+    quoteHint->setTextFormat(Qt::RichText);
+    composeForm->addRow(QString(), quoteHint);
+
+    contentLayout->addLayout(composeForm);
 
     contentLayout->addStretch(1);
 

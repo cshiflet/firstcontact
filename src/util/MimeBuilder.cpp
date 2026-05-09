@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QLocale>
+#include <QRegularExpression>
 #include <QString>
 #include <QUuid>
 
@@ -47,8 +48,32 @@ bool needsEncodedWord(const QString& s) {
 
 QString encodedWord(const QString& s) {
     if (!needsEncodedWord(s)) return s;
-    return QStringLiteral("=?UTF-8?B?%1?=").arg(
-        QString::fromLatin1(s.toUtf8().toBase64()));
+    // RFC 2047 §2: an encoded-word is at most 75 chars total. The
+    // wrapper "=?UTF-8?B??=" is 12 chars, leaving 63 for the base64
+    // payload; 63 base64 chars encode 47 bytes (rounded down to a
+    // multiple of 3 → 45 bytes, with 60 base64 chars). Split the
+    // UTF-8 stream into ≤45-byte chunks AT UTF-8 codepoint
+    // boundaries so multi-byte characters don't get sliced; emit
+    // one encoded-word per chunk separated by "\r\n " (folded
+    // whitespace). Strict MTAs that rejected our previous single
+    // oversized encoded-word now accept the folded sequence.
+    const QByteArray utf8 = s.toUtf8();
+    constexpr int kMaxBytesPerChunk = 45;
+    QStringList parts;
+    for (int i = 0; i < utf8.size(); ) {
+        int end = qMin(i + kMaxBytesPerChunk, utf8.size());
+        // Back off to a UTF-8 lead-byte boundary so we don't cut
+        // mid-codepoint. Continuation bytes have top two bits 10.
+        while (end > i + 1 && end < utf8.size()
+               && (static_cast<uchar>(utf8[end]) & 0xC0) == 0x80) {
+            --end;
+        }
+        const QByteArray chunk = utf8.mid(i, end - i);
+        parts << QStringLiteral("=?UTF-8?B?%1?=")
+                    .arg(QString::fromLatin1(chunk.toBase64()));
+        i = end;
+    }
+    return parts.join(QStringLiteral("\r\n "));
 }
 
 QString formatAddress(const QString& addr, const QString& name = {}) {
@@ -76,16 +101,52 @@ QString rfc5322Date() {
         + QStringLiteral(" +0000");
 }
 
+// RFC 2045 §6.8: base64 in headers/bodies must wrap at 76 chars.
+QByteArray wrapBase64(const QByteArray& raw) {
+    const QByteArray b64 = raw.toBase64();
+    QByteArray out;
+    out.reserve(b64.size() + b64.size() / 76 * 2);
+    constexpr int kWidth = 76;
+    for (int i = 0; i < b64.size(); i += kWidth) {
+        out.append(b64.mid(i, kWidth));
+        out.append("\r\n");
+    }
+    return out;
+}
+
+QByteArray normalizeBodyCrlf(QString body) {
+    body.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    body.replace(QChar('\n'), QStringLiteral("\r\n"));
+    return body.toUtf8();
+}
+
+// Mime boundary derived from a UUID — guaranteed unique within a message.
+// Prefixed with "fc--" so a casual reader can tell it came from us.
+QByteArray newBoundary() {
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return ("fc--" + uuid).toLatin1();
+}
+
 }  // namespace
 
 QString MimeBuilder::newMessageId(const QString& fromAddr) {
+    // Default to a sentinel domain. We'll only override when the
+    // fromAddr's domain part is a strict RFC 5321 dot-atom — letters,
+    // digits, dot, hyphen — so a malformed sender like "a@evil>x"
+    // can't smuggle stray characters into the Message-ID and break
+    // header parsing downstream.
     QString domain = QStringLiteral("firstcontact.local");
     const QString safeFrom = sanitizeHeaderField(fromAddr);
     const int at = safeFrom.indexOf('@');
     if (at > 0 && at + 1 < safeFrom.size()) {
-        domain = safeFrom.mid(at + 1);
+        const QString cand = safeFrom.mid(at + 1).trimmed();
+        static const QRegularExpression dotAtom(
+            QStringLiteral(R"(^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?$)"));
+        if (dotAtom.match(cand).hasMatch() && cand.contains(QChar('.'))) {
+            domain = cand;
+        }
     }
-    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     return QStringLiteral("<%1@%2>").arg(uuid, domain);
 }
 
@@ -103,8 +164,18 @@ QByteArray MimeBuilder::build(const OutgoingMessage& msg) {
     headers += QStringLiteral("Date: %1\r\n").arg(rfc5322Date());
     headers += QStringLiteral("Message-ID: %1\r\n").arg(newMessageId(msg.fromAddr));
     headers += QStringLiteral("MIME-Version: 1.0\r\n");
-    headers += QStringLiteral("Content-Type: text/plain; charset=UTF-8\r\n");
-    headers += QStringLiteral("Content-Transfer-Encoding: 8bit\r\n");
+
+    const bool multipart = !msg.bodyHtml.isEmpty();
+    QByteArray boundary;
+    if (multipart) {
+        boundary = newBoundary();
+        headers += QStringLiteral(
+            "Content-Type: multipart/alternative; boundary=\"%1\"\r\n")
+            .arg(QString::fromLatin1(boundary));
+    } else {
+        headers += QStringLiteral("Content-Type: text/plain; charset=UTF-8\r\n");
+        headers += QStringLiteral("Content-Transfer-Encoding: 8bit\r\n");
+    }
 
     if (!msg.rfc822InReplyTo.isEmpty()) {
         headers += QStringLiteral("In-Reply-To: %1\r\n").arg(
@@ -121,14 +192,43 @@ QByteArray MimeBuilder::build(const OutgoingMessage& msg) {
             sanitizeHeaderField(msg.rfc822InReplyTo));
     }
 
-    QString body = msg.bodyText;
-    body.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    body.replace(QChar('\n'), QStringLiteral("\r\n"));
-
     QByteArray out;
     out.append(headers.toUtf8());
     out.append("\r\n");
-    out.append(body.toUtf8());
+
+    if (!multipart) {
+        out.append(normalizeBodyCrlf(msg.bodyText));
+        return out;
+    }
+
+    // RFC 2046 §5.1.4: ordering matters in multipart/alternative — most
+    // basic representation FIRST, richest LAST. Conformant clients render
+    // the LAST part they understand. Plain text first, HTML last.
+    auto appendPart = [&](const QByteArray& mimeType,
+                           const QString& body) {
+        out.append("--");
+        out.append(boundary);
+        out.append("\r\n");
+        out.append("Content-Type: ");
+        out.append(mimeType);
+        out.append("; charset=UTF-8\r\n");
+        out.append("Content-Transfer-Encoding: base64\r\n");
+        out.append("\r\n");
+        out.append(wrapBase64(normalizeBodyCrlf(body)));
+    };
+
+    // RFC 2046 §5.1.1 also recommends a leading "preamble" before the
+    // first boundary marker for clients that don't understand
+    // multipart at all. Keep it short and explanatory.
+    out.append("This is a multi-part message in MIME format.\r\n");
+
+    appendPart("text/plain", msg.bodyText);
+    appendPart("text/html",  msg.bodyHtml);
+
+    // Closing boundary.
+    out.append("--");
+    out.append(boundary);
+    out.append("--\r\n");
     return out;
 }
 

@@ -38,6 +38,61 @@ private slots:
         QVERIFY(rfc.contains("Subject: =?UTF-8?B?"));
     }
 
+    void splitsLongNonAsciiSubjectAcrossEncodedWords() {
+        // RFC 2047 §2 caps each encoded-word at 75 chars total. A
+        // long non-ASCII subject must split into multiple encoded-
+        // words separated by folded-whitespace ("\r\n " between them).
+        // Without this split, strict MTAs reject the oversized blob
+        // and Gmail's send / draft endpoints have been known to
+        // mangle the result.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QString::fromUtf8(
+            "résumé café — a long subject that should overflow one "
+            "encoded-word and require folding into two or three pieces");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Multiple encoded-words present.
+        const int firstEW = rfc.indexOf("=?UTF-8?B?");
+        QVERIFY(firstEW >= 0);
+        const int secondEW = rfc.indexOf("=?UTF-8?B?", firstEW + 1);
+        QVERIFY(secondEW > firstEW);
+        // No single encoded-word exceeds 75 chars.
+        QByteArray subjectLine = rfc.mid(rfc.indexOf("Subject:"));
+        subjectLine = subjectLine.left(subjectLine.indexOf("\r\nDate:"));
+        for (const auto& part : subjectLine.split(' ')) {
+            if (part.startsWith("=?UTF-8?B?")) {
+                QVERIFY(part.size() <= 75);
+            }
+        }
+    }
+
+    void messageIdRejectsMalformedFromDomain() {
+        // sanitizeHeaderField only strips CR/LF/control chars, so a
+        // malformed sender like "a@evil>x" survives and used to be
+        // spliced verbatim into the Message-ID's domain part. The
+        // newMessageId path now requires the domain match a strict
+        // dot-atom; anything else falls back to firstcontact.local.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@evil>x");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("hi");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Pull just the Message-ID header line.
+        const int mid = rfc.indexOf("Message-ID:");
+        QVERIFY(mid >= 0);
+        const QByteArray idLine = rfc.mid(mid, rfc.indexOf("\r\n", mid) - mid);
+        // Falls back to the safe sentinel domain.
+        QVERIFY(idLine.contains("@firstcontact.local>"));
+        // The malformed `>` from the From address must not have
+        // leaked into the Message-ID header.
+        QVERIFY(!idLine.contains("evil"));
+    }
+
     void rejectsHeaderInjectionInRecipients() {
         // Attacker-controlled "name" or address tries to splice in Bcc by
         // embedding CRLF in a recipient. The injected text must collapse
@@ -53,6 +108,33 @@ private slots:
         QVERIFY(!headers.contains("\r\nBcc:"));
         QVERIFY(!headers.startsWith("Bcc:"));
         // The To: header must be a single line.
+        const int toStart = headers.indexOf("To:");
+        QVERIFY(toStart >= 0);
+        const int toEnd = headers.indexOf("\r\n", toStart);
+        QVERIFY(toEnd > toStart);
+        const QByteArray toLine = headers.mid(toStart, toEnd - toStart);
+        QVERIFY(!toLine.contains('\r'));
+        QVERIFY(!toLine.contains('\n'));
+    }
+
+    void rejectsBccSmugglingInToList() {
+        // Defensive: an attacker who controls a To recipient string
+        // tries to splice in a fake Bcc header by embedding CRLF + a
+        // header line. sanitizeHeaderField strips CRs/LFs from the
+        // recipient, so the literal bytes "Bcc:" survive but as part
+        // of the ONE-LINE To value rather than a new header.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = {QStringLiteral("ok@x.test\r\nBcc: leak@evil.test")};
+        m.subject  = QStringLiteral("hi");
+        m.bodyText = QStringLiteral("body");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        const auto headers = rfc.left(rfc.indexOf("\r\n\r\n"));
+        // No standalone Bcc line emitted by us.
+        QVERIFY(!headers.contains("\r\nBcc:"));
+        QVERIFY(!headers.startsWith("Bcc:"));
+        // To: header is a single physical line.
         const int toStart = headers.indexOf("To:");
         QVERIFY(toStart >= 0);
         const int toEnd = headers.indexOf("\r\n", toStart);
@@ -87,6 +169,53 @@ private slots:
         const QByteArray rfc = fc::util::MimeBuilder::build(m);
         QVERIFY(rfc.contains("In-Reply-To: <orig@y.test>"));
         QVERIFY(rfc.contains("References: <grand@z.test> <orig@y.test>"));
+    }
+
+    void buildsMultipartAlternativeWhenHtmlPresent() {
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("rich");
+        m.bodyText = QStringLiteral("plain hi");
+        m.bodyHtml = QStringLiteral("<p>plain <b>hi</b></p>");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        // Top-level Content-Type flips to multipart/alternative with a
+        // boundary parameter — and there's no top-level CTE header.
+        const auto headers = rfc.left(rfc.indexOf("\r\n\r\n"));
+        QVERIFY(headers.contains("Content-Type: multipart/alternative;"));
+        QVERIFY(headers.contains("boundary=\"fc--"));
+        QVERIFY(!headers.contains("Content-Transfer-Encoding:"));
+
+        // RFC 2046 §5.1.4: plain BEFORE html so conformant clients pick
+        // html (last understood part wins).
+        const int plainPos = rfc.indexOf("Content-Type: text/plain");
+        const int htmlPos  = rfc.indexOf("Content-Type: text/html");
+        QVERIFY(plainPos > 0);
+        QVERIFY(htmlPos  > plainPos);
+
+        // Each alternative part is base64-encoded.
+        QVERIFY(rfc.contains("Content-Transfer-Encoding: base64"));
+
+        // The body has a closing "--<boundary>--" terminator.
+        // (We can't assert the exact boundary token without parsing it
+        // out — settle for the trailing closing-marker pattern.)
+        QVERIFY(rfc.contains("--\r\n"));
+    }
+
+    void plainTextOnlyPathSkipsMultipartHeaders() {
+        // Regression guard: with an empty bodyHtml, the legacy text/plain
+        // path stays exactly the way callers expect it.
+        fc::util::OutgoingMessage m;
+        m.fromAddr = QStringLiteral("a@x.test");
+        m.to       = QStringLiteral("b@y.test").split(',');
+        m.subject  = QStringLiteral("flat");
+        m.bodyText = QStringLiteral("hi");
+
+        const QByteArray rfc = fc::util::MimeBuilder::build(m);
+        QVERIFY(rfc.contains("Content-Type: text/plain; charset=UTF-8"));
+        QVERIFY(rfc.contains("Content-Transfer-Encoding: 8bit"));
+        QVERIFY(!rfc.contains("multipart/alternative"));
     }
 };
 

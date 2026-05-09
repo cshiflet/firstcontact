@@ -17,6 +17,7 @@
 #include "common/AccountManagerDialog.h"
 #include "common/CacheManagerDialog.h"
 #include "common/IconLoader.h"
+#include "common/LabelChooserDialog.h"
 #include "common/LabelStyleCache.h"
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
@@ -48,6 +49,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
@@ -67,6 +69,7 @@
 #include <QSize>
 #include <QMenu>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QSet>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -229,14 +232,31 @@ void MainWindow::buildLayout() {
     sidebar_ = new SidebarWidget(splitter_);
     sidebar_->setMaximumWidth(260);
 
-    list_      = new MessageListView(splitter_);
+    // Wrap the list view + a small footer label in a single column so
+    // the footer ("Loading more messages…" / "No more messages") sits
+    // tight beneath the list within the splitter cell.
+    auto* listColumn = new QWidget(splitter_);
+    auto* listColumnLayout = new QVBoxLayout(listColumn);
+    listColumnLayout->setContentsMargins(0, 0, 0, 0);
+    listColumnLayout->setSpacing(0);
+
+    list_      = new MessageListView(listColumn);
     listModel_ = new fc::MessageListModel(this);
     list_->setModel(listModel_);
+    listColumnLayout->addWidget(list_, /*stretch=*/1);
+
+    listFooter_ = new QLabel(listColumn);
+    listFooter_->setObjectName(QStringLiteral("listFooter"));
+    listFooter_->setAlignment(Qt::AlignCenter);
+    listFooter_->setContentsMargins(8, 6, 8, 6);
+    listFooter_->setStyleSheet(QStringLiteral("color: gray; font-style: italic;"));
+    listFooter_->setVisible(false);
+    listColumnLayout->addWidget(listFooter_);
 
     reader_ = new ReaderPane(splitter_);
 
     splitter_->addWidget(sidebar_);
-    splitter_->addWidget(list_);
+    splitter_->addWidget(listColumn);
     splitter_->addWidget(reader_);
     splitter_->setStretchFactor(0, 0);
     splitter_->setStretchFactor(1, 1);
@@ -262,10 +282,16 @@ void MainWindow::buildToolBar() {
     //   1 Settings, 2 Forward, 3 Delete, 4 Refresh,
     //   5 Reply all, 6 Reply, 7 Compose, 8 Account
     // Search itself is exempt — it shrinks in place down to ~120 px.
+    //
+    // Shortcut hint: appended to the tooltip in parens. Empty string
+    // means the action has no associated keybind.
     auto withIcon = [this, tb](const QString& svgName, const QString& label,
-                                int priority) {
+                                int priority,
+                                const QString& shortcutHint = QString()) {
         auto* a = tb->addAction(IconLoader::themed(svgName), label);
-        a->setToolTip(label);
+        a->setToolTip(shortcutHint.isEmpty()
+            ? label
+            : QStringLiteral("%1 (%2)").arg(label, shortcutHint));
         iconActions_.append({a, svgName});
         if (priority > 0) {
             overflowEntries_.push_back({a, /*before=*/nullptr, label, priority, {}, {}});
@@ -273,14 +299,45 @@ void MainWindow::buildToolBar() {
         return a;
     };
 
-    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    7);
-    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6);
-    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5);
-    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2);
-    auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3);
-    auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2);
-    auto* snoozeAct  = withIcon(QStringLiteral("snooze.svg"),    tr("Snooze"),     2);
-    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2);
+    auto* compose    = withIcon(QStringLiteral("compose.svg"),   tr("Compose"),    7,
+                                 QStringLiteral("c"));
+    auto* reply      = withIcon(QStringLiteral("reply.svg"),     tr("Reply"),      6,
+                                 QStringLiteral("r"));
+    auto* replyAll   = withIcon(QStringLiteral("reply-all.svg"), tr("Reply all"),  5,
+                                 QStringLiteral("a"));
+    auto* forwardAct = withIcon(QStringLiteral("forward.svg"),   tr("Forward"),    2,
+                                 QStringLiteral("f"));
+    auto* archiveAct = withIcon(QStringLiteral("archive.svg"),   tr("Archive"),    3,
+                                 QStringLiteral("e"));
+    auto* readAct    = withIcon(QStringLiteral("mark-read.svg"), tr("Mark read/unread"), 2,
+                                 tr("Shift+I / Shift+U"));
+    auto* snoozeAct  = withIcon(QStringLiteral("snooze.svg"),    tr("Snooze"),     2,
+                                 QStringLiteral("b"));
+    auto* trash      = withIcon(QStringLiteral("trash.svg"),     tr("Delete"),     2,
+                                 QStringLiteral("#"));
+
+    // Filter chip: All / Unread-only. Checkable; persists in
+    // Preferences (matches Gmail web's filter-chip behaviour). Lives
+    // between the action cluster and the search bar so it reads as
+    // "what's IN this view" rather than as an action on the
+    // selection. Lower priority so it falls into the hamburger menu
+    // sooner than archive / delete on narrow windows.
+    auto* unreadAct = tb->addAction(IconLoader::themed(
+                                         QStringLiteral("mark-read.svg")),
+                                     tr("Unread only"));
+    unreadAct->setCheckable(true);
+    unreadAct->setChecked(Preferences::unreadOnly());
+    unreadAct->setToolTip(tr(
+        "Filter the message list to unread messages (or threads with "
+        "any unread message in conversation view)."));
+    iconActions_.append({unreadAct, QStringLiteral("mark-read.svg")});
+    overflowEntries_.push_back({unreadAct, /*before=*/nullptr,
+                                  tr("Unread only"), 2, {}, {}});
+    connect(unreadAct, &QAction::toggled, this, [this](bool on) {
+        Preferences::setUnreadOnly(on);
+        reloadCurrentLabel();
+    });
+
     tb->addSeparator();
 
     searchEdit_ = new QLineEdit(this);
@@ -319,6 +376,12 @@ void MainWindow::buildToolBar() {
 
     auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
     auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 1);
+    // Search bar's leading-icon tooltip — same pattern: pressing `/`
+    // anywhere in the window pops focus back into the search box.
+    if (searchIconAction_) {
+        searchIconAction_->setToolTip(tr("Search (/)"));
+    }
+    searchEdit_->setToolTip(tr("Search mail — Gmail syntax. Press / to focus."));
 
     // Account dropdown — mirrors baremail's web UI: a single tool button
     // that pops a menu listing the signed-in email plus Sign out and
@@ -526,6 +589,19 @@ void MainWindow::wireSignals() {
             this,    &MainWindow::onSaveAsAttachment);
     connect(reader_, &ReaderPane::downloadAllRequested,
             this,    &MainWindow::onDownloadAllAttachments);
+    // Hover a link in any message body → show its target in the
+    // status bar; the existing messageChanged restorer puts the
+    // signed-in-as / sync-progress baseline back when the cursor
+    // leaves the link (we pass a 0-timeout temporary message which
+    // clears as soon as we feed it an empty string).
+    connect(reader_, &ReaderPane::urlHovered, this,
+            [this](const QString& url) {
+                if (url.isEmpty()) {
+                    statusBar()->clearMessage();
+                } else {
+                    statusBar()->showMessage(url);
+                }
+            });
 
     connect(sidebar_, &SidebarWidget::labelSelected,
             this,     &MainWindow::onLabelSelected);
@@ -739,8 +815,81 @@ void MainWindow::wireSignals() {
             [this] {
                 if (list_) list_->viewport()->update();
             });
+    // messagesUpdated covers two unrelated triggers: incremental sync
+    // landing new rows, and our own topUpLabel finishing. Either way
+    // we want to refresh in place — refreshFromSource re-queries the
+    // same window the model already shows, so newly-cached rows
+    // surface without dropping the user back to row 0. The scroll +
+    // selection save/restore here covers the case where Qt's view
+    // reacts to beginResetModel by snapping the scrollbar; setting
+    // the value back after endResetModel keeps the user's pixel
+    // window stable.
     connect(sync_, &fc::sync::SyncService::messagesUpdated,
-            this,  &MainWindow::reloadCurrentLabel);
+            this,  [this] {
+                auto* sb = list_->verticalScrollBar();
+                const int y       = sb ? sb->value() : 0;
+                const QString sel = currentMessage_.id;
+                listModel_->refreshFromSource();
+                if (sb) sb->setValue(y);
+                if (!sel.isEmpty()) {
+                    for (int i = 0; i < listModel_->rowCount(); ++i) {
+                        const auto idx = listModel_->index(i, 0);
+                        if (idx.data(fc::MessageListModel::IdRole).toString() == sel) {
+                            list_->setCurrentIndex(idx);
+                            break;
+                        }
+                    }
+                }
+                refreshListFooter();
+            });
+    // When the model can't fetch any more rows from the cache, fall
+    // through to the server-side top-up. Subsequent messagesUpdated
+    // brings the new rows back via refreshFromSource above.
+    connect(listModel_, &fc::MessageListModel::cacheExhausted,
+            this,        [this](const QString& labelId) {
+                if (sync_) sync_->topUpLabel(labelId);
+                refreshListFooter();
+            });
+
+    // Label-scoped progress messages for top-up. Generic stateChanged
+    // already shows "Syncing…" / "Syncing… Done" for INITIAL +
+    // INCREMENTAL passes; these layer on top with a label name when
+    // the top-up is for the visible label, so the user can tell
+    // "Syncing Receipts…" apart from a global background pass.
+    connect(sync_, &fc::sync::SyncService::topUpStarted, this,
+            [this](const QString& labelId) {
+                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+                statusBar()->showMessage(name.isEmpty()
+                    ? tr("Syncing…")
+                    : tr("Syncing %1…").arg(name));
+                if (labelId == listModel_->sourceLabelId()) {
+                    topUpInFlight_ = true;
+                    refreshListFooter();
+                }
+            });
+    connect(sync_, &fc::sync::SyncService::topUpFinished, this,
+            [this](const QString& labelId, int newRows, bool serverExhausted) {
+                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+                if (!name.isEmpty()) {
+                    const QString msg = newRows > 0
+                        ? tr("%1: %n new", "", newRows).arg(name)
+                        : tr("%1: up to date").arg(name);
+                    statusBar()->showMessage(msg, 30000);
+                }
+                serverExhaustedByLabel_[labelId] = serverExhausted;
+                // The cache just gained `newRows` older rows. Push them
+                // into the model so the user's scroll-to-bottom session
+                // continues seamlessly. Skip if the user has navigated
+                // away to a different label since the top-up started.
+                if (newRows > 0
+                    && labelId == listModel_->sourceLabelId()) {
+                    listModel_->resumeAfterTopUp();
+                }
+                if (labelId == listModel_->sourceLabelId()) {
+                    topUpInFlight_ = false;
+                    refreshListFooter();
+                }
+            });
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
                 lastSyncFailed_ = true;
@@ -870,37 +1019,56 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::forwardCurrent,    this, &MainWindow::onForwardCurrent);
     connect(shortcuts_, &Shortcuts::archiveCurrent, this, &MainWindow::onArchiveCurrent);
     connect(shortcuts_, &Shortcuts::deleteCurrent,  this, &MainWindow::onDeleteCurrent);
+    connect(shortcuts_, &Shortcuts::archiveAndPrev, this, &MainWindow::onArchiveAndPrev);
+    connect(shortcuts_, &Shortcuts::archiveAndNext, this, &MainWindow::onArchiveAndNext);
     connect(shortcuts_, &Shortcuts::toggleStar,     this, &MainWindow::onToggleStar);
-    connect(shortcuts_, &Shortcuts::toggleRead,     this, &MainWindow::onToggleReadCurrent);
-    connect(shortcuts_, &Shortcuts::selectNext, this, [this] {
+    connect(shortcuts_, &Shortcuts::markRead,       this, &MainWindow::onMarkReadCurrent);
+    connect(shortcuts_, &Shortcuts::markUnread,     this, &MainWindow::onMarkUnreadCurrent);
+    connect(shortcuts_, &Shortcuts::markImportant,    this, &MainWindow::onMarkImportant);
+    connect(shortcuts_, &Shortcuts::markNotImportant, this, &MainWindow::onMarkNotImportant);
+    connect(shortcuts_, &Shortcuts::snoozeCurrent,  this, &MainWindow::onSnoozeCurrent);
+    connect(shortcuts_, &Shortcuts::muteThread,     this, &MainWindow::onMuteThread);
+    connect(shortcuts_, &Shortcuts::reportSpam,     this, &MainWindow::onReportSpam);
+    connect(shortcuts_, &Shortcuts::backToList,     this, &MainWindow::onBackToList);
+    connect(shortcuts_, &Shortcuts::openCurrent,    this, &MainWindow::onOpenCurrent);
+    connect(shortcuts_, &Shortcuts::goToLabel,        this, &MainWindow::onGoToLabel);
+    connect(shortcuts_, &Shortcuts::toggleLinkDisplay, this, &MainWindow::onToggleLinkDisplay);
+    connect(shortcuts_, &Shortcuts::applyLabels,    this, &MainWindow::onApplyLabelsCurrent);
+    connect(shortcuts_, &Shortcuts::moveToLabel,    this, &MainWindow::onMoveToLabelCurrent);
+    // selectNext/selectPrev should advance from whatever the user has
+    // selected RIGHT NOW (which can be ahead of currentRow_ — e.g.
+    // they clicked a row to select it but didn't activate it). Read
+    // the live current index off the view rather than the cached
+    // currentRow_ which only updates on activation.
+    auto selectAt = [this](int row) {
         const int n = listModel_->rowCount();
         if (n == 0) return;
-        const int row = qMin(currentRow_ + 1, n - 1);
-        list_->setCurrentIndex(listModel_->index(row, 0));
-        onMessageActivated(listModel_->index(row, 0)
-                              .data(fc::MessageListModel::IdRole).toString(), row);
+        row = qBound(0, row, n - 1);
+        const auto idx = listModel_->index(row, 0);
+        list_->setCurrentIndex(idx);
+        onMessageActivated(idx.data(fc::MessageListModel::IdRole).toString(),
+                            row);
+    };
+    auto selectedRow = [this] {
+        const auto idx = list_->currentIndex();
+        return idx.isValid() ? idx.row() : currentRow_;
+    };
+    connect(shortcuts_, &Shortcuts::selectNext, this, [selectAt, selectedRow] {
+        selectAt(selectedRow() + 1);
     });
-    connect(shortcuts_, &Shortcuts::selectPrev, this, [this] {
-        if (listModel_->rowCount() == 0) return;
-        const int row = qMax(currentRow_ - 1, 0);
-        list_->setCurrentIndex(listModel_->index(row, 0));
-        onMessageActivated(listModel_->index(row, 0)
-                              .data(fc::MessageListModel::IdRole).toString(), row);
+    connect(shortcuts_, &Shortcuts::selectPrev, this, [selectAt, selectedRow] {
+        selectAt(selectedRow() - 1);
     });
-    connect(shortcuts_, &Shortcuts::showHelp, this, [this] {
-        QMessageBox::information(this, tr("Keyboard shortcuts"),
-            tr("/  focus search\n"
-               "j  next message\nk  previous message\n"
-               "c  compose\nr  reply\nShift+R  reply all\nf  forward\n"
-               "e  archive\n#  delete\ns  toggle star\n?  this help\n"
-               "Ctrl+1..9  switch to account N"));
-    });
+    // Account switching via Ctrl+1..9 — multi-account only behaviour;
+    // help dialog itself is wired via &MainWindow::onShowShortcutsHelp
+    // elsewhere in this method.
     connect(shortcuts_, &Shortcuts::switchToAccountSlot, this,
             [this](int slot) {
-        const auto list = accounts_->accounts();
-        if (slot < 1 || slot > list.size()) return;
-        accounts_->setCurrentAccountId(list.at(slot - 1).id);
-    });
+                const auto list = accounts_->accounts();
+                if (slot < 1 || slot > list.size()) return;
+                accounts_->setCurrentAccountId(list.at(slot - 1).id);
+            });
+    connect(shortcuts_, &Shortcuts::showHelp, this, &MainWindow::onShowShortcutsHelp);
 }
 
 namespace {
@@ -1119,6 +1287,14 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
     // sign out the active stack only when the active account matches.
     if (accountId == currentAccountId_) {
         auth_->signOut();
+        // Reset transient session state so a stale "current message"
+        // / "current row" can't drive a shortcut press (r, e, #, …)
+        // into operating on cached data that no longer represents
+        // the signed-in user. Reader pane goes back to its empty
+        // hint. Per-account cache + scheduler cleanup happens below.
+        currentMessage_ = {};
+        currentRow_     = -1;
+        if (reader_) reader_->showEmpty(tr("Not signed in."));
     } else if (auto* ctx = accounts_->contextFor(accountId)) {
         // Sign out the named context's OAuthClient directly.
         if (auto* a = ctx->auth()) a->signOut();
@@ -1198,51 +1374,127 @@ void MainWindow::onLabelSelected(const QString& id) {
     // v2 unified inbox: clicking "__all_inboxes" flips to cross-
     // account view. Any other label flips back to per-account.
     const bool wasCross = crossAccountView_;
+    QString resolvedId;
     if (id == QStringLiteral("__all_inboxes")) {
         crossAccountView_ = true;
-        currentLabelId_   = QStringLiteral("INBOX");   // implicit
+        resolvedId        = QStringLiteral("INBOX");   // implicit
     } else {
         crossAccountView_ = false;
-        currentLabelId_   = id;
+        resolvedId        = id;
     }
-    if (!wasCross && !crossAccountView_ && id == currentLabelId_) return;
+    // Bail if neither the cross-account flip nor the underlying
+    // label changed — repeated clicks on the same row should be a
+    // no-op rather than a full reload.
+    if (!wasCross && !crossAccountView_ && resolvedId == currentLabelId_) return;
+    currentLabelId_ = resolvedId;
+    // Reset top-up state for the new label — any in-flight top-up
+    // for the old label is no longer interesting to the footer.
+    topUpInFlight_ = false;
+    refreshListFooter();
     reloadCurrentLabel();
+    // Initial sync only seeds INBOX / SENT / DRAFT / STARRED — every
+    // other label (every user label, plus categories like SPAM /
+    // TRASH) only carries cached rows for messages that happened to
+    // overlap with a seed at sync time. Pull a server-side page so
+    // the user sees what Gmail web sees, not just the lucky overlap.
+    // SyncService::topUpLabel itself is a no-op for the seed labels
+    // and for the empty / search-mode case.
+    if (sync_ && currentSearchQuery_.isEmpty()) {
+        sync_->topUpLabel(id);
+    }
+    refreshListFooter();
 }
 
 void MainWindow::reloadSidebar() {
     sidebar_->model()->reload();
 }
 
+void MainWindow::refreshListFooter() {
+    if (!listFooter_ || !listModel_) return;
+
+    // While a server top-up for the visible label is in flight, the
+    // footer always shows the loading state regardless of the
+    // model's current row count — the user just triggered a fetch
+    // and wants to know it's working.
+    if (topUpInFlight_) {
+        listFooter_->setText(tr("Loading more messages…"));
+        listFooter_->setVisible(true);
+        return;
+    }
+
+    const QString labelId = listModel_->sourceLabelId();
+    if (labelId.isEmpty()) {
+        listFooter_->setVisible(false);
+        return;
+    }
+
+    // Cache still has more to give — don't show the footer; scrolling
+    // pulls more rows in directly.
+    if (!listModel_->cacheDrained()) {
+        listFooter_->setVisible(false);
+        return;
+    }
+
+    // Drained cache. Show "No more messages" if we know we've walked
+    // the label end-to-end on the server, OR if this is one of the
+    // seed labels that incremental sync keeps fully cached. For
+    // non-seed labels where the server walk hasn't yielded an empty
+    // nextPageToken yet, leave the footer hidden — a future scroll
+    // will trigger another top-up that may bring more rows back.
+    static const QSet<QString> seedLabels = {
+        QStringLiteral("INBOX"),
+        QStringLiteral("SENT"),
+        QStringLiteral("DRAFT"),
+        QStringLiteral("STARRED"),
+    };
+    const bool isSeed   = seedLabels.contains(labelId);
+    const bool srvDone  = serverExhaustedByLabel_.value(labelId, false);
+
+    if (isSeed || srvDone) {
+        listFooter_->setText(tr("No more messages"));
+        listFooter_->setVisible(true);
+    } else {
+        listFooter_->setVisible(false);
+    }
+}
+
 void MainWindow::reloadCurrentLabel() {
     const bool conv = Preferences::conversationView();
 
     // Capture the user's currently-viewed message + thread so we can
-    // re-select it after replaceAll. Without this, every background
+    // re-select it after the model swap. Without this, every background
     // sync (which fires messagesUpdated → reloadCurrentLabel) would
     // wipe the selection and reset the reader pane — which is jarring
     // when the user is mid-read.
     const QString preservedId       = currentMessage_.id;
     const QString preservedThreadId = currentMessage_.threadId;
 
-    // v2: cross-account view uses the *AllAccounts variants. Each
-    // returned row carries its source accountId so a click can route
-    // back to the right context.
-    auto rows = crossAccountView_
-        ? (currentSearchQuery_.isEmpty()
+    if (crossAccountView_) {
+        // v2 unified inbox: cross-account view uses the *AllAccounts
+        // variants. The model's source-pinned pagination doesn't yet
+        // know how to route per-account fetchMore calls in this mode,
+        // so feed the first page via replaceAll and let the user
+        // re-click the label or scroll a non-cross-account label
+        // for paginated browsing.
+        auto rows = currentSearchQuery_.isEmpty()
             ? (conv
                 ? fc::cache::MessageRepository::listThreadsByLabelAllAccounts(currentLabelId_, kPageSize, 0)
                 : fc::cache::MessageRepository::listByLabelAllAccounts(currentLabelId_, kPageSize, 0))
             : (conv
                 ? fc::cache::MessageRepository::searchFtsThreadsAllAccounts(currentSearchQuery_, kPageSize)
-                : fc::cache::MessageRepository::searchFtsAllAccounts(currentSearchQuery_, kPageSize)))
-        : (currentSearchQuery_.isEmpty()
-            ? (conv
-                ? fc::cache::MessageRepository::listThreadsByLabel(currentAccountId_, currentLabelId_, kPageSize, 0)
-                : fc::cache::MessageRepository::listByLabel(currentAccountId_, currentLabelId_, kPageSize, 0))
-            : (conv
-                ? fc::cache::MessageRepository::searchFtsThreads(currentAccountId_, currentSearchQuery_, kPageSize)
-                : fc::cache::MessageRepository::searchFts(currentAccountId_, currentSearchQuery_, kPageSize)));
-    listModel_->replaceAll(std::move(rows));
+                : fc::cache::MessageRepository::searchFtsAllAccounts(currentSearchQuery_, kPageSize));
+        listModel_->replaceAll(std::move(rows));
+    } else if (currentSearchQuery_.isEmpty()) {
+        // Single-account, label browsing: paginated source-pinned
+        // mode. The legacy zero-arg listByLabel inside the model
+        // routes through Database::defaultAccountId() — fine for
+        // single-account-default; multi-account routing for the
+        // paginated path lands in a follow-up.
+        listModel_->setLabelSource(currentLabelId_, conv,
+                                    Preferences::unreadOnly());
+    } else {
+        listModel_->setSearchSource(currentSearchQuery_, conv);
+    }
 
     // Try to restore the selection: first by exact message id, then by
     // thread id. The thread fallback covers conversation-view rows
@@ -1282,6 +1534,8 @@ void MainWindow::reloadCurrentLabel() {
         reader_->showEmpty();
         currentMessage_ = {};
     }
+
+    refreshListFooter();
 }
 
 void MainWindow::onMessageActivated(const QString& messageId, int row) {
@@ -1306,7 +1560,12 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
         auto thread = fc::cache::MessageRepository::byThread(lookupAccount,
                                                               selected.threadId);
         if (thread.size() > 1) {
-            reader_->showThread(thread);
+            // Pass the activated id so the reader expands + scrolls to
+            // the right card. Without this, clicking a child row in an
+            // expanded conversation always lands on the latest message
+            // (showThread's default), which means the user has to
+            // hunt for the message they actually clicked.
+            reader_->showThread(thread, selected.id);
         } else {
             reader_->showMessage(selected);
         }
@@ -1472,9 +1731,11 @@ void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
 
     auto* w = new ComposeWindow(choices, defaultId, this);
     w->setAttribute(Qt::WA_DeleteOnClose);
-    if (parent) {
-        w->prefillFrom(*parent, static_cast<ComposeWindow::Mode>(mode));
-    }
+    // Always prefill — Mode::New seeds the signature too, so calling it
+    // for a brand-new compose isn't an empty no-op.
+    const fc::Message empty;
+    w->prefillFrom(parent ? *parent : empty,
+                    static_cast<ComposeWindow::Mode>(mode));
     connect(w, &ComposeWindow::composeReady, this,
         [this](const QString& accountId,
                const fc::util::OutgoingMessage& msg, const QString& threadId,
@@ -1952,20 +2213,34 @@ void MainWindow::applyLabelDiffToThread(const QString& threadId,
     pending_->flush();
 }
 
-void MainWindow::onArchiveCurrent() {
-    if (currentMessage_.id.isEmpty()) return;
-    if (fc::util::DryRun::block(QStringLiteral("archive-message"))) {
-        statusBar()->showMessage(
-            tr("Dry-run mode: archive blocked."), 4000);
-        return;
+bool MainWindow::guardedThreadAction(const QString& dryRunKey,
+                                      const QString& blockedStatus,
+                                      const QString& successStatus,
+                                      const QStringList& add,
+                                      const QStringList& remove,
+                                      bool refreshSidebar) {
+    if (currentMessage_.id.isEmpty()) return false;
+    if (fc::util::DryRun::block(dryRunKey)) {
+        statusBar()->showMessage(blockedStatus, 4000);
+        return false;
     }
-    // Archive the entire conversation, matching Gmail web semantics.
-    // For single-message rows, byThread returns the one message and the
-    // loop is a no-op extra cost — fine.
-    const QStringList rem{QStringLiteral("INBOX")};
-    applyLabelDiffToThread(currentMessage_.threadId, {}, rem);
-    statusBar()->showMessage(tr("Archived."), 3000);
+    applyLabelDiffToThread(currentMessage_.threadId, add, remove);
+    statusBar()->showMessage(successStatus, 3000);
     reloadCurrentLabel();
+    if (refreshSidebar) reloadSidebar();
+    return true;
+}
+
+void MainWindow::onArchiveCurrent() {
+    // Archive the entire conversation, matching Gmail web semantics.
+    // For single-message rows, byThread inside applyLabelDiffToThread
+    // returns the one message and the loop is a no-op extra cost.
+    guardedThreadAction(
+        QStringLiteral("archive-message"),
+        tr("Dry-run mode: archive blocked."),
+        tr("Archived."),
+        /*add=*/{},
+        /*remove=*/{QStringLiteral("INBOX")});
 }
 
 void MainWindow::onToggleReadCurrent() {
@@ -1986,17 +2261,329 @@ void MainWindow::onToggleReadCurrent() {
     bool anyUnread = false;
     for (const auto& m : messages) if (m.isUnread) { anyUnread = true; break; }
 
-    QStringList add, rem;
-    if (anyUnread) rem << QStringLiteral("UNREAD");
-    else           add << QStringLiteral("UNREAD");
+    if (anyUnread) onMarkReadCurrent();
+    else           onMarkUnreadCurrent();
+}
+
+void MainWindow::onMarkReadCurrent() {
+    if (guardedThreadAction(
+            QStringLiteral("mark-read"),
+            tr("Dry-run mode: mark-read blocked."),
+            tr("Marked as read."),
+            /*add=*/{},
+            /*remove=*/{QStringLiteral("UNREAD")},
+            /*refreshSidebar=*/true)) {
+        currentMessage_.isUnread = false;
+    }
+}
+
+void MainWindow::onMarkUnreadCurrent() {
+    if (guardedThreadAction(
+            QStringLiteral("mark-unread"),
+            tr("Dry-run mode: mark-unread blocked."),
+            tr("Marked as unread."),
+            /*add=*/{QStringLiteral("UNREAD")},
+            /*remove=*/{},
+            /*refreshSidebar=*/true)) {
+        currentMessage_.isUnread = true;
+    }
+}
+
+void MainWindow::onBackToList() {
+    // Gmail-web `u`: yank focus from the reader pane back to the
+    // threadlist. Doesn't change selection — pressing j/k from there
+    // continues to navigate from where you were.
+    if (!list_) return;
+    list_->setFocus(Qt::ShortcutFocusReason);
+    if (currentRow_ >= 0 && currentRow_ < listModel_->rowCount()) {
+        list_->setCurrentIndex(listModel_->index(currentRow_, 0));
+    }
+}
+
+void MainWindow::onOpenCurrent() {
+    // Gmail-web `o` / Enter: re-trigger the activation pipeline for
+    // whichever row is selected. If nothing's selected (fresh load,
+    // empty inbox), no-op.
+    if (!list_ || !listModel_) return;
+    const auto idx = list_->currentIndex();
+    if (!idx.isValid()) return;
+    const QString id = idx.data(fc::MessageListModel::IdRole).toString();
+    if (id.isEmpty()) return;
+    onMessageActivated(id, idx.row());
+    // Reader pane gets focus so PageDown/PageUp scroll the message
+    // body — matches Gmail-web's behavior where `o` "opens" the thread.
+    if (reader_) reader_->setFocus(Qt::ShortcutFocusReason);
+}
+
+void MainWindow::onArchiveAndPrev() {
+    if (currentMessage_.id.isEmpty()) return;
+    const int prevRow = currentRow_;
+    onArchiveCurrent();
+    // After reload, the row we want is at prevRow - 1 (the message that
+    // was directly above the one we just archived). Clamp to [0, n-1].
+    const int n = listModel_ ? listModel_->rowCount() : 0;
+    if (n == 0) return;
+    const int target = qMax(prevRow - 1, 0);
+    if (target >= n) return;
+    list_->setCurrentIndex(listModel_->index(target, 0));
+    onMessageActivated(listModel_->index(target, 0)
+                          .data(fc::MessageListModel::IdRole).toString(), target);
+}
+
+void MainWindow::onArchiveAndNext() {
+    if (currentMessage_.id.isEmpty()) return;
+    const int prevRow = currentRow_;
+    onArchiveCurrent();
+    // After reload, what was at prevRow + 1 is now at prevRow (the row
+    // we archived collapsed out of the list). Clamp to [0, n-1].
+    const int n = listModel_ ? listModel_->rowCount() : 0;
+    if (n == 0) return;
+    const int target = qMin(prevRow, n - 1);
+    if (target < 0) return;
+    list_->setCurrentIndex(listModel_->index(target, 0));
+    onMessageActivated(listModel_->index(target, 0)
+                          .data(fc::MessageListModel::IdRole).toString(), target);
+}
+
+void MainWindow::onMuteThread() {
+    // Apply MUTE + drop INBOX — same data shape as Gmail web's mute
+    // action. We don't auto-archive future incoming replies (Gmail's
+    // server does that for you on its end), but the label is correct
+    // and reconciles cleanly when the server side reflects back.
+    guardedThreadAction(
+        QStringLiteral("mute-thread"),
+        tr("Dry-run mode: mute blocked."),
+        tr("Muted."),
+        /*add=*/{QStringLiteral("MUTE")},
+        /*remove=*/{QStringLiteral("INBOX")});
+}
+
+void MainWindow::onReportSpam() {
+    guardedThreadAction(
+        QStringLiteral("report-spam"),
+        tr("Dry-run mode: spam blocked."),
+        tr("Reported as spam."),
+        /*add=*/{QStringLiteral("SPAM")},
+        /*remove=*/{QStringLiteral("INBOX")});
+}
+
+void MainWindow::onMarkImportant() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-important"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-important blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {QStringLiteral("IMPORTANT")}, {});
+    statusBar()->showMessage(tr("Marked important."), 3000);
+}
+
+void MainWindow::onMarkNotImportant() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("mark-not-important"))) {
+        statusBar()->showMessage(tr("Dry-run mode: mark-not-important blocked."), 4000);
+        return;
+    }
+    applyLabelDiffToThread(currentMessage_.threadId,
+                            {}, {QStringLiteral("IMPORTANT")});
+    statusBar()->showMessage(tr("Marked not important."), 3000);
+}
+
+void MainWindow::onGoToLabel(const QString& labelId) {
+    if (!sidebar_) return;
+    sidebar_->selectLabel(labelId);
+}
+
+void MainWindow::onToggleLinkDisplay() {
+    using fc::util::LinkDisplayMode;
+    const auto current = Preferences::linkDisplayMode();
+    const auto next    = (current == LinkDisplayMode::Labeled)
+        ? LinkDisplayMode::FullUrl
+        : LinkDisplayMode::Labeled;
+    Preferences::setLinkDisplayMode(next);
+    statusBar()->showMessage(next == LinkDisplayMode::FullUrl
+        ? tr("Showing full URLs")
+        : tr("Showing link labels"), 3000);
+
+    // Re-render the reader so the change is immediately visible.
+    if (currentMessage_.id.isEmpty()) return;
+    const auto cached = fc::cache::MessageRepository::byId(currentMessage_.id);
+    if (cached.id.isEmpty()) return;
+    const auto thread = fc::cache::MessageRepository::byThread(cached.threadId);
+    if (thread.size() > 1) {
+        reader_->showThread(thread, cached.id);
+    } else {
+        reader_->showMessage(cached);
+    }
+}
+
+void MainWindow::onApplyLabelsCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("apply-labels"))) {
+        statusBar()->showMessage(tr("Dry-run mode: label edit blocked."), 4000);
+        return;
+    }
+
+    // Union of label ids across every message in the thread — that's
+    // the set the dialog should pre-check. Using a thread-level union
+    // matches what the user sees in the message-list row badges and
+    // avoids the surprise of "I checked Work but only one of three
+    // messages had it; now the others are missing it."
+    const auto messages = fc::cache::MessageRepository::byThread(
+                              currentMessage_.threadId);
+    QSet<QString> applied;
+    for (const auto& m : messages) {
+        for (const auto& id : m.labelIds) applied.insert(id);
+    }
+
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, applied, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QStringList add = dlg.added();
+    const QStringList rem = dlg.removed();
+    if (add.isEmpty() && rem.isEmpty()) return;
 
     applyLabelDiffToThread(currentMessage_.threadId, add, rem);
-    currentMessage_.isUnread = !anyUnread;
-    statusBar()->showMessage(anyUnread ? tr("Marked as read.")
-                                       : tr("Marked as unread."),
-                              3000);
+    statusBar()->showMessage(tr("Labels updated."), 3000);
     reloadCurrentLabel();
     reloadSidebar();
+}
+
+void MainWindow::onMoveToLabelCurrent() {
+    if (currentMessage_.id.isEmpty()) return;
+    if (fc::util::DryRun::block(QStringLiteral("move-to-label"))) {
+        statusBar()->showMessage(tr("Dry-run mode: move blocked."), 4000);
+        return;
+    }
+
+    const auto messages = fc::cache::MessageRepository::byThread(
+                              currentMessage_.threadId);
+    QSet<QString> applied;
+    for (const auto& m : messages) {
+        for (const auto& id : m.labelIds) applied.insert(id);
+    }
+
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, applied, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString chosen = dlg.chosen();
+    if (chosen.isEmpty()) return;  // nothing picked
+
+    // "Move" semantics: add the chosen label, drop the active sidebar
+    // label. The sidebar label is what the user is currently looking
+    // at (e.g. INBOX, or some user label). For system pseudo-labels
+    // ("STARRED", "SENT", "DRAFT") moving doesn't really make sense
+    // — the action there degrades gracefully to a plain "add label",
+    // which is the right thing to do.
+    QStringList rem;
+    if (!currentLabelId_.isEmpty() && currentLabelId_ != chosen) {
+        rem << currentLabelId_;
+    }
+    QStringList add;
+    if (!applied.contains(chosen)) add << chosen;
+
+    if (add.isEmpty() && rem.isEmpty()) return;
+    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    statusBar()->showMessage(tr("Moved."), 3000);
+    reloadCurrentLabel();
+    reloadSidebar();
+}
+
+void MainWindow::onShowShortcutsHelp() {
+    // Grouped reference modeled on Gmail-web's own "?" overlay.
+    // We render via a QDialog with a QGridLayout so the shortcut keys
+    // stay right-aligned in their own column and the descriptions stay
+    // left-aligned in another, regardless of translation length.
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Keyboard shortcuts"));
+    dlg.setModal(true);
+
+    auto* outer = new QVBoxLayout(&dlg);
+
+    struct Group { QString title; QList<QPair<QString, QString>> rows; };
+    const QList<Group> groups = {
+        { tr("Navigation"), {
+            { QStringLiteral("/"),       tr("Focus search") },
+            { QStringLiteral("j"),       tr("Next message") },
+            { QStringLiteral("k"),       tr("Previous message") },
+            { tr("o or Enter"),          tr("Open conversation") },
+            { QStringLiteral("u"),       tr("Back to threadlist") },
+        }},
+        { tr("Go to"), {
+            { QStringLiteral("g i"),     tr("Inbox") },
+            { QStringLiteral("g s"),     tr("Starred") },
+            { QStringLiteral("g t"),     tr("Sent") },
+            { QStringLiteral("g d"),     tr("Drafts") },
+        }},
+        { tr("Compose"), {
+            { QStringLiteral("c"),       tr("New message") },
+            { QStringLiteral("r"),       tr("Reply") },
+            { tr("a or Shift+R"),        tr("Reply all") },
+            { QStringLiteral("f"),       tr("Forward") },
+            { QStringLiteral("Ctrl+Enter"), tr("Send (compose window)") },
+            { QStringLiteral("Esc"),     tr("Close compose window") },
+        }},
+        { tr("Read state"), {
+            { QStringLiteral("Shift+I"), tr("Mark as read") },
+            { QStringLiteral("Shift+U"), tr("Mark as unread") },
+            { QStringLiteral("s"),       tr("Toggle star") },
+            { QStringLiteral("="),       tr("Mark important") },
+            { QStringLiteral("-"),       tr("Mark not important") },
+        }},
+        { tr("Organize"), {
+            { QStringLiteral("e"),       tr("Archive conversation") },
+            { QStringLiteral("["),       tr("Archive + previous") },
+            { QStringLiteral("]"),       tr("Archive + next") },
+            { QStringLiteral("#"),       tr("Delete conversation") },
+            { QStringLiteral("b"),       tr("Snooze conversation") },
+            { QStringLiteral("m"),       tr("Mute thread") },
+            { QStringLiteral("!"),       tr("Report as spam") },
+            { QStringLiteral("l"),       tr("Apply labels…") },
+            { QStringLiteral("v"),       tr("Move to label…") },
+        }},
+        { tr("View"), {
+            { QStringLiteral("Shift+L"), tr("Toggle link display (label only ↔ label + URL)") },
+        }},
+        { tr("Help"), {
+            { QStringLiteral("?"),       tr("Show this dialog") },
+        }},
+    };
+
+    for (const Group& g : groups) {
+        auto* heading = new QLabel(QStringLiteral("<b>%1</b>").arg(g.title), &dlg);
+        outer->addWidget(heading);
+
+        auto* grid = new QGridLayout;
+        grid->setContentsMargins(16, 0, 0, 0);
+        grid->setHorizontalSpacing(18);
+        grid->setVerticalSpacing(4);
+
+        int row = 0;
+        for (const auto& kv : g.rows) {
+            auto* keyLabel = new QLabel(QStringLiteral("<code>%1</code>").arg(kv.first), &dlg);
+            keyLabel->setTextFormat(Qt::RichText);
+            keyLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            keyLabel->setMinimumWidth(110);
+            grid->addWidget(keyLabel, row, 0);
+
+            auto* descLabel = new QLabel(kv.second, &dlg);
+            descLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            grid->addWidget(descLabel, row, 1);
+            ++row;
+        }
+        outer->addLayout(grid);
+        outer->addSpacing(6);
+    }
+
+    auto* closeBtn = new QPushButton(tr("Close"), &dlg);
+    closeBtn->setDefault(true);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    btnRow->addWidget(closeBtn);
+    outer->addLayout(btnRow);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
 }
 
 void MainWindow::onSnoozeCurrent() {

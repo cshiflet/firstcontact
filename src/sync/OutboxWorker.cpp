@@ -4,6 +4,7 @@
 #include "cache/OutboxRepository.h"
 
 #include <QDateTime>
+#include <QPointer>
 #include <QTimer>
 
 namespace fc::sync {
@@ -57,10 +58,15 @@ void OutboxWorker::flush() {
     if (items.empty()) return;
     d_->busy = true;
 
+    // QPointer guards every async callback so a worker destroyed
+    // mid-flight (shutdown, sign-out) doesn't dereference a dead
+    // d_->busy / signal target. Without the guard, a sendRaw that
+    // resolves after teardown would UAF.
+    QPointer<OutboxWorker> self(this);
     auto remaining = std::make_shared<int>(int(items.size()));
-    auto onDone = [this, remaining]() {
+    auto onDone = [self, remaining]() {
         if (--(*remaining) > 0) return;
-        d_->busy = false;
+        if (self) self->d_->busy = false;
     };
 
     for (const auto& it : items) {
@@ -79,7 +85,7 @@ void OutboxWorker::flush() {
         }
         fc::cache::OutboxRepository::markSending(it.id);
         client->sendRaw(it.rfc5322, it.threadId,
-            [this, id = it.id, attempt = it.attemptCount + 1, onDone]
+            [self, id = it.id, attempt = it.attemptCount + 1, onDone]
             (QString gmailMsgId, fc::api::ApiError err) {
                 if (err) {
                     if (attempt >= kMaxAttempts) {
@@ -90,10 +96,10 @@ void OutboxWorker::flush() {
                         fc::cache::OutboxRepository::markFailed(
                             id, err.message, backoffNextRetry(attempt));
                     }
-                    emit itemFailed(id, err.message);
+                    if (self) emit self->itemFailed(id, err.message);
                 } else {
                     fc::cache::OutboxRepository::markSent(id);
-                    emit itemSent(id, gmailMsgId);
+                    if (self) emit self->itemSent(id, gmailMsgId);
                 }
                 onDone();
             });

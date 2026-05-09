@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/Linkify.h"
+
 #include <QString>
 
 namespace fc::ui {
@@ -88,6 +90,66 @@ public:
     // robustness.
     static bool stripTrackingPixels();
     static void setStripTrackingPixels(bool on);
+
+    // ----------------------------------------------------------------
+    // Compose preferences
+
+    // Plain-text signature appended to outgoing messages. Empty string
+    // means no signature. Inserted as-is after a leading "\n--\n"
+    // separator, matching the de-facto RFC 3676 sig delimiter.
+    static QString signatureText();
+    static void    setSignatureText(const QString& text);
+
+    // True: the user's reply body sits ABOVE the quoted original
+    // (Gmail / Outlook web default — top-posting). False: body sits
+    // BELOW the quoted original (Usenet / mailing-list convention —
+    // bottom-posting). The cursor is placed appropriately on
+    // prefill so typing lands in the right spot.
+    static bool replyAboveOriginal();
+    static void setReplyAboveOriginal(bool on);
+
+    // How the original message gets quoted in a reply / forward body:
+    //   BlockQuote  — RFC-1849 style: each line prefixed with "> ".
+    //                 Renders as a real blockquote in HTML.
+    //   GreaterPrefix — same prefix; identical text format. Difference
+    //                   only matters for the rich-text / HTML reply
+    //                   path (Phase 5) where BlockQuote becomes a
+    //                   real <blockquote> element and GreaterPrefix
+    //                   stays as plain ">"-prefixed lines.
+    enum class QuoteStyle { BlockQuote, GreaterPrefix };
+    static QuoteStyle quoteStyle();
+    static void       setQuoteStyle(QuoteStyle s);
+    static QString    quoteStyleToString(QuoteStyle s);
+    static QuoteStyle quoteStyleFromString(const QString& s);
+
+    // ----------------------------------------------------------------
+    // Filter state — persisted across sessions so the user's last
+    // toggle survives a restart (matches Gmail web's behavior).
+
+    // When true, every label's message list is filtered down to
+    // messages currently carrying UNREAD (or in conversation view,
+    // threads with at least one unread message). Off by default.
+    static bool unreadOnly();
+    static void setUnreadOnly(bool on);
+
+    // Multiplier applied to the application's default font point size
+    // at startup. Useful on HiDPI displays where the system's reported
+    // DPI doesn't match the physical scale (notably WSL, where the
+    // host's HiDPI scale doesn't always propagate through X). Values
+    // outside [0.75, 3.0] are clamped. 1.0 is the platform default.
+    //
+    // Read-once-at-startup contract: changing this lives via a UI
+    // control but most widget metrics only fully recompute on the
+    // next launch, so the Settings dialog hints at a restart for
+    // best results.
+    static double uiFontScale();
+    static void   setUiFontScale(double scale);
+
+    // How URLs render in the linkified plain-text body (see
+    // util::LinkDisplayMode). Toggleable via Shift+L; the dropdown
+    // in Settings → Reader mirrors the same pref.
+    static fc::util::LinkDisplayMode linkDisplayMode();
+    static void                       setLinkDisplayMode(fc::util::LinkDisplayMode m);
 };
 
 }  // namespace fc::ui

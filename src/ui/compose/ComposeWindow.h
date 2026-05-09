@@ -6,9 +6,11 @@
 #include <QList>
 #include <QWidget>
 
+class QAction;
 class QComboBox;
 class QLineEdit;
 class QTextEdit;
+class QToolBar;
 class QLabel;
 
 namespace fc::ui {
@@ -87,6 +89,10 @@ private:
     QLineEdit* ccEdit_;
     QLineEdit* subjectEdit_;
     QTextEdit* bodyEdit_;
+    QToolBar*  formatBar_     = nullptr;
+    QAction*   actBold_       = nullptr;
+    QAction*   actItalic_     = nullptr;
+    QAction*   actUnderline_  = nullptr;
     QLabel*    statusLabel_;
 
     QString    inReplyToHeader_;
@@ -94,6 +100,9 @@ private:
     QString    draftId_;
     bool       dirty_ = false;
     bool       suppressClosePrompt_ = false;
+
+    QToolBar*  buildFormatToolbar();
+    void       syncFormatActionsToCursor();
 
     fc::util::OutgoingMessage currentMessage() const;
     AccountChoice selectedChoice() const;

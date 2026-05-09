@@ -1,6 +1,9 @@
 -- FirstContact schema migration 0001 — initial cache layout.
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- The journal_mode and foreign_keys PRAGMAs that used to live here
+-- moved into Migrations::run so they can be applied OUTSIDE the
+-- per-step transaction wrapper. SQLite refuses to switch to WAL
+-- inside an open transaction, so leaving them here would have
+-- aborted the migration on every fresh database.
 
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
