@@ -196,10 +196,24 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     connect(Theme::instance(), &Theme::changed, this,
             [this](Theme::Mode) { refreshToolbarIcons(); });
 
-    // Hydrate UI from cache without waiting for a network round trip.
-    reloadSidebar();
-    currentLabelId_ = QStringLiteral("INBOX");
-    reloadCurrentLabel();
+    // Hydrate UI from cache without waiting for a network round trip —
+    // BUT only when the active account is actually signed in. The
+    // accounts table can carry rows for accounts that signed in once
+    // and signed out (we keep the row + cache when the user said "keep
+    // cached data" so a re-sign-in is fast); migration 0006 also seeds
+    // a synthetic legacy row. Without this gate, a launched-with-no-
+    // signed-in-account window would render the previous account's
+    // mail straight from cache. enforceActiveAccountGate() runs the
+    // check now (best-effort — keychain hydration is async, so this
+    // first call may say "not signed in" even when we will be) AND
+    // again from the tokensLoaded handler once the per-account
+    // OAuthClients have finished hydrating from the keychain.
+    enforceActiveAccountGate();
+    if (auth_->isAuthorized()) {
+        reloadSidebar();
+        currentLabelId_ = QStringLiteral("INBOX");
+        reloadCurrentLabel();
+    }
 
     // Snooze wake-up scheduler. Snooze is FirstContact-local — Gmail's
     // API doesn't expose its native snooze, so we tick every 60 s
@@ -712,6 +726,24 @@ void MainWindow::wireSignals() {
     // menu without waiting for another refresh trigger.
     connect(auth_, &fc::auth::OAuthClient::tokensLoaded, this,
             &MainWindow::refreshAccountIndicator);
+    // Re-evaluate the signed-in gate once keychain hydration finishes.
+    // If this OAuthClient came back unauthorized, the UI must not
+    // continue showing whatever cache-driven view was painted at
+    // construction; if it came back authorized and we previously
+    // wiped the UI, refresh it from cache for the now-active account.
+    connect(auth_, &fc::auth::OAuthClient::tokensLoaded, this, [this] {
+        enforceActiveAccountGate();
+        if (auth_->isAuthorized() && !currentAccountId_.isEmpty()) {
+            if (sidebar_ && sidebar_->model()
+                    && sidebar_->model()->accountId() != currentAccountId_) {
+                sidebar_->model()->setAccountId(currentAccountId_);
+            }
+            if (currentLabelId_.isEmpty()) {
+                currentLabelId_ = QStringLiteral("INBOX");
+            }
+            reloadCurrentLabel();
+        }
+    });
     connect(auth_, &fc::auth::OAuthClient::failed, this,
             [this](const QString& reason) {
                 QMessageBox::warning(this, tr("Sign-in failed"), reason);
@@ -1335,6 +1367,40 @@ void MainWindow::onSignIn() {
     statusBar()->showMessage(
         tr("Starting OAuth flow — opening your browser…"), 0);
     auth_->authorize();
+}
+
+// Decides whether ANY account currently has valid OAuth tokens, and
+// if not, clears the UI down to its signed-out state. Called at
+// startup AND every time tokensLoaded fires across the per-account
+// OAuthClients — the latter because keychain hydration is async, so
+// the first call from the constructor may run before any tokens have
+// landed. Once the hydration finishes:
+//   - if at least one account is authorized, the UI is left alone
+//     (or refreshed by the existing currentAccountChanged path).
+//   - if no account is authorized, every cache-driven surface
+//     (message list, sidebar tree, reader pane) is wiped so the
+//     window stops rendering the previous account's data even
+//     though that data still exists on disk.
+//
+// "Not signed in" is the strict condition. The accounts table can
+// carry rows for sign-out-with-keep-cache and for the synthetic
+// legacy seed; neither implies an active account.
+void MainWindow::enforceActiveAccountGate() {
+    bool anyAuthorized = false;
+    if (accounts_) {
+        for (auto* ctx : accounts_->allContexts()) {
+            if (ctx && ctx->auth() && ctx->auth()->isAuthorized()) {
+                anyAuthorized = true;
+                break;
+            }
+        }
+    }
+    if (!anyAuthorized && auth_ && auth_->isAuthorized()) {
+        anyAuthorized = true;
+    }
+    if (!anyAuthorized) {
+        clearAccountUiState();
+    }
 }
 
 // Resets every cache-driven UI surface (message list, sidebar tree,

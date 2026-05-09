@@ -160,6 +160,12 @@ private slots:
     // reader pane, error banner) so a signed-out window doesn't keep
     // rendering the previous account's data straight from cache.
     void clearAccountUiState();
+
+    // Checks whether any per-account OAuthClient is authorized. If
+    // none are, calls clearAccountUiState(). Wired to tokensLoaded
+    // so the gate re-evaluates after async keychain hydration.
+    void enforceActiveAccountGate();
+
     void onNewMessages(int count);
     // Multi-account notify path: routes to Notifier with the
     // account's email + per-account notification_mode pref. Wired to
