@@ -56,17 +56,25 @@ QByteArray buildResponse(int status, const char* phrase,
     return out;
 }
 
-// Synchronously push the full response onto the socket and start a clean
-// close. We waitForBytesWritten so the kernel has a chance to ship the
-// payload before we disconnectFromHost — without it, a quick
-// disconnectFromHost + later object teardown can truncate the response.
+// Push the full response onto the socket and start a clean close.
+// disconnectFromHost already waits for pending writes before issuing
+// FIN (Qt docs: "If there is data pending to be written to the socket,
+// QAbstractSocket waits until all data has been written before
+// disconnecting"), so an explicit waitForBytesWritten is redundant —
+// and dangerous: it BLOCKS the calling thread for up to its timeout,
+// and the calling thread here is the UI thread (LocalHtmlServer is
+// created and parented from ReaderPane). On a large body served to
+// a browser making 4-5 parallel pre-connect TCP sessions, the
+// cumulative wait was producing user-visible UI freezes after
+// "Open in browser". The kernel send buffer absorbs typical email
+// sizes synchronously inside write(); larger payloads drain
+// asynchronously without blocking us.
 void sendAndClose(QTcpSocket* sock, const QByteArray& response,
                   int status, const char* phrase) {
     const qint64 toWrite = response.size();
     const qint64 wrote = sock->write(response);
     sock->flush();
-    sock->waitForBytesWritten(2000);
-    qInfo("LocalHtmlServer: -> %d %s (%lld of %lld bytes flushed)",
+    qInfo("LocalHtmlServer: -> %d %s (%lld of %lld bytes queued)",
           status, phrase, wrote, toWrite);
     sock->disconnectFromHost();
 }
