@@ -948,6 +948,15 @@ void MainWindow::wireSignals() {
                         }
                     }
                 }
+                // Sidebar unread counts are aggregated from the
+                // messages table, so they go stale every time a sync
+                // upserts new rows. labelsUpdated alone reloads the
+                // sidebar but fires BEFORE messages.list runs — the
+                // counts that result reflect pre-sync state. Reload
+                // again here so the (X) and (X…) in the sidebar
+                // settle to the post-sync truth before the
+                // stateChanged(Idle) handler shows "Done".
+                reloadSidebar();
                 refreshListFooter();
             });
     // When the model can't fetch any more rows from the cache, fall
