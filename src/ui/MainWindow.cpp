@@ -72,6 +72,7 @@ namespace fc::cache { QSqlDatabase databaseHandle(); }
 #include <QPainter>
 #include <QPixmap>
 #include <QPointer>
+#include <QStyle>
 #include <QPushButton>
 #include <QSize>
 #include <QMenu>
@@ -711,6 +712,11 @@ void MainWindow::wireSignals() {
 
     connect(auth_, &fc::auth::OAuthClient::granted, this, [this] {
         refreshAccountIndicator();
+        // Status-bar confirmation that OAuth completed. The signed-
+        // in-as baseline that refreshAccountIndicator restores is
+        // the persistent indicator; this transient toast is the
+        // immediate "yes, the OAuth flow finished" signal.
+        statusBar()->showMessage(tr("Sign-in successful."), 6000);
         // Start every per-account scheduler. New contexts that arrive
         // mid-session (Add account flow) are caught by the
         // accountsChanged hook below.
@@ -765,9 +771,10 @@ void MainWindow::wireSignals() {
                 // Always show the dialog with the URL — auto-launch can
                 // report success while the launcher (e.g. wslview on a
                 // non-standard Windows install) silently fails downstream.
-                // The dialog auto-closes once the loopback handler catches
-                // the redirect, so successful auto-launches still get the
-                // expected one-click flow.
+                // On success the dialog flips to a confirmation state
+                // and waits for the user to dismiss it; that way the
+                // user actually sees that OAuth completed instead of
+                // wondering whether anything happened.
                 QApplication::clipboard()->setText(url.toString());
 
                 auto* dlg = new QDialog(this);
@@ -786,8 +793,8 @@ void MainWindow::wireSignals() {
                 const QString footnote = tr(
                     "<p>The URL is already on your clipboard. FirstContact is "
                     "listening on a local port — once you complete consent, "
-                    "the redirect will land here and this dialog will close "
-                    "itself.</p>");
+                    "the redirect will land here and this dialog will switch "
+                    "to a sign-in-complete confirmation.</p>");
 
                 auto* msg = new QLabel(headline + footnote, dlg);
                 msg->setWordWrap(true);
@@ -821,10 +828,65 @@ void MainWindow::wireSignals() {
                 });
                 connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
 
-                // Auto-close when sign-in completes so the user doesn't have to
-                // click anything once Google's redirect comes back.
-                connect(auth_, &fc::auth::OAuthClient::granted, dlg, &QDialog::close);
-                connect(auth_, &fc::auth::OAuthClient::failed,  dlg, &QDialog::close);
+                // When the redirect lands, swap the dialog into a
+                // "sign-in complete" state instead of auto-closing.
+                // The user has to click Done — earlier behaviour
+                // (auto-close on grant) gave no visible confirmation
+                // that OAuth had finished, so users who completed the
+                // browser dance came back to a window that just looked
+                // like nothing had happened.
+                QPointer<QDialog>     dlgPtr(dlg);
+                QPointer<QLabel>      msgPtr(msg);
+                QPointer<QLineEdit>   urlPtr(urlField);
+                QPointer<QPushButton> copyPtr(copyBtn);
+                QPointer<QPushButton> retryPtr(retryBtn);
+                QPointer<QPushButton> closePtr(closeBtn);
+                auto showSuccess = [this, dlgPtr, msgPtr, urlPtr,
+                                     copyPtr, retryPtr, closePtr] {
+                    if (!dlgPtr || !msgPtr) return;
+                    const QString email = auth_ ? auth_->accountEmail()
+                                                : QString();
+                    const QString text = email.isEmpty()
+                        ? tr("<h3 style='margin:0'>Signed in</h3>"
+                             "<p>OAuth completed successfully. "
+                             "We're fetching account details and starting "
+                             "the first inbox sync now.</p>"
+                             "<p>You can close this dialog.</p>")
+                        : tr("<h3 style='margin:0'>Signed in as %1</h3>"
+                             "<p>OAuth completed successfully. "
+                             "Inbox sync is starting now.</p>"
+                             "<p>You can close this dialog.</p>")
+                              .arg(email.toHtmlEscaped());
+                    msgPtr->setText(text);
+                    if (urlPtr)   urlPtr->hide();
+                    if (copyPtr)  copyPtr->hide();
+                    if (retryPtr) retryPtr->hide();
+                    if (closePtr) {
+                        closePtr->setText(tr("Done"));
+                        closePtr->setObjectName(QStringLiteral("primary"));
+                        closePtr->setDefault(true);
+                        // Re-polish so the "primary" object-name styling
+                        // (background colour, etc.) takes effect after
+                        // the live name change.
+                        closePtr->style()->unpolish(closePtr);
+                        closePtr->style()->polish(closePtr);
+                        closePtr->setFocus();
+                    }
+                    if (dlgPtr) {
+                        dlgPtr->setWindowTitle(
+                            tr("Sign in with Google — done"));
+                    }
+                };
+                connect(auth_, &fc::auth::OAuthClient::granted,
+                        dlg,  showSuccess);
+                // Email isn't known until the first profileFetched
+                // (Gmail's getProfile runs after token exchange). If
+                // the dialog already flipped to success on `granted`,
+                // refresh the headline once the email lands.
+                connect(sync_, &fc::sync::SyncService::profileFetched,
+                        dlg, [showSuccess](const QString&) { showSuccess(); });
+                connect(auth_, &fc::auth::OAuthClient::failed,
+                        dlg,  &QDialog::close);
 
                 dlg->show();
             });
@@ -1484,6 +1546,15 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
                                    QMessageBox::AcceptRole);
     box.addButton(QMessageBox::Cancel);
     box.setDefaultButton(keepBtn);
+    // QMessageBox sizes to its informativeText; long custom button
+    // labels (here "Sign out and delete local account data" — 41 chars)
+    // get clipped without an explicit hint. Force the destructive
+    // button to its sizeHint and set a min-width on the dialog so all
+    // three buttons fit on one row.
+    dropBtn->adjustSize();
+    if (auto* layout = qobject_cast<QGridLayout*>(box.layout())) {
+        layout->setColumnMinimumWidth(0, 600);
+    }
     box.exec();
     auto* clicked = box.clickedButton();
     if (!clicked || clicked == box.button(QMessageBox::Cancel)) return;

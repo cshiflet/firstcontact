@@ -88,11 +88,23 @@ AccountManagerDialog::AccountManagerDialog(
 
 void AccountManagerDialog::rebuild() {
     while (auto* item = accountList_->takeAt(0)) {
-        if (auto* w = item->widget()) w->deleteLater();
+        if (auto* w = item->widget()) {
+            // hide() before deleteLater() — without it the widget
+            // stays visible inside the dialog (just not in any layout)
+            // until the delayed-delete fires. The user saw the new
+            // "No accounts signed in." label drawn over the old row
+            // because the old row was still painting itself, parented
+            // to the dialog, even though the layout had let it go.
+            w->hide();
+            w->deleteLater();
+        }
         if (auto* sub = item->layout()) {
             // Recursively delete sub-layout widgets.
             while (auto* subItem = sub->takeAt(0)) {
-                if (auto* w = subItem->widget()) w->deleteLater();
+                if (auto* w = subItem->widget()) {
+                    w->hide();
+                    w->deleteLater();
+                }
                 delete subItem;
             }
             sub->deleteLater();
