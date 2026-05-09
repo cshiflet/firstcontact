@@ -2,6 +2,8 @@
 
 #include "models/Message.h"
 
+#include <QSet>
+#include <QString>
 #include <QWidget>
 
 #include <vector>
@@ -78,6 +80,15 @@ private:
     QScrollArea* scroll_;
     QWidget*     content_;
     QVBoxLayout* contentLayout_;
+
+    // Per-thread expansion memory. When showThread is called twice
+    // for the same thread (typical: clicking a different message in
+    // an open conversation in the threadlist), cards the user
+    // previously expanded stay expanded — mirrors Gmail web's
+    // behaviour. Cleared on a different-thread render and on
+    // showMessage / showEmpty.
+    QString       currentThreadId_;
+    QSet<QString> expandedInCurrentThread_;
 };
 
 }  // namespace fc::ui

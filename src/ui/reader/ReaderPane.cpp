@@ -624,7 +624,7 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
         toggle->setCursor(Qt::PointingHandCursor);
         cardLayout->addWidget(toggle, 0, Qt::AlignRight);
         QObject::connect(toggle, &QPushButton::clicked,
-                         body, [body, header, m, toggle,
+                         body, [this, body, header, m, toggle,
                                  topBrowserRow, bottomBrowserRow]() {
             const bool now = !body->isVisible();
             body->setVisible(now);
@@ -633,6 +633,12 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
             header->setText(headerHtml(m, /*full=*/now));
             toggle->setText(now ? QStringLiteral("Hide")
                                 : QStringLiteral("Show"));
+            // Remember the user's choice for this message in this
+            // thread. Next time showThread renders the same thread
+            // (e.g. the user clicks a different message in the
+            // conversation), this card stays in the same state.
+            if (now) expandedInCurrentThread_.insert(m.id);
+            else      expandedInCurrentThread_.remove(m.id);
         });
     }
 
@@ -648,6 +654,8 @@ void ReaderPane::showLoading() {
 
 void ReaderPane::showEmpty(const QString& reason) {
     clearStack();
+    currentThreadId_.clear();
+    expandedInCurrentThread_.clear();
     auto* l = new QLabel(reason.isEmpty()
         ? QStringLiteral("<i>Select a message.</i>")
         : QStringLiteral("<i>%1</i>").arg(reason.toHtmlEscaped()), content_);
@@ -657,6 +665,10 @@ void ReaderPane::showEmpty(const QString& reason) {
 
 void ReaderPane::showMessage(const fc::Message& m) {
     clearStack();
+    // Single-message render is its own context; drop any thread-scoped
+    // expansion memory so a later showThread starts fresh.
+    currentThreadId_.clear();
+    expandedInCurrentThread_.clear();
     // The body in each card now sizes to its rendered document height,
     // so we do NOT stretch the card to fill the pane vertically — that
     // would just inflate the body back to a giant empty box for short
@@ -672,6 +684,15 @@ void ReaderPane::showThread(const std::vector<fc::Message>& messages,
     clearStack();
     if (messages.empty()) { showEmpty(); return; }
 
+    // Same-thread re-render? Preserve the user's expanded set; on a
+    // different thread, reset. messages all share a threadId (showThread
+    // is invoked from byThread() which is single-thread by definition).
+    const QString threadId = messages.front().threadId;
+    if (threadId != currentThreadId_) {
+        expandedInCurrentThread_.clear();
+        currentThreadId_ = threadId;
+    }
+
     // Pick which card starts expanded. focusedId wins when it matches
     // one of the thread's messages; otherwise we fall back to "latest"
     // (the last entry, since byThread sorts ascending by date).
@@ -685,8 +706,13 @@ void ReaderPane::showThread(const std::vector<fc::Message>& messages,
 
     QWidget* focusedCard = nullptr;
     for (int i = 0; i < int(messages.size()); ++i) {
-        QWidget* card = buildMessageCard(messages[i], i == focusIdx);
+        // Initially expanded if: it's the focused card, OR the user
+        // already expanded it in this thread on a prior render.
+        const bool expanded = (i == focusIdx)
+            || expandedInCurrentThread_.contains(messages[i].id);
+        QWidget* card = buildMessageCard(messages[i], expanded);
         if (i == focusIdx) focusedCard = card;
+        if (expanded) expandedInCurrentThread_.insert(messages[i].id);
         contentLayout_->insertWidget(i, card);
     }
 
