@@ -1,5 +1,6 @@
 #include "AccountManagerDialog.h"
 
+#include "account/AccountContext.h"
 #include "account/AccountManager.h"
 #include "auth/OAuthClient.h"
 #include "cache/Database.h"
@@ -99,8 +100,25 @@ void AccountManagerDialog::rebuild() {
         delete item;
     }
 
-    const QList<fc::account::AccountInfo> accounts =
-        accounts_ ? accounts_->accounts() : QList<fc::account::AccountInfo>{};
+    // Filter to authorized accounts only. The accounts table can carry
+    // a synthetic "legacy@local" row inserted by migration 0006 on every
+    // fresh install (its UUID owns any pre-multi-account cache rows
+    // for users who upgraded). It has no OAuth tokens and never will,
+    // so showing it in Manage accounts looks like an internal
+    // placeholder leaking — and worse, invites the user to "Sign out"
+    // a row that has nothing to sign out of. The cache-manager dialog
+    // is the one place it stays visible: that surface is explicitly
+    // about cache rows, where legacy@local is the data owner of
+    // anything migrated from a pre-0006 install.
+    QList<fc::account::AccountInfo> accounts;
+    if (accounts_) {
+        for (const auto& a : accounts_->accounts()) {
+            auto* ctx = accounts_->contextFor(a.id);
+            if (ctx && ctx->auth() && ctx->auth()->isAuthorized()) {
+                accounts.append(a);
+            }
+        }
+    }
 
     if (accounts.isEmpty()) {
         auto* none = new QLabel(tr("<i>No accounts signed in.</i>"), this);
