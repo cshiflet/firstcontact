@@ -19,6 +19,7 @@
 #include "common/Preferences.h"
 #include "common/SettingsDialog.h"
 #include "common/Shortcuts.h"
+#include "common/SpinningToolButton.h"
 #include "common/Theme.h"
 #include "compose/ComposeWindow.h"
 #include "messagelist/MessageListView.h"
@@ -352,7 +353,30 @@ void MainWindow::buildToolBar() {
     });
     tb->addSeparator();
 
-    auto* refresh  = withIcon(QStringLiteral("refresh.svg"),  tr("Refresh"),  4);
+    // Refresh: a SpinningToolButton instead of the auto-created QToolButton
+    // from withIcon, so the icon can rotate during sync. We still go
+    // through a real QAction (for shortcut + menu reuse), but the toolbar
+    // hosts our subclass directly via addWidget. Tradeoff: refresh no
+    // longer overflows into the hamburger when the toolbar is narrow —
+    // acceptable, since refresh is the most-used action and the spinner
+    // wouldn't render meaningfully in a menu item anyway.
+    auto* refresh = new QAction(IconLoader::themed(QStringLiteral("refresh.svg")),
+                                 tr("Refresh"), this);
+    refresh->setToolTip(tr("Refresh"));
+    syncBtn_ = new SpinningToolButton(tb);
+    syncBtn_->setDefaultAction(refresh);
+    syncBtn_->setBaseIcon(IconLoader::themed(QStringLiteral("refresh.svg")));
+    syncBtn_->setAutoRaise(true);
+    syncBtn_->setToolButtonStyle(Preferences::toolbarShowText()
+        ? Qt::ToolButtonTextBesideIcon
+        : Qt::ToolButtonIconOnly);
+    syncBtn_->setCursor(Qt::PointingHandCursor);
+    syncBtn_->setAccessibleName(tr("Refresh"));
+    syncBtn_->setAccessibleDescription(tr(
+        "Trigger a sync now. The icon spins while a sync is in flight."));
+    tb->addWidget(syncBtn_);
+    iconActions_.append({refresh, QStringLiteral("refresh.svg")});
+
     auto* settings = withIcon(QStringLiteral("settings.svg"), tr("Settings"), 1);
     // Search bar's leading-icon tooltip — same pattern: pressing `/`
     // anywhere in the window pops focus back into the search box.
@@ -552,6 +576,12 @@ void MainWindow::refreshToolbarIcons() {
     }
     if (searchIconAction_) {
         searchIconAction_->setIcon(IconLoader::themed(QStringLiteral("search.svg")));
+    }
+    // Sync button keeps its own pre-rendered base pixmap for rotation —
+    // refresh that too so a theme switch mid-session picks up the new
+    // tint when the spin starts.
+    if (syncBtn_) {
+        syncBtn_->setBaseIcon(IconLoader::themed(QStringLiteral("refresh.svg")));
     }
 }
 
@@ -819,6 +849,12 @@ void MainWindow::wireSignals() {
     // message wins.
     connect(sync_, &fc::sync::SyncService::stateChanged, this,
             [this](fc::sync::SyncService::State s) {
+                // Toolbar refresh icon: spin while a sync is active so
+                // the user has a visual cue that we're talking to the
+                // server. Stops on Idle.
+                if (syncBtn_) {
+                    syncBtn_->setSpinning(s != fc::sync::SyncService::State::Idle);
+                }
                 switch (s) {
                     case fc::sync::SyncService::State::InitialSync:
                         isSyncing_ = true;

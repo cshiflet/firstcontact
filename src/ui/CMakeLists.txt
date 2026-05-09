@@ -17,6 +17,7 @@ qt_add_library(fc_ui STATIC
     common/AccountManagerDialog.h common/AccountManagerDialog.cpp
     common/LabelChooserDialog.h common/LabelChooserDialog.cpp
     common/LabelStyleCache.h common/LabelStyleCache.cpp
+    common/SpinningToolButton.h common/SpinningToolButton.cpp
 )
 qt_add_resources(fc_ui "fc_ui_assets"
     PREFIX "/"

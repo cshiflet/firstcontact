@@ -20,6 +20,8 @@ class QMenu;
 class QSplitter;
 class QToolButton;
 
+namespace fc::ui { class SpinningToolButton; }
+
 namespace fc { class MessageListModel; }
 namespace fc::auth  { class OAuthClient; class ClientConfig; }
 namespace fc::api   { class GmailClient; }
@@ -209,6 +211,7 @@ private:
     QAction*                 searchIconAction_ = nullptr;
     QList<QPair<QAction*, QString>> iconActions_;
     QToolButton*             accountButton_ = nullptr;
+    fc::ui::SpinningToolButton* syncBtn_     = nullptr;   // refresh button — spins during sync
     QMenu*                   accountMenu_   = nullptr;
 
     // Sync indicator state. We drive the main status-bar message
