@@ -8,6 +8,7 @@
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
 #include "cache/AttachmentRepository.h"
+#include "cache/BodyCompressionWorker.h"
 #include "cache/Database.h"
 #include "cache/DraftRepository.h"
 #include "cache/LabelRepository.h"
@@ -585,6 +586,15 @@ void MainWindow::onOpenSettings() {
     connect(&dlg, &SettingsDialog::cacheManagerRequested, this, [this] {
         CacheManagerDialog cdlg(accounts_, this);
         cdlg.exec();
+    });
+    connect(&dlg, &SettingsDialog::recompressRequested, this, [this] {
+        // Pick the account to recompress: today there's no Settings-
+        // side account picker, so default to the active account.
+        // Future improvement: per-account row in the Storage section
+        // with its own Recompress button. For now this matches the
+        // single most-common case.
+        if (currentAccountId_.isEmpty()) return;
+        onRecompressRequested(currentAccountId_);
     });
     dlg.exec();
     // Settings can flip Preferences::conversationView() (changes the
@@ -1376,6 +1386,8 @@ void MainWindow::wireSignals() {
                 }
                 refreshListFooter();
             });
+    connect(accounts_, &fc::account::AccountManager::compressionPromptDue,
+            this, &MainWindow::onCompressionPromptDue);
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
                 lastSyncFailed_ = true;
@@ -3440,6 +3452,124 @@ void MainWindow::onMarkNotImportant() {
 void MainWindow::onGoToLabel(const QString& labelId) {
     if (!sidebar_) return;
     sidebar_->selectLabel(currentAccountId_, labelId);
+}
+
+void MainWindow::onCompressionPromptDue(const QString& accountId,
+                                          int bodyCount) {
+    if (accountId.isEmpty()) return;
+    // Final pre-dialog gating. SyncService also gates internally, but
+    // the user could have disabled compression between SyncService's
+    // signal emit and this slot running, or another account could
+    // have already accepted compression and we don't want to re-ask.
+    if (!Preferences::dbCompression()) return;
+    if (Preferences::dbCompressionPromptShown(accountId)) return;
+    if (compressionWorkers_.value(accountId)) return;   // already running
+    if (!fc::cache::MessageRepository::dictionaryFor(accountId).isEmpty()) {
+        Preferences::setDbCompressionPromptShown(accountId, true);
+        return;
+    }
+
+    QString email;
+    if (accounts_) email = accounts_->accountById(accountId).email;
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("Compress message database?"));
+    box.setText(tr("FirstContact can now train a custom compression "
+                    "dictionary against your cached messages for "
+                    "%1.\n\nWith %n message(s) on disk you should see "
+                    "a 3-5× reduction in body storage. The "
+                    "process runs in the background but the message "
+                    "database will be unusually busy while it works; "
+                    "you can keep using the app.", "", bodyCount)
+                  .arg(email.isEmpty() ? accountId : email));
+    box.setInformativeText(tr(
+        "You can change this later in Settings → Storage."));
+    auto* compressBtn  = box.addButton(tr("Compress database"),
+                                        QMessageBox::AcceptRole);
+    auto* disableBtn   = box.addButton(tr("Disable DB compression"),
+                                        QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);   // ask again later
+    box.setDefaultButton(compressBtn);
+    box.exec();
+    auto* chosen = box.clickedButton();
+    Preferences::setDbCompressionPromptShown(accountId, true);
+    if (chosen == compressBtn) {
+        startCompressionWorker(accountId, /*Recompress=*/0);
+    } else if (chosen == disableBtn) {
+        Preferences::setDbCompression(false);
+    }
+    // Cancel = do nothing; the dialog won't pop again this session.
+}
+
+void MainWindow::onRecompressRequested(const QString& accountId) {
+    if (accountId.isEmpty()) return;
+    if (compressionWorkers_.value(accountId)) {
+        QMessageBox::information(this, tr("Recompress"),
+            tr("A compression pass is already running for this "
+               "account. Wait for it to finish before starting "
+               "another."));
+        return;
+    }
+    const int rows = fc::cache::MessageRepository::bodyCountFor(accountId);
+    QString email;
+    if (accounts_) email = accounts_->accountById(accountId).email;
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Recompress message database"));
+    box.setText(tr("Recompressing %1 will rebuild the compression "
+                    "dictionary from a fresh sample and rewrite every "
+                    "body in the cache (%n message(s) on disk).",
+                    "", rows)
+                  .arg(email.isEmpty() ? accountId : email));
+    box.setInformativeText(tr(
+        "This is a long, single-threaded operation tuned for low "
+        "memory and disk usage; expect several minutes per gigabyte "
+        "of cache. You can keep using the app while it runs."));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    box.setDefaultButton(QMessageBox::No);
+    if (box.exec() != QMessageBox::Yes) return;
+    startCompressionWorker(accountId, /*Recompress=*/1);
+}
+
+void MainWindow::startCompressionWorker(const QString& accountId,
+                                          int modeInt) {
+    using Mode = fc::cache::BodyCompressionWorker::Mode;
+    const Mode mode = (modeInt == 1) ? Mode::Recompress : Mode::InitialTrain;
+    auto* w = new fc::cache::BodyCompressionWorker(accountId, mode);
+    compressionWorkers_.insert(accountId, w);
+    QPointer<MainWindow> self(this);
+    connect(w, &fc::cache::BodyCompressionWorker::progress, this,
+            [self, accountId](const QString&, int done, int total) {
+                if (!self) return;
+                if (total > 0) {
+                    self->statusBar()->showMessage(
+                        tr("Compressing database: %1 / %2").arg(done).arg(total),
+                        5000);
+                }
+            });
+    connect(w, &fc::cache::BodyCompressionWorker::finished, this,
+            [self, accountId](const QString&, int rewroteCount,
+                               qint64 savedBytes) {
+                if (!self) return;
+                self->compressionWorkers_.remove(accountId);
+                const QString human =
+                    savedBytes >= (10 * 1024 * 1024)
+                    ? tr("%1 MB").arg(savedBytes / (1024 * 1024))
+                    : tr("%1 KB").arg(qMax<qint64>(1, savedBytes / 1024));
+                self->statusBar()->showMessage(
+                    tr("Compression done: %1 message(s) rewritten, "
+                       "%2 reclaimed.").arg(rewroteCount).arg(human),
+                    15000);
+            });
+    connect(w, &fc::cache::BodyCompressionWorker::failed, this,
+            [self, accountId](const QString&, const QString& reason) {
+                if (!self) return;
+                self->compressionWorkers_.remove(accountId);
+                self->statusBar()->showMessage(
+                    tr("Compression failed: %1").arg(reason), 15000);
+            });
+    w->start();
+    statusBar()->showMessage(tr("Starting database compression…"), 5000);
 }
 
 void MainWindow::onToggleLinkDisplay() {

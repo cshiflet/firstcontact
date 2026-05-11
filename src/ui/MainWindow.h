@@ -6,6 +6,7 @@
 #include <QList>
 #include <QMainWindow>
 #include <QPair>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 
@@ -28,6 +29,7 @@ namespace fc::api   { class GmailClient; class RestClient; }
 class QDialog;
 namespace fc::sync  { class SyncService; class OutboxWorker;
                       class PendingOpsWorker; class DraftSync; }
+namespace fc::cache { class BodyCompressionWorker; }
 namespace fc::account { class AccountManager; }
 
 namespace fc::ui {
@@ -113,6 +115,23 @@ private slots:
     // Gmail-web `g i / s / t / d`: jump the sidebar selection to a
     // system label without leaving the keyboard.
     void onGoToLabel(const QString& labelId);
+
+    // First-time "Compress DB?" prompt. Fires once per process per
+    // account when the cached-body count first crosses the
+    // dictionary-training threshold (currently 200). Pre-filtered
+    // by Preferences::dbCompression / dbCompressionPromptShown.
+    void onCompressionPromptDue(const QString& accountId, int bodyCount);
+
+    // Settings → "Recompress" button. Walks the user through a
+    // confirmation showing how many rows will be processed, then
+    // spawns a BodyCompressionWorker in Recompress mode.
+    void onRecompressRequested(const QString& accountId);
+
+    // Helper: spawn a worker, wire its signals to status-bar
+    // progress, and stash the QPointer in compressionWorkers_ so a
+    // duplicate trigger is gated out. Mode controls whether existing
+    // compressed rows are also rewritten.
+    void startCompressionWorker(const QString& accountId, int modeInt);
     // Shift+L — flip Preferences::linkDisplayMode and re-render the
     // active reader content so the change is immediately visible.
     void onToggleLinkDisplay();
@@ -271,6 +290,15 @@ private:
     // the previous topUpFinished's tail-half runs) don't clobber each
     // other's "in flight" flag and leak the footer into None mid-sync.
     int                      topUpsInFlight_   = 0;
+
+    // Per-account in-flight compression worker. Set when the user
+    // accepts the "Compress DB?" dialog (or hits Recompress in
+    // Settings); cleared on finished/failed. Used to gate further
+    // starts and to suppress duplicate prompts. The pointer's
+    // lifetime is managed by the worker itself (deletes on thread
+    // exit), so MainWindow doesn't need to delete it.
+    QHash<QString, QPointer<fc::cache::BodyCompressionWorker>>
+                              compressionWorkers_;
     QHash<QString, bool>     serverExhaustedByLabel_;
 
     // Per-label scroll memory: keyed by `<accountId>::<labelId>` so

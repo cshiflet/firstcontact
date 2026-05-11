@@ -508,6 +508,58 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         emit cacheManagerRequested();
     });
 
+    // Body compression: zstd-with-trained-dictionary. The toggle
+    // gates the auto-train trigger (the SyncService side detects
+    // 200+ bodies and emits compressionPromptDue, which MainWindow
+    // pops). Off = no prompt, new writes stay plaintext, existing
+    // compressed rows still decompress correctly on read. The
+    // Recompress button asks MainWindow to rebuild the dictionary
+    // and rewrite every body — slow but reclaims disk after a
+    // significant change in the user's mailbox content.
+    auto* compressionForm = new QFormLayout;
+    compressionForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    compressionForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    auto* compressBox = new QCheckBox(
+        tr("Compress message bodies (zstd with trained dictionary)"),
+        content);
+    compressBox->setChecked(Preferences::dbCompression());
+    connect(compressBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setDbCompression(on);
+    });
+    compressionForm->addRow(QString(), compressBox);
+    auto* compressHint = new QLabel(tr(
+        "Once an account has cached enough message bodies (~200) the "
+        "app trains a per-account dictionary and rewrites future "
+        "writes through the codec. Typical reduction: 3-5× on HTML "
+        "bodies. Decompression is microseconds per message; you "
+        "won't notice it in the reader."), content);
+    compressHint->setObjectName(QStringLiteral("FormHint"));
+    compressHint->setWordWrap(true);
+    compressionForm->addRow(QString(), compressHint);
+
+    auto* recompressBtn = new QPushButton(
+        tr("Recompress now…"), content);
+    recompressBtn->setCursor(Qt::PointingHandCursor);
+    connect(recompressBtn, &QPushButton::clicked, this, [this] {
+        emit recompressRequested();
+    });
+    auto* recompressRow = new QHBoxLayout;
+    recompressRow->addWidget(recompressBtn);
+    recompressRow->addStretch(1);
+    compressionForm->addRow(QString(), recompressRow);
+    auto* recompressHint = new QLabel(tr(
+        "Rebuilds the dictionary from a fresh body sample and "
+        "rewrites every cached body. Useful after a major change in "
+        "your mailbox (lots of new senders / templates). Memory-"
+        "frugal but slow: several minutes per gigabyte of cache."),
+        content);
+    recompressHint->setObjectName(QStringLiteral("FormHint"));
+    recompressHint->setWordWrap(true);
+    compressionForm->addRow(QString(), recompressHint);
+
+    contentLayout->addLayout(compressionForm);
+
     contentLayout->addStretch(1);
 
     // Buttons live OUTSIDE the scroll area so they're always visible at

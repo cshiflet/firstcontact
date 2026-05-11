@@ -39,6 +39,10 @@ struct SyncService::Impl {
     QString lastError;
     bool busy = false;
     QString accountId;
+    // Latches compressionPromptDue to once per SyncService instance.
+    // MainWindow does the further gating (Preferences flags, dict
+    // presence) before actually showing the dialog.
+    bool compressionPromptEmitted = false;
 };
 
 SyncService::SyncService(fc::api::GmailClient* gmail, QObject* parent)
@@ -485,6 +489,27 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         emit self->labelsUpdated();
         emit self->messagesUpdated();
         if (!isInitial && newCount > 0) emit self->newMessages(newCount);
+
+        // Compression-prompt threshold: once an account accumulates
+        // enough bodies for a meaningful dictionary AND no dict has
+        // been trained yet, nudge MainWindow to ask the user
+        // whether to compress. Latched per-process so we don't spam
+        // the signal every batch.
+        if (!self->d_->compressionPromptEmitted) {
+            const QString aid = self->d_->accountId;
+            const QByteArray dict =
+                fc::cache::MessageRepository::dictionaryFor(aid);
+            if (dict.isEmpty()) {
+                constexpr int kPromptThreshold = 200;
+                const int bodies =
+                    fc::cache::MessageRepository::bodyCountFor(aid);
+                if (bodies >= kPromptThreshold) {
+                    self->d_->compressionPromptEmitted = true;
+                    emit self->compressionPromptDue(bodies);
+                }
+            }
+        }
+
         self->d_->busy = false;
         self->setState(State::Idle);
         if (done) done();

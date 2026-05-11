@@ -19,6 +19,10 @@ signals:
     // CacheManagerDialog — SettingsDialog itself doesn't take an
     // AccountManager dependency.
     void cacheManagerRequested();
+    // Emitted when the user clicks "Recompress now…". MainWindow
+    // owns the per-account picker (if there's more than one
+    // signed-in account) and the BodyCompressionWorker lifecycle.
+    void recompressRequested();
 
 private slots:
     void onThemeChanged(int idx);

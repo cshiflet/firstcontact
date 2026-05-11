@@ -1,0 +1,312 @@
+#include "BodyCompressionWorker.h"
+
+#include "Database.h"
+#include "MessageRepository.h"
+#include "Migrations.h"   // databaseHandle()
+#include "util/BodyCodec.h"
+
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QThread>
+#include <QVariant>
+
+#include <algorithm>
+#include <vector>
+
+namespace fc::cache {
+
+namespace {
+
+// Number of rows sampled to train the dictionary. zstd's dict
+// algorithm prefers many small samples to a few large ones. Stratified
+// random selection ensures the sample spans both old (frequently
+// system-mail) and recent (newsletters / personal) bodies.
+constexpr int kTrainingSampleCount = 1000;
+
+// Per-sample size cap to bound RAM during training. A 32 KiB cap is
+// generous — the upper percentile of email bodies sits well below
+// that — and prevents one giant marketing PDF-converted-to-HTML
+// from blowing the training memory budget.
+constexpr int kTrainingPerSampleCap = 32 * 1024;
+
+// Backfill chunk size. 100 rows per UPDATE transaction keeps WAL
+// growth bounded (~5-15 MB) and gives the SQLite checkpoint thread
+// natural breakpoints between commits. Smaller chunks mean more
+// fsyncs; larger chunks mean bigger transient WAL. 100 is a healthy
+// middle.
+constexpr int kBackfillChunkSize = 100;
+
+// Target output dict size. Bigger dicts capture more patterns but
+// cost more decompression init. 32 KiB is a sweet spot for mixed
+// email content (ratio gains plateau past ~64 KiB on test corpora).
+constexpr int kDictSizeBytes = 32 * 1024;
+
+QByteArray utf8OrBytes(const QVariant& v) {
+    // body_text / body_html storage is variable: plaintext rows come
+    // back as String, compressed rows as ByteArray. Always coerce to
+    // bytes so we can feed BodyCodec consistently.
+    if (v.userType() == QMetaType::QByteArray) return v.toByteArray();
+    return v.toString().toUtf8();
+}
+
+}  // namespace
+
+BodyCompressionWorker::BodyCompressionWorker(const QString& accountId,
+                                              Mode mode,
+                                              QObject* parent)
+    : QObject(parent), accountId_(accountId), mode_(mode),
+      thread_(new QThread()) {
+    thread_->setObjectName(QStringLiteral("fc-compress-") + accountId);
+    moveToThread(thread_);
+    // Ensure deletion happens on thread teardown.
+    connect(thread_, &QThread::finished, this, &QObject::deleteLater);
+    connect(this, &QObject::destroyed, thread_, &QObject::deleteLater);
+}
+
+BodyCompressionWorker::~BodyCompressionWorker() = default;
+
+void BodyCompressionWorker::start() {
+    thread_->start();
+    QMetaObject::invokeMethod(this, &BodyCompressionWorker::doWork,
+                               Qt::QueuedConnection);
+}
+
+void BodyCompressionWorker::doWork() {
+    if (accountId_.isEmpty()) {
+        emit failed(accountId_,
+                     QStringLiteral("compression: empty accountId"));
+        thread_->quit();
+        return;
+    }
+
+    // 1. Sample bodies for training. ORDER BY RANDOM() across the
+    //    whole table is O(N log N) but runs once and is bounded by
+    //    LIMIT; on cache sizes of 100k messages it's milliseconds.
+    qInfo("BodyCompression: accountId='%s' mode=%s — sampling",
+          qUtf8Printable(accountId_),
+          mode_ == Mode::Recompress ? "Recompress" : "InitialTrain");
+
+    std::vector<QByteArray> samples;
+    qint64 sampleBytesTotal = 0;
+    {
+        auto db = databaseHandle();
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT body_text FROM messages "
+            "WHERE account_id = :a "
+            "  AND body_text IS NOT NULL "
+            "  AND length(body_text) > 0 "
+            "ORDER BY RANDOM() LIMIT :n"));
+        q.bindValue(QStringLiteral(":a"), accountId_);
+        q.bindValue(QStringLiteral(":n"), kTrainingSampleCount);
+        if (!q.exec()) {
+            emit failed(accountId_,
+                QStringLiteral("compression sample query: %1")
+                  .arg(q.lastError().text()));
+            thread_->quit();
+            return;
+        }
+        samples.reserve(kTrainingSampleCount);
+        while (q.next()) {
+            QByteArray b = utf8OrBytes(q.value(0));
+            // If a row is already compressed (Recompress mode might
+            // see them), decompress first so the dict trains on
+            // plaintext like zstd expects.
+            if (fc::util::BodyCodec::isCompressed(b)) {
+                const QByteArray dict =
+                    MessageRepository::dictionaryFor(accountId_);
+                b = fc::util::BodyCodec::decompress(b, dict);
+            }
+            if (b.size() > kTrainingPerSampleCap) {
+                b = b.left(kTrainingPerSampleCap);
+            }
+            sampleBytesTotal += b.size();
+            samples.push_back(std::move(b));
+        }
+    }
+    if (samples.empty()) {
+        emit failed(accountId_,
+            QStringLiteral("compression: no bodies available to train on"));
+        thread_->quit();
+        return;
+    }
+    qInfo("BodyCompression: trained on %lld samples (%lld bytes total)",
+          static_cast<long long>(samples.size()),
+          static_cast<long long>(sampleBytesTotal));
+
+    // 2. Train + persist the dictionary.
+    const QByteArray dict = fc::util::BodyCodec::trainDictionary(
+        samples, kDictSizeBytes);
+    if (dict.isEmpty()) {
+        emit failed(accountId_, QStringLiteral(
+            "compression: dictionary training returned no data "
+            "(insufficient distinct samples?)"));
+        thread_->quit();
+        return;
+    }
+    samples.clear();   // free the training corpus before backfill
+    samples.shrink_to_fit();
+
+    MessageRepository::saveDictionary(accountId_, dict,
+        static_cast<int>(samples.size()),
+        sampleBytesTotal);
+    // saveDictionary refreshes the in-memory cache for this account.
+
+    // 3. Backfill. Walk rows in chunked transactions. Filter mode-
+    //    appropriately: InitialTrain only touches plaintext rows;
+    //    Recompress rewrites everything (in case the new dict is
+    //    different from the old one).
+    int totalToRewrite = 0;
+    {
+        auto db = databaseHandle();
+        QSqlQuery q(db);
+        const QString whereCompression =
+            (mode_ == Mode::Recompress)
+            ? QString()   // every row
+            : QStringLiteral(" AND body_compression = 0");
+        q.prepare(QStringLiteral(
+            "SELECT COUNT(*) FROM messages "
+            "WHERE account_id = :a "
+            "  AND ((body_text  IS NOT NULL AND length(body_text)  > 0) "
+            "    OR (body_html  IS NOT NULL AND length(body_html)  > 0))"
+            "%1").arg(whereCompression));
+        q.bindValue(QStringLiteral(":a"), accountId_);
+        if (q.exec() && q.next()) {
+            totalToRewrite = q.value(0).toInt();
+        }
+    }
+    qInfo("BodyCompression: %d rows to rewrite", totalToRewrite);
+    emit progress(accountId_, 0, totalToRewrite);
+
+    int done = 0;
+    qint64 savedBytes = 0;
+    while (true) {
+        // Pull a chunk of row ids that still need rewriting. We
+        // re-query each iteration so concurrent sync writes that
+        // flip a row to compressed (because they used the new dict)
+        // naturally drop out — the WHERE clause excludes already-
+        // compressed rows in InitialTrain mode.
+        std::vector<QString> rowIds;
+        {
+            auto db = databaseHandle();
+            QSqlQuery q(db);
+            const QString whereCompression =
+                (mode_ == Mode::Recompress)
+                ? QString()
+                : QStringLiteral(" AND body_compression = 0");
+            q.prepare(QStringLiteral(
+                "SELECT id FROM messages "
+                "WHERE account_id = :a "
+                "  AND ((body_text  IS NOT NULL AND length(body_text)  > 0) "
+                "    OR (body_html  IS NOT NULL AND length(body_html)  > 0))"
+                "%1 LIMIT :n").arg(whereCompression));
+            q.bindValue(QStringLiteral(":a"), accountId_);
+            q.bindValue(QStringLiteral(":n"), kBackfillChunkSize);
+            if (!q.exec()) {
+                emit failed(accountId_,
+                    QStringLiteral("compression chunk query: %1")
+                      .arg(q.lastError().text()));
+                thread_->quit();
+                return;
+            }
+            while (q.next()) rowIds.push_back(q.value(0).toString());
+        }
+        if (rowIds.empty()) break;
+
+        // Rewrite the chunk inside one transaction. Each UPDATE is
+        // a separate prepared statement; SQLite buffers them in the
+        // WAL until commit.
+        auto db = databaseHandle();
+        if (!db.transaction()) {
+            emit failed(accountId_,
+                QStringLiteral("compression: BEGIN failed: %1")
+                  .arg(db.lastError().text()));
+            thread_->quit();
+            return;
+        }
+        for (const auto& id : rowIds) {
+            QSqlQuery sel(db);
+            sel.prepare(QStringLiteral(
+                "SELECT body_text, body_html, body_compression "
+                "FROM messages WHERE account_id = :a AND id = :id"));
+            sel.bindValue(QStringLiteral(":a"),  accountId_);
+            sel.bindValue(QStringLiteral(":id"), id);
+            if (!sel.exec() || !sel.next()) continue;
+
+            QByteArray bt = utf8OrBytes(sel.value(0));
+            QByteArray bh = utf8OrBytes(sel.value(1));
+            const int existingFlag = sel.value(2).toInt();
+
+            const qint64 beforeBytes = bt.size() + bh.size();
+
+            // If a row is already compressed (Recompress mode, or
+            // a sync write raced us), decompress with the OLD dict
+            // before recompressing with the new dict.
+            if (fc::util::BodyCodec::isCompressed(bt)) {
+                bt = fc::util::BodyCodec::decompress(bt, dict);
+            }
+            if (fc::util::BodyCodec::isCompressed(bh)) {
+                bh = fc::util::BodyCodec::decompress(bh, dict);
+            }
+
+            const QByteArray newBt = bt.isEmpty()
+                ? QByteArray() : fc::util::BodyCodec::compress(bt, dict);
+            const QByteArray newBh = bh.isEmpty()
+                ? QByteArray() : fc::util::BodyCodec::compress(bh, dict);
+            const int newFlag =
+                (fc::util::BodyCodec::isCompressed(newBt)
+                 || fc::util::BodyCodec::isCompressed(newBh)) ? 1 : 0;
+
+            QSqlQuery upd(db);
+            upd.prepare(QStringLiteral(
+                "UPDATE messages SET "
+                "  body_text = :bt, body_html = :bh, "
+                "  body_compression = :flag, "
+                "  bytes_cached = :bc "
+                "WHERE account_id = :a AND id = :id"));
+            upd.bindValue(QStringLiteral(":bt"),   newBt);
+            upd.bindValue(QStringLiteral(":bh"),   newBh);
+            upd.bindValue(QStringLiteral(":flag"), newFlag);
+            upd.bindValue(QStringLiteral(":bc"),   newBt.size() + newBh.size());
+            upd.bindValue(QStringLiteral(":a"),    accountId_);
+            upd.bindValue(QStringLiteral(":id"),   id);
+            if (!upd.exec()) {
+                qWarning("BodyCompression: update %s failed: %s",
+                         qUtf8Printable(id),
+                         qUtf8Printable(upd.lastError().text()));
+                continue;
+            }
+
+            savedBytes += beforeBytes - (newBt.size() + newBh.size());
+            ++done;
+            Q_UNUSED(existingFlag);
+        }
+        if (!db.commit()) {
+            qWarning("BodyCompression: chunk COMMIT failed: %s",
+                     qUtf8Printable(db.lastError().text()));
+            db.rollback();
+        }
+        emit progress(accountId_, done, totalToRewrite);
+    }
+
+    // 4. VACUUM reclaims pages the rewritten BLOBs no longer use.
+    //    VACUUM is itself memory-light (single-pass) but writes a
+    //    full copy of the database; on cache sizes of a few GB this
+    //    is the longest single step.
+    {
+        auto db = databaseHandle();
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("VACUUM"))) {
+            qWarning("BodyCompression: VACUUM failed: %s",
+                     qUtf8Printable(q.lastError().text()));
+        }
+    }
+
+    qInfo("BodyCompression: done. rewroteCount=%d savedBytes=%lld",
+          done, static_cast<long long>(savedBytes));
+    emit finished(accountId_, done, savedBytes);
+    thread_->quit();
+}
+
+}  // namespace fc::cache

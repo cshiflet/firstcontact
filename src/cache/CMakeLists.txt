@@ -8,6 +8,7 @@ qt_add_library(fc_cache STATIC
     PendingOpsRepository.h PendingOpsRepository.cpp
     DraftRepository.h DraftRepository.cpp
     MetaRepository.h MetaRepository.cpp
+    BodyCompressionWorker.h BodyCompressionWorker.cpp
 )
 qt_add_resources(fc_cache "fc_cache_schema"
     PREFIX "/schema"

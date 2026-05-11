@@ -246,4 +246,35 @@ void Preferences::setLinkDisplayMode(fc::util::LinkDisplayMode m) {
 int  Preferences::messagePageSize()      { return fc::util::messagePageSize(); }
 void Preferences::setMessagePageSize(int n) { fc::util::setMessagePageSize(n); }
 
+namespace {
+constexpr char kDbCompressionKey[]            = "compression/enabled";
+constexpr char kDbCompressionPromptShownPfx[] = "compression/promptShown/";
+}
+
+bool Preferences::dbCompression() {
+    QSettings s;
+    return s.value(QLatin1String(kDbCompressionKey), true).toBool();
+}
+
+void Preferences::setDbCompression(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kDbCompressionKey), on);
+    s.sync();
+}
+
+bool Preferences::dbCompressionPromptShown(const QString& accountId) {
+    if (accountId.isEmpty()) return false;
+    QSettings s;
+    return s.value(QLatin1String(kDbCompressionPromptShownPfx) + accountId,
+                    false).toBool();
+}
+
+void Preferences::setDbCompressionPromptShown(const QString& accountId,
+                                                bool shown) {
+    if (accountId.isEmpty()) return;
+    QSettings s;
+    s.setValue(QLatin1String(kDbCompressionPromptShownPfx) + accountId, shown);
+    s.sync();
+}
+
 }  // namespace fc::ui

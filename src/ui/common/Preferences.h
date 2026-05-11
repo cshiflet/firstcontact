@@ -159,6 +159,23 @@ public:
     // without depending on this header.
     static int  messagePageSize();
     static void setMessagePageSize(int n);
+
+    // ----------------------------------------------------------------
+    // Database compression preferences
+    //
+    // dbCompression: master toggle. Default on. Writes/reads still
+    // route through BodyCodec regardless (the codec passes through
+    // when no dictionary is loaded); the toggle gates the auto-train
+    // workflow and the first-time prompt.
+    //
+    // dbCompressionPromptShown(accountId): set true once the user
+    // has dismissed the "200 bodies, want to compress?" dialog for
+    // a given account so we don't re-prompt every restart.
+    static bool dbCompression();
+    static void setDbCompression(bool on);
+    static bool dbCompressionPromptShown(const QString& accountId);
+    static void setDbCompressionPromptShown(const QString& accountId,
+                                              bool shown);
 };
 
 }  // namespace fc::ui

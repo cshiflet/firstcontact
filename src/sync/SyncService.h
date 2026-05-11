@@ -78,6 +78,13 @@ signals:
     void topUpFinished(const QString& labelId, int newRowsStored,
                         bool serverExhausted);
 
+    // Fires once per account when the cached-body count first crosses
+    // the dictionary-training threshold AND the user hasn't yet been
+    // asked whether to compress. MainWindow listens, shows the
+    // "Compress DB / Disable compression" dialog. SyncService doesn't
+    // act on the answer itself — that's the UI's call.
+    void compressionPromptDue(int bodyCount);
+
 private:
     void doInitialSync();
     void doIncrementalSync();

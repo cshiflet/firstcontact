@@ -197,6 +197,9 @@ signals:
     void topUpStarted(const QString& accountId, const QString& labelId);
     void topUpFinished(const QString& accountId, const QString& labelId,
                         int newRowsStored, bool serverExhausted);
+    // Re-emitted from SyncService::compressionPromptDue. MainWindow
+    // shows the first-time "Compress DB?" dialog when this fires.
+    void compressionPromptDue(const QString& accountId, int bodyCount);
     // Coarser-grained "any sync is active for this account" pair.
     // Fires when the per-account SyncService leaves Idle (initial
     // sync, incremental sync, or top-up) and again when it returns

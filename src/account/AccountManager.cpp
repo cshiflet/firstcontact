@@ -93,6 +93,10 @@ void AccountManager::buildContextsForAllAccounts() {
                         else
                             emit syncStarted(aid);
                     });
+            connect(s, &fc::sync::SyncService::compressionPromptDue, this,
+                    [this, aid](int bodyCount) {
+                        emit compressionPromptDue(aid, bodyCount);
+                    });
         }
         if (auto* a_oauth = ctx->auth()) {
             const QString aid = a.id;
@@ -155,6 +159,10 @@ AccountContext* AccountManager::ensureContext(const QString& id) {
                         emit syncFinished(id);
                     else
                         emit syncStarted(id);
+                });
+        connect(s, &fc::sync::SyncService::compressionPromptDue, this,
+                [this, id](int bodyCount) {
+                    emit compressionPromptDue(id, bodyCount);
                 });
     }
     if (auto* a_oauth = ctx->auth()) {
