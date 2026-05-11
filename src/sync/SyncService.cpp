@@ -43,6 +43,17 @@ struct SyncService::Impl {
     // MainWindow does the further gating (Preferences flags, dict
     // presence) before actually showing the dialog.
     bool compressionPromptEmitted = false;
+
+    // cacheLabelComplete walk state. cacheLabelTarget holds the
+    // label being walked (empty = no walk in flight). cacheLabelCancel
+    // is a request flag the user can set via cancelCacheLabel; the
+    // chain checks it at each topUpFinished to decide whether to
+    // continue or finalize. cacheLabelTotalStored sums stored rows
+    // across pages so the final cacheLabelFinished payload has the
+    // right number.
+    QString cacheLabelTarget;
+    bool    cacheLabelCancel = false;
+    int     cacheLabelTotalStored = 0;
 };
 
 SyncService::SyncService(fc::api::GmailClient* gmail, QObject* parent)
@@ -51,6 +62,39 @@ SyncService::SyncService(fc::api::GmailClient* gmail, QObject* parent)
     fc::cache::Database::initialize();
     // accountId starts empty; AccountContext / MainWindow drive it via
     // setAccountId() once the active account is known.
+
+    // cacheLabelComplete chain: when a top-up wraps up for the label
+    // we're walking, either fire the next page (server has more) or
+    // settle (server exhausted / user cancelled). Self-connect runs
+    // directly (same object, same thread).
+    connect(this, &SyncService::topUpFinished, this,
+        [this](const QString& labelId, int newRowsStored,
+                bool serverExhausted) {
+            if (d_->cacheLabelTarget.isEmpty()) return;
+            if (labelId != d_->cacheLabelTarget) return;
+            d_->cacheLabelTotalStored += newRowsStored;
+            emit cacheLabelProgress(labelId, d_->cacheLabelTotalStored);
+            const bool cancelled = d_->cacheLabelCancel;
+            if (cancelled || serverExhausted) {
+                const int total = d_->cacheLabelTotalStored;
+                const QString lbl = d_->cacheLabelTarget;
+                d_->cacheLabelTotalStored = 0;
+                d_->cacheLabelTarget.clear();
+                d_->cacheLabelCancel = false;
+                emit cacheLabelFinished(lbl, total, cancelled);
+                return;
+            }
+            // Queued post so we don't re-enter topUpLabel from
+            // inside its own emit chain.
+            QPointer<SyncService> self(this);
+            const QString lbl = labelId;
+            QMetaObject::invokeMethod(this, [self, lbl] {
+                if (!self) return;
+                if (self->d_->cacheLabelTarget != lbl) return;
+                if (self->d_->cacheLabelCancel) return;
+                self->topUpLabel(lbl);
+            }, Qt::QueuedConnection);
+        });
 }
 
 void SyncService::setAccountId(const QString& accountId) {
@@ -549,6 +593,35 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         }
     };
     (*next)();
+}
+
+void SyncService::cacheLabelComplete(const QString& labelId) {
+    if (labelId.isEmpty()) return;
+    if (!d_->cacheLabelTarget.isEmpty()) {
+        qInfo("SyncService::cacheLabelComplete: walk already in flight "
+              "for label '%s'; ignoring '%s'",
+              qUtf8Printable(d_->cacheLabelTarget),
+              qUtf8Printable(labelId));
+        return;
+    }
+    qInfo("SyncService::cacheLabelComplete: starting walk of label '%s'",
+          qUtf8Printable(labelId));
+    d_->cacheLabelTarget = labelId;
+    d_->cacheLabelCancel = false;
+    d_->cacheLabelTotalStored = 0;
+    topUpLabel(labelId);
+}
+
+void SyncService::cancelCacheLabel() {
+    if (d_->cacheLabelTarget.isEmpty()) return;
+    qInfo("SyncService::cancelCacheLabel: requesting cancel of walk of "
+          "'%s' at %d row(s) stored",
+          qUtf8Printable(d_->cacheLabelTarget),
+          d_->cacheLabelTotalStored);
+    // Flag the cancel; the in-flight top-up runs its current page
+    // to completion. When it fires topUpFinished, the chain handler
+    // sees the flag and finalizes with cancelled=true.
+    d_->cacheLabelCancel = true;
 }
 
 }  // namespace fc::sync

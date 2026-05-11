@@ -337,6 +337,7 @@ void SidebarWidget::onContextMenu(const QPoint& p) {
     auto* createAct = menu.addAction(tr("New label…"));
     QAction* renameAct = nullptr;
     QAction* deleteAct = nullptr;
+    QAction* cacheAct  = nullptr;
     QString id;
     QString aid;
     QString type;
@@ -344,6 +345,19 @@ void SidebarWidget::onContextMenu(const QPoint& p) {
         id   = idx.data(fc::LabelTreeModel::IdRole).toString();
         aid  = idx.data(fc::LabelTreeModel::AccountIdRole).toString();
         type = idx.data(fc::LabelTreeModel::TypeRole).toString();
+        // "Cache all messages" applies to anything with a real
+        // labelId scoped to one account: system labels (Inbox /
+        // Sent / Drafts / …), user labels, and the All Mail
+        // synthetic. Excluded: the cross-account "All Inboxes"
+        // synthetic (which would need per-account fan-out), the
+        // section banners (Folders / Labels), and the account
+        // header rows.
+        if (!id.isEmpty() && !aid.isEmpty()
+            && (type == QLatin1String("system")
+                || type == QLatin1String("user"))) {
+            menu.addSeparator();
+            cacheAct = menu.addAction(tr("Cache all messages"));
+        }
         if (type == QLatin1String("user")) {
             menu.addSeparator();
             renameAct = menu.addAction(tr("Rename…"));
@@ -354,6 +368,8 @@ void SidebarWidget::onContextMenu(const QPoint& p) {
     if (!chosen) return;
     if (chosen == createAct) {
         emit requestCreateLabel(aid, idx.isValid() ? id : QString());
+    } else if (chosen == cacheAct) {
+        emit requestCacheLabel(aid, id);
     } else if (chosen == renameAct) {
         emit requestRenameLabel(aid, id);
     } else if (chosen == deleteAct) {

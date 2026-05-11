@@ -57,6 +57,14 @@ public:
     // sync keeps them up to date.
     void topUpLabel(const QString& labelId);
 
+    // Walks the label end-to-end: chains topUpLabel pages until the
+    // server returns no nextPageToken. Honors a user-controlled
+    // cancel flag (cancelCacheLabel) so the workflow can be aborted
+    // mid-flight. Emits cacheLabelProgress / cacheLabelFinished so
+    // MainWindow can drive a status-bar readout.
+    void cacheLabelComplete(const QString& labelId);
+    void cancelCacheLabel();
+
 signals:
     void stateChanged(fc::sync::SyncService::State s);
     void labelsUpdated();
@@ -84,6 +92,16 @@ signals:
     // "Compress DB / Disable compression" dialog. SyncService doesn't
     // act on the answer itself — that's the UI's call.
     void compressionPromptDue(int bodyCount);
+
+    // Lifecycle of a cacheLabelComplete run. progress fires after
+    // every successful top-up page with the running total of stored
+    // rows; finished fires when the chain settles (serverExhausted
+    // OR cancel). Total in finished is the number of NEW rows the
+    // entire walk added (already-cached pages are walked through
+    // but don't contribute).
+    void cacheLabelProgress(const QString& labelId, int totalStored);
+    void cacheLabelFinished(const QString& labelId, int totalStored,
+                              bool cancelled);
 
 private:
     void doInitialSync();

@@ -220,6 +220,14 @@ signals:
     // Re-emitted from SyncService::compressionPromptDue. MainWindow
     // shows the first-time "Compress DB?" dialog when this fires.
     void compressionPromptDue(const QString& accountId, int bodyCount);
+    // Re-emitted from SyncService::cacheLabel{Progress,Finished} so
+    // MainWindow can drive a status-bar readout for the per-label
+    // "Cache all messages" right-click action.
+    void cacheLabelProgress(const QString& accountId,
+                              const QString& labelId, int totalStored);
+    void cacheLabelFinished(const QString& accountId,
+                              const QString& labelId, int totalStored,
+                              bool cancelled);
     // Coarser-grained "any sync is active for this account" pair.
     // Fires when the per-account SyncService leaves Idle (initial
     // sync, incremental sync, or top-up) and again when it returns

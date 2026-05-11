@@ -772,6 +772,35 @@ void MainWindow::wireSignals() {
             this,     &MainWindow::onRenameLabel);
     connect(sidebar_, &SidebarWidget::requestDeleteLabel,
             this,     &MainWindow::onDeleteLabel);
+    connect(sidebar_, &SidebarWidget::requestCacheLabel,
+            this,     &MainWindow::onCacheLabel);
+    connect(accounts_, &fc::account::AccountManager::cacheLabelProgress,
+            this, [this](const QString& aid, const QString& labelId, int total) {
+                if (aid != currentAccountId_) return;
+                const QString name = fc::cache::LabelRepository::byId(
+                    aid, labelId).name;
+                statusBar()->showMessage(
+                    tr("Caching %1: %n message(s) so far…", "", total)
+                      .arg(name.isEmpty() ? labelId : name),
+                    10000);
+            });
+    connect(accounts_, &fc::account::AccountManager::cacheLabelFinished,
+            this, [this](const QString& aid, const QString& labelId,
+                          int total, bool cancelled) {
+                if (aid != currentAccountId_) return;
+                const QString name = fc::cache::LabelRepository::byId(
+                    aid, labelId).name;
+                const QString label = name.isEmpty() ? labelId : name;
+                if (cancelled) {
+                    statusBar()->showMessage(
+                        tr("Caching %1 cancelled after %n message(s).", "",
+                            total).arg(label), 15000);
+                } else {
+                    statusBar()->showMessage(
+                        tr("Cached %1 end-to-end: %n new message(s) added.",
+                            "", total).arg(label), 15000);
+                }
+            });
 
     connect(auth_, &fc::auth::OAuthClient::granted, this, [this] {
         refreshAccountIndicator();
@@ -2929,6 +2958,43 @@ void MainWindow::onDeleteLabel(const QString& accountIdArg,
                 }, Qt::QueuedConnection);
             });
     });
+}
+
+void MainWindow::onCacheLabel(const QString& accountIdArg,
+                                const QString& labelId) {
+    if (accountIdArg.isEmpty() || labelId.isEmpty()) return;
+    if (!accounts_) return;
+    auto* ctx = accounts_->contextFor(accountIdArg);
+    if (!ctx || !ctx->sync()) {
+        QMessageBox::warning(this, tr("Cache label"),
+            tr("This account isn't ready to sync."));
+        return;
+    }
+
+    const auto label = fc::cache::LabelRepository::byId(accountIdArg,
+                                                          labelId);
+    const QString display = label.name.isEmpty() ? labelId : label.name;
+    const QString email = accounts_->accountById(accountIdArg).email;
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("Cache all messages"));
+    box.setText(tr("Download and cache every message in '%1' for %2?")
+                  .arg(display, email.isEmpty() ? accountIdArg : email));
+    box.setInformativeText(tr(
+        "FirstContact will walk this label end-to-end, pulling each "
+        "page from Gmail. Large folders can take a while and will "
+        "burn Gmail quota. You can keep using the app; cancel from "
+        "Settings if needed."));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Yes);
+    if (box.exec() != QMessageBox::Yes) return;
+
+    auto* sync = ctx->sync();
+    postToObject(sync, [sync, labelId] {
+        sync->cacheLabelComplete(labelId);
+    });
+    statusBar()->showMessage(
+        tr("Caching '%1'…").arg(display), 10000);
 }
 
 void MainWindow::onToggleStar() {

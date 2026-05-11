@@ -97,6 +97,14 @@ void AccountManager::buildContextsForAllAccounts() {
                     [this, aid](int bodyCount) {
                         emit compressionPromptDue(aid, bodyCount);
                     });
+            connect(s, &fc::sync::SyncService::cacheLabelProgress, this,
+                    [this, aid](const QString& lbl, int total) {
+                        emit cacheLabelProgress(aid, lbl, total);
+                    });
+            connect(s, &fc::sync::SyncService::cacheLabelFinished, this,
+                    [this, aid](const QString& lbl, int total, bool cancelled) {
+                        emit cacheLabelFinished(aid, lbl, total, cancelled);
+                    });
         }
         if (auto* a_oauth = ctx->auth()) {
             const QString aid = a.id;
@@ -163,6 +171,14 @@ AccountContext* AccountManager::ensureContext(const QString& id) {
         connect(s, &fc::sync::SyncService::compressionPromptDue, this,
                 [this, id](int bodyCount) {
                     emit compressionPromptDue(id, bodyCount);
+                });
+        connect(s, &fc::sync::SyncService::cacheLabelProgress, this,
+                [this, id](const QString& lbl, int total) {
+                    emit cacheLabelProgress(id, lbl, total);
+                });
+        connect(s, &fc::sync::SyncService::cacheLabelFinished, this,
+                [this, id](const QString& lbl, int total, bool cancelled) {
+                    emit cacheLabelFinished(id, lbl, total, cancelled);
                 });
     }
     if (auto* a_oauth = ctx->auth()) {

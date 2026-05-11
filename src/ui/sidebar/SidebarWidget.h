@@ -41,6 +41,10 @@ signals:
                             const QString& parentLabelId);
     void requestRenameLabel(const QString& accountId, const QString& labelId);
     void requestDeleteLabel(const QString& accountId, const QString& labelId);
+    // Right-click → "Cache all messages in this label". MainWindow
+    // owns the workflow (confirmation dialog, status-bar feedback,
+    // SyncService::cacheLabelComplete call).
+    void requestCacheLabel(const QString& accountId, const QString& labelId);
 
 private slots:
     void onClicked(const QModelIndex& idx);

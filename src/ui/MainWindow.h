@@ -76,6 +76,11 @@ private slots:
     void onCreateLabel(const QString& accountId, const QString& parentLabelId);
     void onRenameLabel(const QString& accountId, const QString& labelId);
     void onDeleteLabel(const QString& accountId, const QString& labelId);
+    // Right-click → "Cache all messages" handler. Confirms with the
+    // user, then asks the account's SyncService to walk the label
+    // end-to-end. Status bar shows progress; cacheLabelFinished
+    // toasts the totals.
+    void onCacheLabel(const QString& accountId, const QString& labelId);
     void onOpenSettings();
     void onToggleStar();
     void onToggleStarFor(const QString& messageId);
