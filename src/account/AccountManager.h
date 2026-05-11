@@ -138,6 +138,26 @@ public:
     // manager's "Reduce to <N> MB" action.
     int clearMessagesToTargetSize(const QString& id, qint64 targetBytes);
 
+    // Deletes oldest-first messages until the total cached message
+    // count for `id` drops to `targetCount`. Returns the number of
+    // deleted rows. Used by the auto-prune workflow when the user
+    // has set a per-account message-count cap.
+    int clearMessagesToTargetCount(const QString& id, int targetCount);
+
+    // Runs all three caps in order (age → count → size). A zero
+    // value on any axis means "no cap, skip." Cheap when the cache
+    // is already within bounds (COUNT / SELECT queries with no
+    // follow-up DELETE). Safe to call after every sync. Returns
+    // total messages deleted across the three passes.
+    //
+    // Reading Preferences for the bound values happens at the
+    // caller (typically MainWindow): fc_account can't pull Preferences
+    // (lives in fc_ui) without creating a circular dep.
+    int applyAutoPruneFor(const QString& id,
+                           int maxAgeDays,
+                           int maxMessages,
+                           int maxCacheMb);
+
     // Per-account cache statistics — what cacheSizeFor returns plus
     // counts the dialog wants to display: messages, threads,
     // labels (folders), attachments, drafts, outbox, pending_ops.

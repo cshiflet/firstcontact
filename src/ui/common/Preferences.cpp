@@ -277,4 +277,61 @@ void Preferences::setDbCompressionPromptShown(const QString& accountId,
     s.sync();
 }
 
+namespace {
+constexpr char kCacheAutoPruneKey[] = "cache/autoPrune";
+constexpr char kCacheMaxAgeKey[]    = "cache/maxAgeDays/";   // + accountId
+constexpr char kCacheMaxMsgsKey[]   = "cache/maxMessages/";  // + accountId
+constexpr char kCacheMaxMbKey[]     = "cache/maxCacheMb/";   // + accountId
+}
+
+bool Preferences::cacheAutoPrune() {
+    QSettings s;
+    return s.value(QLatin1String(kCacheAutoPruneKey), false).toBool();
+}
+
+void Preferences::setCacheAutoPrune(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kCacheAutoPruneKey), on);
+    s.sync();
+}
+
+int Preferences::cacheMaxAgeDays(const QString& accountId) {
+    if (accountId.isEmpty()) return 0;
+    QSettings s;
+    return s.value(QLatin1String(kCacheMaxAgeKey) + accountId, 0).toInt();
+}
+
+void Preferences::setCacheMaxAgeDays(const QString& accountId, int days) {
+    if (accountId.isEmpty()) return;
+    QSettings s;
+    s.setValue(QLatin1String(kCacheMaxAgeKey) + accountId, qMax(0, days));
+    s.sync();
+}
+
+int Preferences::cacheMaxMessages(const QString& accountId) {
+    if (accountId.isEmpty()) return 0;
+    QSettings s;
+    return s.value(QLatin1String(kCacheMaxMsgsKey) + accountId, 0).toInt();
+}
+
+void Preferences::setCacheMaxMessages(const QString& accountId, int n) {
+    if (accountId.isEmpty()) return;
+    QSettings s;
+    s.setValue(QLatin1String(kCacheMaxMsgsKey) + accountId, qMax(0, n));
+    s.sync();
+}
+
+int Preferences::cacheMaxCacheMb(const QString& accountId) {
+    if (accountId.isEmpty()) return 0;
+    QSettings s;
+    return s.value(QLatin1String(kCacheMaxMbKey) + accountId, 0).toInt();
+}
+
+void Preferences::setCacheMaxCacheMb(const QString& accountId, int mb) {
+    if (accountId.isEmpty()) return;
+    QSettings s;
+    s.setValue(QLatin1String(kCacheMaxMbKey) + accountId, qMax(0, mb));
+    s.sync();
+}
+
 }  // namespace fc::ui

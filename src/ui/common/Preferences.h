@@ -176,6 +176,30 @@ public:
     static bool dbCompressionPromptShown(const QString& accountId);
     static void setDbCompressionPromptShown(const QString& accountId,
                                               bool shown);
+
+    // ----------------------------------------------------------------
+    // Per-account cache bounds. Each defaults to 0 = unlimited.
+    //
+    // These are upper limits enforced via auto-prune after every
+    // successful sync (when cacheAutoPrune is true). Future work
+    // (task #14) gates the fetch path too, so out-of-bounds bodies
+    // never get pulled — for now the bounds run as cleanup, so they
+    // do save disk but not bandwidth.
+    //
+    // maxAgeDays: drop messages whose internal_date is older than
+    //   the cutoff. Threads / labels survive — only message rows go.
+    // maxMessages: cap total cached message count per account.
+    //   Oldest-first eviction.
+    // maxCacheMb: cap on-disk cache size per account. Oldest-first
+    //   eviction summed via bytes_cached.
+    static bool cacheAutoPrune();
+    static void setCacheAutoPrune(bool on);
+    static int  cacheMaxAgeDays(const QString& accountId);
+    static void setCacheMaxAgeDays(const QString& accountId, int days);
+    static int  cacheMaxMessages(const QString& accountId);
+    static void setCacheMaxMessages(const QString& accountId, int n);
+    static int  cacheMaxCacheMb(const QString& accountId);
+    static void setCacheMaxCacheMb(const QString& accountId, int mb);
 };
 
 }  // namespace fc::ui

@@ -579,6 +579,64 @@ int AccountManager::clearMessagesToTargetSize(const QString& id,
     return deleted;
 }
 
+int AccountManager::clearMessagesToTargetCount(const QString& id,
+                                                 int targetCount) {
+    if (id.isEmpty() || targetCount < 0) return 0;
+    auto db = fc::cache::databaseHandle();
+    // Count current rows.
+    int current = 0;
+    {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT COUNT(*) FROM messages WHERE account_id = :a"));
+        q.bindValue(QStringLiteral(":a"), id);
+        if (!q.exec() || !q.next()) return 0;
+        current = q.value(0).toInt();
+    }
+    if (current <= targetCount) return 0;
+
+    const int toDelete = current - targetCount;
+    QSqlQuery del(db);
+    // Subquery picks the oldest-first ids over the cap. DELETE LIMIT
+    // isn't compiled into the Ubuntu sqlite by default; use a
+    // subquery instead.
+    del.prepare(QStringLiteral(
+        "DELETE FROM messages WHERE account_id = :a AND id IN ("
+        "  SELECT id FROM messages WHERE account_id = :a "
+        "  ORDER BY internal_date ASC LIMIT :n)"));
+    del.bindValue(QStringLiteral(":a"), id);
+    del.bindValue(QStringLiteral(":n"), toDelete);
+    if (!del.exec()) {
+        qWarning("clearMessagesToTargetCount: %s",
+                 qUtf8Printable(del.lastError().text()));
+        return 0;
+    }
+    const int n = del.numRowsAffected();
+    if (n > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    return n;
+}
+
+int AccountManager::applyAutoPruneFor(const QString& id,
+                                         int maxAgeDays,
+                                         int maxMessages,
+                                         int maxCacheMb) {
+    if (id.isEmpty()) return 0;
+
+    int total = 0;
+    if (maxAgeDays > 0) total += clearMessagesOlderThan(id, maxAgeDays);
+    if (maxMessages > 0) total += clearMessagesToTargetCount(id, maxMessages);
+    if (maxCacheMb > 0) {
+        total += clearMessagesToTargetSize(id,
+            static_cast<qint64>(maxCacheMb) * 1024 * 1024);
+    }
+    if (total > 0) {
+        qInfo("AccountManager::applyAutoPruneFor(%s): pruned %d row(s) "
+              "(maxAge=%d, maxMsgs=%d, maxMb=%d)",
+              qUtf8Printable(id), total, maxAgeDays, maxMessages, maxCacheMb);
+    }
+    return total;
+}
+
 AccountManager::AccountCacheStats AccountManager::statsFor(
         const QString& id) const {
     AccountCacheStats s;

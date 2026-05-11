@@ -3,6 +3,7 @@
 #include "account/AccountContext.h"
 #include "account/AccountManager.h"
 #include "auth/OAuthClient.h"
+#include "Preferences.h"
 
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -295,6 +296,50 @@ void CacheManagerDialog::rebuildTable() {
                    "%3 MB target.")
                     .arg(n).arg(display).arg(mb));
             rebuildTable();
+        });
+
+        // Auto-prune limits. Three separate menu entries, one per
+        // axis. Each pops a QInputDialog pre-filled with the current
+        // value; 0 means "no limit". The master "auto-prune"
+        // toggle lives in Settings (Preferences::cacheAutoPrune);
+        // these per-account limits only kick in when the master is
+        // enabled.
+        menu->addSeparator();
+        auto* ageAct = menu->addAction(tr("Auto-prune: max age (days)…"));
+        if (isOrphan) ageAct->setEnabled(false);
+        QObject::connect(ageAct, &QAction::triggered, this, [this, id] {
+            const int cur = Preferences::cacheMaxAgeDays(id);
+            bool ok = false;
+            const int d = QInputDialog::getInt(this,
+                tr("Auto-prune max age"),
+                tr("Maximum age in days (0 = no limit):"),
+                cur, 0, 3650, 30, &ok);
+            if (!ok) return;
+            Preferences::setCacheMaxAgeDays(id, d);
+        });
+        auto* msgAct = menu->addAction(tr("Auto-prune: max messages…"));
+        if (isOrphan) msgAct->setEnabled(false);
+        QObject::connect(msgAct, &QAction::triggered, this, [this, id] {
+            const int cur = Preferences::cacheMaxMessages(id);
+            bool ok = false;
+            const int n = QInputDialog::getInt(this,
+                tr("Auto-prune max messages"),
+                tr("Maximum cached messages (0 = no limit):"),
+                cur, 0, 1000000, 1000, &ok);
+            if (!ok) return;
+            Preferences::setCacheMaxMessages(id, n);
+        });
+        auto* sizeAct = menu->addAction(tr("Auto-prune: max cache size (MB)…"));
+        if (isOrphan) sizeAct->setEnabled(false);
+        QObject::connect(sizeAct, &QAction::triggered, this, [this, id] {
+            const int cur = Preferences::cacheMaxCacheMb(id);
+            bool ok = false;
+            const int mb = QInputDialog::getInt(this,
+                tr("Auto-prune max cache size"),
+                tr("Maximum cache size in MB (0 = no limit):"),
+                cur, 0, 1000000, 100, &ok);
+            if (!ok) return;
+            Preferences::setCacheMaxCacheMb(id, mb);
         });
 
         manageBtn->setMenu(menu);

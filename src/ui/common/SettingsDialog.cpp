@@ -508,6 +508,31 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         emit cacheManagerRequested();
     });
 
+    // Auto-prune master toggle. Per-account caps (age / count / size)
+    // live in Cache Manager → Manage… → "Auto-prune: …" actions.
+    // When this toggle is on, every successful sync runs the three
+    // caps for the affected account; off → caps stay configured but
+    // dormant.
+    auto* autoPruneForm = new QFormLayout;
+    autoPruneForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    autoPruneForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    auto* autoPruneBox = new QCheckBox(
+        tr("Auto-prune cache after each sync"), content);
+    autoPruneBox->setChecked(Preferences::cacheAutoPrune());
+    connect(autoPruneBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setCacheAutoPrune(on);
+    });
+    autoPruneForm->addRow(QString(), autoPruneBox);
+    auto* autoPruneHint = new QLabel(tr(
+        "When enabled, FirstContact applies your per-account cache "
+        "limits (max age, max messages, max size) after every sync. "
+        "Set limits via Manage cache… → Manage… → Auto-prune entries."),
+        content);
+    autoPruneHint->setObjectName(QStringLiteral("FormHint"));
+    autoPruneHint->setWordWrap(true);
+    autoPruneForm->addRow(QString(), autoPruneHint);
+    contentLayout->addLayout(autoPruneForm);
+
     // Body compression: zstd-with-trained-dictionary. The toggle
     // gates the auto-train trigger (the SyncService side detects
     // 200+ bodies and emits compressionPromptDue, which MainWindow

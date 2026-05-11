@@ -1190,6 +1190,20 @@ void MainWindow::wireSignals() {
     // position.
     connect(accounts_, &fc::account::AccountManager::messagesUpdated, this,
             [this](const QString& aid) {
+                // Auto-prune: any account that just synced should be
+                // re-checked against its bounds. Reads Preferences
+                // here (where it's available) and hands the bound
+                // values into AccountManager — fc_account stays
+                // Preferences-free to avoid the circular dep.
+                if (Preferences::cacheAutoPrune() && accounts_
+                    && !aid.isEmpty()) {
+                    const int days = Preferences::cacheMaxAgeDays(aid);
+                    const int msgs = Preferences::cacheMaxMessages(aid);
+                    const int mb   = Preferences::cacheMaxCacheMb(aid);
+                    if (days > 0 || msgs > 0 || mb > 0) {
+                        accounts_->applyAutoPruneFor(aid, days, msgs, mb);
+                    }
+                }
                 if (aid != currentAccountId_) return;
                 if (!list_ || !listModel_) return;
                 auto* sb = list_->verticalScrollBar();
