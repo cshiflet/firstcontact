@@ -153,6 +153,13 @@ public:
     // decide whether to fire a server-side top-up.
     bool cacheDrained() const { return cacheDrained_; }
 
+    // Number of "real" message rows — excludes the optional footer
+    // placeholder. MainWindow uses this to decide whether the
+    // "Loading more messages…" footer should appear during a sync of
+    // an empty label (yes) vs. cluttering an already-populated list
+    // with a redundant in-list spinner (no).
+    int messageRowCount() const { return static_cast<int>(rows_.size()); }
+
 signals:
     // Fired when fetchMore was asked but the cache had no more rows for
     // the source. The owner connects this to SyncService::topUpLabel
@@ -184,12 +191,6 @@ private:
     // call returns.
     bool    resumingAfterTopUp_ = false;
     FooterState footerState_  = FooterState::None;
-
-    // Number of "real" message rows (excludes the optional footer
-    // placeholder). Helpers (refreshFromSource, expandLoadedRows,
-    // toggleThreadExpand, etc.) use this so the placeholder doesn't
-    // get counted as a fetched row.
-    int messageRowCount() const { return static_cast<int>(rows_.size()); }
 };
 
 }  // namespace fc

@@ -266,7 +266,11 @@ private:
     // for now; remove the field outright once any external
     // friend / accessor stops referencing it.
     QLabel*                  listFooter_       = nullptr;
-    bool                     topUpInFlight_    = false;
+    // Counter rather than bool so chained top-ups (resumeAfterTopUp
+    // triggers cacheExhausted which posts another topUpLabel before
+    // the previous topUpFinished's tail-half runs) don't clobber each
+    // other's "in flight" flag and leak the footer into None mid-sync.
+    int                      topUpsInFlight_   = 0;
     QHash<QString, bool>     serverExhaustedByLabel_;
 
     // Per-label scroll memory: keyed by `<accountId>::<labelId>` so

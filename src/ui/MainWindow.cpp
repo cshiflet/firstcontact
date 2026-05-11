@@ -1286,7 +1286,7 @@ void MainWindow::wireSignals() {
                     ? tr("Syncing…")
                     : tr("Syncing %1…").arg(name));
                 if (labelId == listModel_->sourceLabelId()) {
-                    topUpInFlight_ = true;
+                    ++topUpsInFlight_;
                     refreshListFooter();
                 }
             });
@@ -1298,15 +1298,34 @@ void MainWindow::wireSignals() {
                       qUtf8Printable(aid), qUtf8Printable(labelId),
                       newRows, serverExhausted);
                 if (aid != currentAccountId_) return;
-                const QString name = fc::cache::LabelRepository::byId(
-                    currentAccountId_, labelId).name;
-                if (!name.isEmpty()) {
-                    const QString msg = newRows > 0
-                        ? tr("%1: %n new", "", newRows).arg(name)
-                        : tr("%1: up to date").arg(name);
-                    statusBar()->showMessage(msg, 30000);
-                }
                 serverExhaustedByLabel_[labelId] = serverExhausted;
+                // Decrement BEFORE resumeAfterTopUp: that call's
+                // fetchMore may exhaust the cache again and post the
+                // next topUpLabel synchronously inside this handler.
+                // If we decremented after, the new topUpStarted's
+                // increment would land, then ours would zero it out
+                // and the footer would drop to None mid-chain.
+                if (labelId == listModel_->sourceLabelId()
+                    && topUpsInFlight_ > 0) {
+                    --topUpsInFlight_;
+                }
+                // Only surface the "done" status message when the whole
+                // chain has settled; while topUpsInFlight_ > 0 keep the
+                // persistent "Syncing X..." message in place so the user
+                // doesn't see a brief "up to date" flash before the next
+                // chained top-up overwrites it.
+                if (topUpsInFlight_ == 0) {
+                    const QString name = fc::cache::LabelRepository::byId(
+                        currentAccountId_, labelId).name;
+                    if (!name.isEmpty()) {
+                        const QString msg = newRows > 0
+                            ? tr("%1: %n new", "", newRows).arg(name)
+                            : tr("%1: up to date").arg(name);
+                        statusBar()->showMessage(msg, 30000);
+                    } else {
+                        statusBar()->clearMessage();
+                    }
+                }
                 // The cache just gained `newRows` older rows. Push them
                 // into the model so the user's scroll-to-bottom session
                 // continues seamlessly. Skip if the user has navigated
@@ -1315,10 +1334,7 @@ void MainWindow::wireSignals() {
                     && labelId == listModel_->sourceLabelId()) {
                     listModel_->resumeAfterTopUp();
                 }
-                if (labelId == listModel_->sourceLabelId()) {
-                    topUpInFlight_ = false;
-                    refreshListFooter();
-                }
+                refreshListFooter();
             });
     connect(sync_, &fc::sync::SyncService::failed, this,
             [this](const QString& reason) {
@@ -1401,6 +1417,55 @@ void MainWindow::wireSignals() {
                 }
             });
 
+    // Per-account sync indicator. The `sync_->stateChanged` connection
+    // above is on the anonymous Bootstrap stack which no longer ticks
+    // post-multi-account-refactor; the real per-context sync emits
+    // through AccountManager::syncStarted/syncFinished, which forward
+    // every per-account SyncService::stateChanged(Idle ↔ non-Idle)
+    // transition. Drives isSyncing_ and the empty-list footer
+    // placeholder so the user sees "Syncing INBOX…" + "Loading more
+    // messages…" during an initial sync after a cache wipe (where the
+    // legacy connection would leave the UI silent).
+    //
+    // Top-ups also tick this via setState transitions inside
+    // topUpLabelStep, but those are tracked separately by
+    // topUpsInFlight_ — skip the isSyncing_ bookkeeping while a top-up
+    // is in flight so the chained state flicker doesn't churn the
+    // status bar.
+    connect(accounts_, &fc::account::AccountManager::syncStarted, this,
+            [this](const QString& aid) {
+                if (aid != currentAccountId_) return;
+                if (topUpsInFlight_ > 0) return;
+                isSyncing_ = true;
+                if (errorBanner_) errorBanner_->hide();
+                const QString name = currentLabelId_.isEmpty()
+                    ? QString()
+                    : fc::cache::LabelRepository::byId(
+                          currentAccountId_, currentLabelId_).name;
+                statusBar()->showMessage(name.isEmpty()
+                    ? tr("Syncing…")
+                    : tr("Syncing %1…").arg(name));
+                refreshListFooter();
+            });
+    connect(accounts_, &fc::account::AccountManager::syncFinished, this,
+            [this](const QString& aid) {
+                if (aid != currentAccountId_) return;
+                if (topUpsInFlight_ > 0) return;
+                const bool wasSyncing = isSyncing_;
+                isSyncing_ = false;
+                refreshListFooter();
+                if (!wasSyncing) return;
+                // Defer so a synchronous failed() handler firing after
+                // this Idle transition can claim the slot.
+                QTimer::singleShot(0, this, [this] {
+                    if (lastSyncFailed_) {
+                        lastSyncFailed_ = false;
+                        return;
+                    }
+                    statusBar()->showMessage(tr("Syncing… Done"), 30000);
+                });
+            });
+
     // Restore the baseline ("Signed in as …" or "Syncing…" if a sync
     // is mid-flight) every time a temporary message expires. Without
     // this, a quick "Archived." toast clearing during sync would
@@ -1408,8 +1473,14 @@ void MainWindow::wireSignals() {
     connect(statusBar(), &QStatusBar::messageChanged, this,
             [this](const QString& text) {
                 if (!text.isEmpty()) return;
-                if (isSyncing_) {
-                    statusBar()->showMessage(tr("Syncing…"));
+                if (isSyncing_ || topUpsInFlight_ > 0) {
+                    const QString name = currentLabelId_.isEmpty()
+                        ? QString()
+                        : fc::cache::LabelRepository::byId(
+                              currentAccountId_, currentLabelId_).name;
+                    statusBar()->showMessage(name.isEmpty()
+                        ? tr("Syncing…")
+                        : tr("Syncing %1…").arg(name));
                     return;
                 }
                 // Read identity from the active context — auth_ alias
@@ -1962,7 +2033,7 @@ void MainWindow::onLabelSelected(const QString& id) {
     currentLabelId_ = resolvedId;
     // Reset top-up state for the new label — any in-flight top-up
     // for the old label is no longer interesting to the footer.
-    topUpInFlight_ = false;
+    topUpsInFlight_ = 0;
     refreshListFooter();
     reloadCurrentLabel();
     // After reloadCurrentLabel has populated the model for the new
@@ -2067,7 +2138,14 @@ void MainWindow::refreshListFooter() {
     using FooterState = fc::MessageListModel::FooterState;
     FooterState target = FooterState::None;
 
-    if (topUpInFlight_) {
+    if (topUpsInFlight_ > 0) {
+        target = FooterState::Loading;
+    } else if (isSyncing_ && listModel_->messageRowCount() == 0) {
+        // Empty list during initial / incremental sync — surface the
+        // "Loading more messages..." placeholder so the user has
+        // visible feedback that work is happening. For lists with real
+        // rows the toolbar refresh-spinner is enough; a footer row
+        // there would just confuse "loading older" with "refreshing".
         target = FooterState::Loading;
     } else {
         const QString labelId = listModel_->sourceLabelId();
