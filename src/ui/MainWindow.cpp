@@ -1263,6 +1263,42 @@ void MainWindow::wireSignals() {
                 refreshListFooter();
             });
 
+    // User-initiated "scroll past loaded" trigger. resumeAfterTopUp can
+    // leave the model in cacheDrained_=true (last drain chunk was a
+    // short page) — at that point Qt's view won't auto-call fetchMore
+    // because canFetchMore() returns false, and cacheExhausted will
+    // not fire from a scroll. This handler does the same thing the
+    // cacheExhausted path does (post a topUpLabel) but only when the
+    // user's own scroll has reached the bottom of what's loaded AND
+    // no top-up is already in flight AND the server hasn't reported
+    // exhaustion for the current label. Without this, after a
+    // resumeAfterTopUp drain ends with a short page the user would be
+    // stuck — scrolling to the bottom does nothing because the cache
+    // is dry and the model's hands are tied.
+    if (auto* sb = list_->verticalScrollBar()) {
+        connect(sb, &QScrollBar::valueChanged, this, [this](int value) {
+            if (!list_ || !listModel_) return;
+            auto* bar = list_->verticalScrollBar();
+            if (!bar || bar->maximum() <= 0) return;
+            // 32 px tolerance so the trigger fires when the user is
+            // *near* the bottom, not strictly at the last pixel.
+            if (bar->maximum() - value > 32) return;
+            if (!listModel_->cacheDrained()) return;
+            if (topUpsInFlight_ > 0) return;
+            const QString labelId = listModel_->sourceLabelId();
+            if (labelId.isEmpty()) return;
+            if (serverExhaustedByLabel_.value(labelId, false)) return;
+            if (auto* ctx = accounts_ ? accounts_->currentContext()
+                                       : nullptr) {
+                if (auto* s = ctx->sync()) {
+                    postToObject(s, [s, labelId] {
+                        s->topUpLabel(labelId);
+                    });
+                }
+            }
+        });
+    }
+
     // Label-scoped progress messages for top-up. Generic stateChanged
     // already shows "Syncing…" / "Syncing… Done" for INITIAL +
     // INCREMENTAL passes; these layer on top with a label name when

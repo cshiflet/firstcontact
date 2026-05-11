@@ -173,7 +173,15 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
 
     if (more.empty()) {
         cacheDrained_ = true;
-        emit cacheExhausted(sourceParam_);
+        // resumingAfterTopUp_ is set while resumeAfterTopUp's loop
+        // calls fetchMore internally. Emitting cacheExhausted there
+        // posts another topUpLabel and the cycle never breaks —
+        // every top-up's resume hits a short page at the tail of its
+        // 6-chunk drain and immediately fires the next top-up, so
+        // the app silently back-fills the entire label until the
+        // server runs out. Only emit when fetchMore was triggered
+        // by the view's actual scroll request.
+        if (!resumingAfterTopUp_) emit cacheExhausted(sourceParam_);
         return;
     }
 
@@ -186,17 +194,11 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
     endInsertRows();
 
     // A short page (less than pageSize) means the cache is on its last
-    // legs for this label. Mark drained AND emit cacheExhausted so the
-    // owner kicks off a server top-up — Qt's view controllers won't ask
-    // for fetchMore again once canFetchMore goes false, so without the
-    // signal here the user would be stuck whenever the very last cache
-    // page came back short. (For cross-account the owner's
-    // cacheExhausted handler is a no-op since INBOX — the only
-    // cross-account label today — is a seed kept fresh by every
-    // account's incremental sync.)
+    // legs for this label. Mark drained; only signal cacheExhausted to
+    // the owner when fetchMore was view-initiated — see comment above.
     if (static_cast<int>(more.size()) < pageSize()) {
         cacheDrained_ = true;
-        emit cacheExhausted(sourceParam_);
+        if (!resumingAfterTopUp_) emit cacheExhausted(sourceParam_);
     }
 }
 

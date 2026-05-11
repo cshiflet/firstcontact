@@ -293,8 +293,9 @@ void SyncService::topUpLabel(const QString& labelId) {
               qUtf8Printable(d_->accountId), qUtf8Printable(labelId));
         return;
     }
-    qInfo("topUpLabel(account=%s, label=%s): starting",
-          qUtf8Printable(d_->accountId), qUtf8Printable(labelId));
+    qInfo("topUpLabel(account=%s, label=%s): starting (pageSize=%d)",
+          qUtf8Printable(d_->accountId), qUtf8Printable(labelId),
+          topUpPageSize());
     emit topUpStarted(labelId);
     topUpLabelStep(labelId, /*pagesWalked=*/0, /*totalStoredSoFar=*/0);
 }
