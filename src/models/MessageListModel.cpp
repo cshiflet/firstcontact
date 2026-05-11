@@ -2,6 +2,7 @@
 
 #include "cache/MessageRepository.h"
 #include "util/Html2Text.h"
+#include "util/PageSizePref.h"
 
 #include <QScopedValueRollback>
 
@@ -10,6 +11,10 @@
 namespace fc {
 
 MessageListModel::MessageListModel(QObject* parent) : QAbstractListModel(parent) {}
+
+int MessageListModel::pageSize() const {
+    return fc::util::messagePageSize();
+}
 
 int MessageListModel::rowCount(const QModelIndex& parent) const {
     if (parent.isValid()) return 0;

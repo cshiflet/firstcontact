@@ -5,6 +5,7 @@
 #include "cache/LabelRepository.h"
 #include "cache/MessageRepository.h"
 #include "cache/MetaRepository.h"
+#include "util/PageSizePref.h"
 
 #include <QPointer>
 #include <QSet>
@@ -272,12 +273,12 @@ QString topUpTokenKey(const QString& labelId) {
     return QStringLiteral("labelTopUp/%1/pageToken").arg(labelId);
 }
 
-// Marks the label as fully walked once the server returns no more
-// pages, so the next click resets to the start instead of yielding
-// nothing. 500 is the Gmail API's per-page maximum — we use the
-// largest single page to minimise the number of round-trips a user
-// has to scroll-trigger before a deep label finishes catching up.
-constexpr int kTopUpPageSize = 500;
+// Per-page batch size for Gmail's messages.list during scroll-driven
+// top-up. Read from the same QSettings key the message list pageSize()
+// uses (Preferences::messagePageSize) so the user has one "messages
+// per batch" knob that governs both the local cache page reads and
+// the server-side fetch. 500 is the Gmail API's per-page maximum.
+int topUpPageSize() { return fc::util::messagePageSize(); }
 
 }  // namespace
 
@@ -336,7 +337,7 @@ void SyncService::topUpLabelStep(const QString& labelId,
 
     QPointer<SyncService> self(this);
     d_->gmail->listMessages(gmailLabelArg, /*q=*/QString(), pageToken,
-        kTopUpPageSize,
+        topUpPageSize(),
         [self, labelId, tokenKey, pagesWalked, totalStoredSoFar]
         (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
             if (!self) return;   // we were destroyed in flight

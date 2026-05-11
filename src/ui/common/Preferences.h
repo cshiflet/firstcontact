@@ -150,6 +150,15 @@ public:
     // in Settings → Reader mirrors the same pref.
     static fc::util::LinkDisplayMode linkDisplayMode();
     static void                       setLinkDisplayMode(fc::util::LinkDisplayMode m);
+
+    // Messages-per-batch: page size used both for cache reads
+    // (MessageListModel::pageSize) and for server top-up fetches
+    // (SyncService's messages.list maxResults). Default 50,
+    // clamped to [10, 500]. The underlying storage lives in
+    // util::PageSizePref so the sync layer can read the same key
+    // without depending on this header.
+    static int  messagePageSize();
+    static void setMessagePageSize(int n);
 };
 
 }  // namespace fc::ui

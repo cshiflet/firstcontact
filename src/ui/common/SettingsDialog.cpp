@@ -14,6 +14,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 namespace fc::ui {
@@ -341,6 +342,32 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         Preferences::setToolbarShowText(on);
     });
     convForm->addRow(QString(), toolbarBox);
+
+    // Messages-per-batch: governs both the cache page reads
+    // (MessageListModel::pageSize) and the Gmail messages.list page
+    // size used during scroll-driven top-up. Smaller values give
+    // smoother first-paint at the cost of more server round-trips
+    // when the user scrolls deep; larger values fetch more eagerly
+    // but pause longer per batch. Progressive load keeps chaining
+    // additional batches if a single page doesn't fill the view, so
+    // this knob is purely about granularity not about whether
+    // back-fill works.
+    auto* batchBox = new QSpinBox(content);
+    batchBox->setRange(10, 500);
+    batchBox->setSingleStep(10);
+    batchBox->setValue(Preferences::messagePageSize());
+    batchBox->setSuffix(tr(" messages"));
+    connect(batchBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [](int v) { Preferences::setMessagePageSize(v); });
+    convForm->addRow(tr("Messages per batch:"), batchBox);
+    auto* batchHint = new QLabel(tr(
+        "How many messages to read from the local cache per page, and "
+        "how many to fetch from Gmail in one top-up request. Range "
+        "10–500. Default 50. Applies to the next label refresh."),
+        content);
+    batchHint->setObjectName(QStringLiteral("FormHint"));
+    batchHint->setWordWrap(true);
+    convForm->addRow(QString(), batchHint);
     contentLayout->addLayout(convForm);
 
     // ------------------------------------------------------------- Labels

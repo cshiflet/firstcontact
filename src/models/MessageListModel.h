@@ -162,7 +162,7 @@ signals:
 private:
     enum class Source { None, ByLabel, BySearch, CrossAccountLabel, AllMail };
 
-    int  pageSize() const { return 100; }
+    int  pageSize() const;
     void loadFirstPage();
 
     std::vector<Message> rows_;

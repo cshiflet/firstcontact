@@ -1,5 +1,7 @@
 #include "Preferences.h"
 
+#include "util/PageSizePref.h"
+
 #include <QDir>
 #include <QSettings>
 #include <QStandardPaths>
@@ -240,5 +242,8 @@ void Preferences::setLinkDisplayMode(fc::util::LinkDisplayMode m) {
                     : QStringLiteral("labeled"));
     s.sync();
 }
+
+int  Preferences::messagePageSize()      { return fc::util::messagePageSize(); }
+void Preferences::setMessagePageSize(int n) { fc::util::setMessagePageSize(n); }
 
 }  // namespace fc::ui
