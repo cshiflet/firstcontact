@@ -2140,12 +2140,13 @@ void MainWindow::refreshListFooter() {
 
     if (topUpsInFlight_ > 0) {
         target = FooterState::Loading;
-    } else if (isSyncing_ && listModel_->messageRowCount() == 0) {
-        // Empty list during initial / incremental sync — surface the
-        // "Loading more messages..." placeholder so the user has
-        // visible feedback that work is happening. For lists with real
-        // rows the toolbar refresh-spinner is enough; a footer row
-        // there would just confuse "loading older" with "refreshing".
+    } else if (isSyncing_) {
+        // Active sync on the current account — surface the
+        // "Loading more messages..." placeholder regardless of how
+        // many rows are already loaded. The toolbar spinner alone
+        // wasn't enough feedback; the user explicitly wants the
+        // in-list message any time the list they're looking at is
+        // being synced.
         target = FooterState::Loading;
     } else {
         const QString labelId = listModel_->sourceLabelId();
