@@ -67,6 +67,7 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    qt6-svg-dev libqt6svg6 \
 	    libsecret-1-dev qtkeychain-qt6-dev \
 	    libsqlite3-dev sqlite3 \
+	    libzstd-dev \
 	    libxkbcommon-dev \
 	    librsvg2-bin appstream xvfb \
 	    xdg-utils
@@ -83,6 +84,7 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	    qt6-qtdeclarative-devel qt6-qt5compat-devel \
 	    qt6-qtsvg-devel \
 	    qt6-qtkeychain-devel libsecret-devel sqlite-devel \
+	    libzstd-devel \
 	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb
 
 setup-arch: ## Install build deps via pacman (Arch / Manjaro).
@@ -90,7 +92,7 @@ setup-arch: ## Install build deps via pacman (Arch / Manjaro).
 	    base-devel cmake ninja git curl \
 	    qt6-base qt6-tools qt6-networkauth qt6-declarative \
 	    qt6-svg \
-	    qtkeychain-qt6 libsecret sqlite \
+	    qtkeychain-qt6 libsecret sqlite zstd \
 	    librsvg appstream xorg-server-xvfb
 
 tools: $(LINUXDEPLOY_DIR)/linuxdeploy $(LINUXDEPLOY_DIR)/linuxdeploy-plugin-qt  ## Fetch linuxdeploy + qt plugin into ~/.local/bin.

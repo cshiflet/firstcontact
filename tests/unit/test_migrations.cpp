@@ -48,7 +48,7 @@ private slots:
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 7);   // bump on each schema change
+            QCOMPARE(q.value(0).toInt(), 8);   // bump on each schema change
 
             // body_html column landed in v3.
             QVERIFY(q.exec(QStringLiteral(

@@ -5,6 +5,7 @@
 #include "auth/OAuthClient.h"
 #include "auth/TokenStore.h"
 #include "cache/Database.h"
+#include "cache/MessageRepository.h"
 #include "cache/Migrations.h"
 #include "sync/SyncService.h"
 
@@ -366,6 +367,13 @@ bool AccountManager::dropCache(const QString& id) {
                  qUtf8Printable(db.lastError().text()));
         return false;
     }
+    // Bulk delete bypassed the per-row FTS5 maintenance in
+    // MessageRepository — sync the index now (rebuilds from the
+    // surviving messages, so dropped accounts' tokens vanish).
+    fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    // Drop the cached compression dictionary too — the dict was
+    // trained against the now-deleted bodies.
+    fc::cache::MessageRepository::invalidateDictionaryCache(id);
     emit cacheCleared(id);
     return true;
 }
@@ -496,7 +504,9 @@ int AccountManager::clearMessagesOlderThan(const QString& id, int days) {
                  qUtf8Printable(q.lastError().text()));
         return 0;
     }
-    return q.numRowsAffected();
+    const int n = q.numRowsAffected();
+    if (n > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    return n;
 }
 
 int AccountManager::clearMessagesToTargetSize(const QString& id,
@@ -557,6 +567,7 @@ int AccountManager::clearMessagesToTargetSize(const QString& id,
         }
         deleted += del.numRowsAffected();
     }
+    if (deleted > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
     return deleted;
 }
 

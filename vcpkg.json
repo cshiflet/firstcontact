@@ -5,7 +5,8 @@
     "description": "Native Gmail client built on Qt 6",
     "license": "AGPL-3.0-only",
     "dependencies": [
-        { "name": "qtkeychain-qt6", "default-features": false }
+        { "name": "qtkeychain-qt6", "default-features": false },
+        "zstd"
     ],
     "features": {
         "tests": {

@@ -22,6 +22,13 @@ include(CompilerWarnings)
 include(Sanitizers)
 include(Qt6Setup)
 
+# libzstd: message-body compression with per-account trained dictionary.
+# System package (apt: libzstd-dev / dnf: libzstd-devel / pacman: zstd /
+# vcpkg: zstd). pkg-config is the most portable lookup; the IMPORTED
+# target keeps target_link_libraries call sites clean across platforms.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+
 add_subdirectory(src)
 
 if(FC_BUILD_TESTS)

@@ -99,6 +99,36 @@ public:
                                                     const QString& id,
                                                     qint64 wakeAtMs);
     static QStringList              dueSnoozeWakeups(const QString& accountId);
+
+    // ---------- Body compression dictionary slot ----------
+
+    // Per-account zstd training dictionary. Stored in the
+    // body_compression_dict table; cached per process so reads are
+    // cheap. Empty dict means "no dictionary trained yet" — codec
+    // calls fall through to plaintext.
+    static QByteArray dictionaryFor(const QString& accountId);
+    static void       saveDictionary(const QString& accountId,
+                                      const QByteArray& dict,
+                                      int sampleCount,
+                                      qint64 sampleBytes);
+    // Invalidate the in-memory dict cache for an account. Called when
+    // the user runs the "Recompress" workflow, after dropCache, etc.
+    static void       invalidateDictionaryCache(const QString& accountId);
+
+    // Number of messages on this account that have a non-empty
+    // body_text. Drives the "we have enough bodies to train" check
+    // for the auto-train trigger.
+    static int        bodyCountFor(const QString& accountId);
+
+    // ---------- FTS5 maintenance ----------
+
+    // Wipes the FTS5 index entries for messages this account no
+    // longer has (i.e. anything in messages_fts whose rowid doesn't
+    // map back to a live `messages` row). Used by bulk-delete paths
+    // (dropCache / clearMessagesOlderThan / clearMessagesToTargetSize)
+    // that drop rows wholesale; per-row upsert/delete paths keep FTS
+    // in sync inline.
+    static void       reconcileFtsForAccount(const QString& accountId);
 };
 
 }  // namespace fc::cache

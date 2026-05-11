@@ -44,7 +44,7 @@ private slots:
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 7);
+            QCOMPARE(q.value(0).toInt(), 8);
 
             // No legacy seed row should be created on a fresh install.
             QVERIFY(q.exec(QStringLiteral("SELECT COUNT(*) FROM accounts")));
@@ -72,10 +72,18 @@ private slots:
             db.setDatabaseName(path);
             QVERIFY(db.open());
 
-            // Run the supported chain to v7, then roll the version row
-            // back to 6 and re-mint the legacy seed accounts row to
-            // simulate a "upgrading from a previously-v6 cache that
-            // still carries the old seed".
+            // Run the supported chain to the latest, then roll the
+            // version row back to 6 and re-mint the legacy seed accounts
+            // row to simulate "upgrading from a previously-v6 cache
+            // that still carries the old seed".
+            //
+            // The full v6 → latest replay would require undoing the
+            // additive changes that landed in later migrations
+            // (body_compression column from v8, body_compression_dict
+            // table) — without that, the re-applied v8 step would
+            // fail on "column already exists" / "table already
+            // exists". Drop those v8 artifacts first so the replay
+            // sees the v6-shape they expect.
             fc::cache::Migrations::run(db);
 
             QSqlQuery q(db);
@@ -85,15 +93,21 @@ private slots:
                 "       0, strftime('%s','now')*1000, 1)")));
             QVERIFY(q.exec(QStringLiteral(
                 "UPDATE meta SET value = '6' WHERE key = 'schema_version'")));
+            // Undo v8's additive schema so the replay actually sees v6.
+            // SQLite 3.35+ supports DROP COLUMN; the v8 ALTER TABLE
+            // ADD COLUMN can be reversed cleanly.
+            QVERIFY(q.exec(QStringLiteral("DROP TABLE IF EXISTS body_compression_dict")));
+            QVERIFY(q.exec(QStringLiteral(
+                "ALTER TABLE messages DROP COLUMN body_compression")));
 
-            // Re-run the migrator: it should bump 6 → 7 and drop the
-            // legacy seed in the process.
+            // Re-run the migrator: it should walk 6 → 7 → 8 and
+            // drop the legacy seed along the way.
             fc::cache::Migrations::run(db);
 
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 7);
+            QCOMPARE(q.value(0).toInt(), 8);
 
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT COUNT(*) FROM accounts WHERE id = "

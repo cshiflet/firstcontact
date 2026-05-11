@@ -252,6 +252,20 @@ void Migrations::run(QSqlDatabase& db) {
             setSchemaVersion(db, 7);
         });
     }
+    if (v < 8) {
+        // zstd-with-dictionary body compression. Drops the trigger-based
+        // FTS5 maintenance (which couldn't read compressed bodies),
+        // adds a body_compression flag column, and creates the per-
+        // account dictionary table. The FTS5 virtual table itself
+        // survives — MessageRepository now keeps it in sync from C++
+        // upsert/delete paths (which still see plaintext bodies even
+        // when the column stores compressed bytes).
+        runStep(db, [&] {
+            execAll(db, readResource(
+                QStringLiteral(":/schema/0008_body_compression.sql")));
+            setSchemaVersion(db, 8);
+        });
+    }
 }
 
 }  // namespace fc::cache

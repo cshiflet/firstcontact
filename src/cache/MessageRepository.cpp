@@ -3,11 +3,15 @@
 #include "AttachmentRepository.h"
 #include "Database.h"
 #include "Migrations.h"
+#include "util/BodyCodec.h"
 
 #include <QDateTime>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -32,6 +36,121 @@ QStringList splitJsonArray(const QString& s) {
     return out;
 }
 
+// ---------- Per-account compression dictionary cache ----------
+//
+// Loaded lazily from body_compression_dict on first dictionaryFor()
+// call, then reused by every compress/decompress in the process.
+// Multiple threads (UI + each sync thread) may call this; guard the
+// cache with a mutex. Cache invalidation happens on saveDictionary +
+// drop-cache hooks via invalidateDictionaryCache().
+QMutex                     g_dictMutex;
+QHash<QString, QByteArray> g_dictCache;
+QSet<QString>              g_dictLoaded;   // empty dict still counts as "loaded"
+
+QByteArray loadDictFromDb(const QString& accountId) {
+    if (accountId.isEmpty()) return {};
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT dict FROM body_compression_dict WHERE account_id = :a"));
+    q.bindValue(QStringLiteral(":a"), accountId);
+    if (!q.exec() || !q.next()) return {};
+    return q.value(0).toByteArray();
+}
+
+QByteArray dictFor(const QString& accountId) {
+    if (accountId.isEmpty()) return {};
+    QMutexLocker lock(&g_dictMutex);
+    if (g_dictLoaded.contains(accountId)) {
+        return g_dictCache.value(accountId);
+    }
+    // Drop the lock for the DB read so concurrent threads can still
+    // hit the cache for other accounts. A racing parallel load is
+    // harmless (one of two identical dictionaries wins the insert).
+    lock.unlock();
+    QByteArray dict = loadDictFromDb(accountId);
+    lock.relock();
+    g_dictCache.insert(accountId, dict);
+    g_dictLoaded.insert(accountId);
+    return dict;
+}
+
+// Compress / decompress wrappers that look up the per-account dict
+// once. Empty dict (no training yet) leaves payloads as plaintext.
+QByteArray compressBody(const QString& accountId, const QString& plain) {
+    if (plain.isEmpty()) return {};
+    const QByteArray dict = dictFor(accountId);
+    if (dict.isEmpty()) return plain.toUtf8();   // pass-through
+    return fc::util::BodyCodec::compress(plain.toUtf8(), dict);
+}
+
+QString decompressBody(const QString& accountId, const QByteArray& bytes) {
+    if (bytes.isEmpty()) return {};
+    if (!fc::util::BodyCodec::isCompressed(bytes)) {
+        // Plaintext row (legacy or post-pass-through). Interpret as
+        // UTF-8 — same semantics as the previous QVariant.toString().
+        return QString::fromUtf8(bytes);
+    }
+    const QByteArray dict = dictFor(accountId);
+    return QString::fromUtf8(
+        fc::util::BodyCodec::decompress(bytes, dict));
+}
+
+// ---------- Programmatic FTS5 maintenance ----------
+//
+// The 0006 trigger-based maintenance (messages_ai/au/ad) was dropped
+// in migration 0008 because triggers can't see plaintext body when
+// the column persists compressed bytes. These helpers replicate what
+// the triggers did, called from upsertOneNoTxn / single-row delete
+// paths. Bulk deletes call reconcileFtsForAccount() instead.
+
+void ftsDeleteByRowid(QSqlDatabase& db,
+                       qint64 rowid,
+                       const QString& subject,
+                       const QString& fromText,
+                       const QString& bodyText,
+                       const QString& snippet,
+                       const QString& accountId) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO messages_fts(messages_fts, rowid, subject, from_text, "
+        "                          body, snippet, account_id) "
+        "VALUES ('delete', :rowid, :subject, :from_text, :body, :snippet, :a)"));
+    q.bindValue(QStringLiteral(":rowid"),     rowid);
+    q.bindValue(QStringLiteral(":subject"),   subject);
+    q.bindValue(QStringLiteral(":from_text"), fromText);
+    q.bindValue(QStringLiteral(":body"),      bodyText);
+    q.bindValue(QStringLiteral(":snippet"),   snippet);
+    q.bindValue(QStringLiteral(":a"),         accountId);
+    if (!q.exec()) {
+        qWarning("ftsDeleteByRowid: %s",
+                 qUtf8Printable(q.lastError().text()));
+    }
+}
+
+void ftsInsert(QSqlDatabase& db,
+                qint64 rowid,
+                const QString& subject,
+                const QString& fromText,
+                const QString& bodyText,
+                const QString& snippet,
+                const QString& accountId) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO messages_fts(rowid, subject, from_text, body, "
+        "                          snippet, account_id) "
+        "VALUES (:rowid, :subject, :from_text, :body, :snippet, :a)"));
+    q.bindValue(QStringLiteral(":rowid"),     rowid);
+    q.bindValue(QStringLiteral(":subject"),   subject);
+    q.bindValue(QStringLiteral(":from_text"), fromText);
+    q.bindValue(QStringLiteral(":body"),      bodyText);
+    q.bindValue(QStringLiteral(":snippet"),   snippet);
+    q.bindValue(QStringLiteral(":a"),         accountId);
+    if (!q.exec()) {
+        qWarning("ftsInsert: %s", qUtf8Printable(q.lastError().text()));
+    }
+}
+
 fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     fc::Message m;
     // Cross-account paths pass accountId="" and let the row's
@@ -53,8 +172,15 @@ fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     m.replyTo         = q.value(QStringLiteral("reply_to")).toString();
     m.subject         = q.value(QStringLiteral("subject")).toString();
     m.snippet         = q.value(QStringLiteral("snippet")).toString();
-    m.bodyText        = q.value(QStringLiteral("body_text")).toString();
-    m.bodyHtml        = q.value(QStringLiteral("body_html")).toString();
+    // body_text / body_html may be stored as compressed BLOB once a
+    // dictionary is trained. Always read as bytes + route through the
+    // codec — for plaintext (no magic prefix), decompressBody returns
+    // the bytes as a UTF-8 QString, same as the legacy
+    // QVariant.toString() did.
+    m.bodyText        = decompressBody(m.accountId,
+                            q.value(QStringLiteral("body_text")).toByteArray());
+    m.bodyHtml        = decompressBody(m.accountId,
+                            q.value(QStringLiteral("body_html")).toByteArray());
     m.bodyHtmlPresent = q.value(QStringLiteral("body_html_present")).toBool();
     m.isUnread        = q.value(QStringLiteral("is_unread")).toBool();
     m.isStarred       = q.value(QStringLiteral("is_starred")).toBool();
@@ -232,6 +358,34 @@ void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
 // per call and upsertMany() can wrap one transaction across N calls.
 static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
                               const fc::Message& m) {
+    // 0. Snapshot the row's pre-update FTS-relevant fields (if it
+    // exists) so we can issue an FTS5 'delete' against the old
+    // content before re-inserting the new content. With the v0006
+    // triggers gone (migration 0008), nothing else does this for us.
+    qint64  oldRowid    = -1;
+    QString oldSubject, oldFromText, oldBodyText, oldSnippet;
+    {
+        QSqlQuery snap(db);
+        snap.prepare(QStringLiteral(
+            "SELECT rowid, subject, from_name, from_addr, body_text, snippet "
+            "FROM messages WHERE account_id = :a AND id = :id"));
+        snap.bindValue(QStringLiteral(":a"),  accountId);
+        snap.bindValue(QStringLiteral(":id"), m.id);
+        if (snap.exec() && snap.next()) {
+            oldRowid    = snap.value(0).toLongLong();
+            oldSubject  = snap.value(1).toString();
+            oldFromText = snap.value(2).toString() + QLatin1Char(' ')
+                        + snap.value(3).toString();
+            // body_text may be compressed bytes; decompress so the
+            // FTS5 'delete' sees the same tokens we originally
+            // indexed. (FTS5 derives the token list from the
+            // supplied content during 'delete'.)
+            oldBodyText = decompressBody(accountId,
+                              snap.value(4).toByteArray());
+            oldSnippet  = snap.value(5).toString();
+        }
+    }
+
     // 1. Thread upsert (composite PK on account_id + id).
     {
         QSqlQuery threadUp(db);
@@ -257,19 +411,29 @@ static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
     }
 
     QSqlQuery q(db);
+    // Compress body fields once before binding. Empty dict = identity
+    // → bytes are the UTF-8 plaintext, same on-disk shape as before
+    // compression landed.
+    const QByteArray bodyTextBytes = compressBody(accountId, m.bodyText);
+    const QByteArray bodyHtmlBytes = compressBody(accountId, m.bodyHtml);
+    const int bodyCompFlag =
+        (fc::util::BodyCodec::isCompressed(bodyTextBytes)
+         || fc::util::BodyCodec::isCompressed(bodyHtmlBytes))
+        ? 1 : 0;
+
     q.prepare(QStringLiteral(
         "INSERT INTO messages(account_id, id, thread_id, history_id, "
         "  internal_date, size_estimate, from_addr, from_name, to_addrs, "
         "  cc_addrs, bcc_addrs, reply_to, subject, snippet, is_unread, "
         "  is_starred, is_important, has_attachment, body_text, body_html, "
         "  body_html_present, fetched_format, bytes_cached, last_accessed_at, "
-        "  created_at) "
+        "  body_compression, created_at) "
         "VALUES(:a, :id, :thread_id, :history_id, :internal_date, "
         "  :size_estimate, :from_addr, :from_name, :to_addrs, :cc_addrs, "
         "  :bcc_addrs, :reply_to, :subject, :snippet, :is_unread, :is_starred, "
         "  :is_important, :has_attachment, :body_text, :body_html, "
         "  :body_html_present, :fetched_format, :bytes_cached, "
-        "  :last_accessed_at, :created_at) "
+        "  :last_accessed_at, :body_compression, :created_at) "
         "ON CONFLICT(account_id, id) DO UPDATE SET "
         "  history_id     = excluded.history_id, "
         "  internal_date  = excluded.internal_date, "
@@ -285,9 +449,18 @@ static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
         "  is_starred     = excluded.is_starred, "
         "  is_important   = excluded.is_important, "
         "  has_attachment = excluded.has_attachment, "
-        "  body_text      = COALESCE(NULLIF(excluded.body_text, ''), messages.body_text), "
-        "  body_html      = COALESCE(NULLIF(excluded.body_html, ''), messages.body_html), "
+        // body_text / body_html: only overwrite if the incoming body
+        // is non-empty. NULLIF on a BLOB returns NULL when the value
+        // equals zero-length blob, which is what we want for the
+        // metadata-only upsert path.
+        "  body_text      = COALESCE(NULLIF(excluded.body_text, X''), messages.body_text), "
+        "  body_html      = COALESCE(NULLIF(excluded.body_html, X''), messages.body_html), "
         "  body_html_present = excluded.body_html_present, "
+        "  body_compression  = CASE "
+        "    WHEN excluded.body_text IS NULL OR length(excluded.body_text) = 0 "
+        "      THEN messages.body_compression "
+        "    ELSE excluded.body_compression "
+        "  END, "
         "  fetched_format = excluded.fetched_format"));
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -309,15 +482,19 @@ static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
     q.bindValue(QStringLiteral(":is_starred"),        m.isStarred ? 1 : 0);
     q.bindValue(QStringLiteral(":is_important"),      m.isImportant ? 1 : 0);
     q.bindValue(QStringLiteral(":has_attachment"),    m.hasAttachment ? 1 : 0);
-    q.bindValue(QStringLiteral(":body_text"),         m.bodyText);
-    q.bindValue(QStringLiteral(":body_html"),         m.bodyHtml);
+    q.bindValue(QStringLiteral(":body_text"),         bodyTextBytes);
+    q.bindValue(QStringLiteral(":body_html"),         bodyHtmlBytes);
     q.bindValue(QStringLiteral(":body_html_present"), m.bodyHtmlPresent ? 1 : 0);
     q.bindValue(QStringLiteral(":fetched_format"),
                 m.bodyText.isEmpty() ? QStringLiteral("metadata")
                                      : QStringLiteral("full"));
+    // bytes_cached tracks the on-disk footprint (the BLOB size, not
+    // the plaintext size) so the Cache Manager dialog's totals
+    // reflect what compression actually saved.
     q.bindValue(QStringLiteral(":bytes_cached"),
-                m.bodyText.size() + m.bodyHtml.size());
+                bodyTextBytes.size() + bodyHtmlBytes.size());
     q.bindValue(QStringLiteral(":last_accessed_at"), now);
+    q.bindValue(QStringLiteral(":body_compression"), bodyCompFlag);
     q.bindValue(QStringLiteral(":created_at"),       now);
 
     if (!q.exec()) {
@@ -325,12 +502,56 @@ static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
                  qUtf8Printable(q.lastError().text()));
         return 0;
     }
+
     // Label edges + attachments (each does its own SQL inside the
     // same outer transaction — these helpers don't open one of
     // their own).
     writeLabelEdges(db, accountId, m.id, m.labelIds);
     AttachmentRepository::replaceForMessage(accountId, m.id, m.attachments);
-    return q.lastInsertId().toLongLong();
+
+    // FTS5 maintenance — replicates what the dropped v0006 triggers
+    // did. For UPSERTs that updated an existing row, 'delete' the
+    // pre-update content first; then INSERT the new content. The
+    // body fed to FTS is always the plaintext (m.bodyText), even
+    // when the column persists compressed bytes.
+    qint64 newRowid = 0;
+    {
+        QSqlQuery rowidQ(db);
+        rowidQ.prepare(QStringLiteral(
+            "SELECT rowid FROM messages WHERE account_id = :a AND id = :id"));
+        rowidQ.bindValue(QStringLiteral(":a"),  accountId);
+        rowidQ.bindValue(QStringLiteral(":id"), m.id);
+        if (rowidQ.exec() && rowidQ.next()) {
+            newRowid = rowidQ.value(0).toLongLong();
+        }
+    }
+    if (oldRowid >= 0) {
+        ftsDeleteByRowid(db, oldRowid, oldSubject, oldFromText,
+                         oldBodyText, oldSnippet, accountId);
+    }
+    if (newRowid > 0) {
+        const QString newFromText = m.fromName.isEmpty()
+            ? m.fromAddr
+            : (m.fromName + QLatin1Char(' ') + m.fromAddr);
+        // Only feed body to FTS when the incoming upsert carries it.
+        // For metadata-only upserts (m.bodyText empty), we'd lose
+        // the previously-indexed body terms by re-inserting an
+        // empty body — so on that path, skip the FTS insert; the
+        // pre-update FTS row is still there for the body, only the
+        // metadata fields are stale.
+        if (!m.bodyText.isEmpty() || oldRowid < 0) {
+            ftsInsert(db, newRowid, m.subject, newFromText,
+                      m.bodyText, m.snippet, accountId);
+        } else if (oldRowid >= 0) {
+            // Metadata-only upsert: re-insert with the OLD body so
+            // body tokens stay indexed, but with the NEW subject /
+            // from / snippet so a sender/subject change shows up
+            // in search results.
+            ftsInsert(db, newRowid, m.subject, newFromText,
+                      oldBodyText, m.snippet, accountId);
+        }
+    }
+    return newRowid;
 }
 
 int MessageRepository::upsertMany(const QString& accountId,
@@ -1047,5 +1268,91 @@ std::vector<fc::Message> MessageRepository::searchFtsThreadsAllAccounts(
     return out;
 }
 
+// ----------------------------------------------------------------------
+// Compression-dictionary slot
+
+QByteArray MessageRepository::dictionaryFor(const QString& accountId) {
+    return dictFor(accountId);
+}
+
+void MessageRepository::saveDictionary(const QString& accountId,
+                                        const QByteArray& dict,
+                                        int sampleCount,
+                                        qint64 sampleBytes) {
+    if (accountId.isEmpty()) return;
+    auto db = databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO body_compression_dict("
+        "    account_id, dict, version, created_at, sample_count, sample_bytes) "
+        "VALUES(:a, :d, 1, :t, :sc, :sb) "
+        "ON CONFLICT(account_id) DO UPDATE SET "
+        "  dict         = excluded.dict, "
+        "  version      = excluded.version, "
+        "  created_at   = excluded.created_at, "
+        "  sample_count = excluded.sample_count, "
+        "  sample_bytes = excluded.sample_bytes"));
+    q.bindValue(QStringLiteral(":a"),  accountId);
+    q.bindValue(QStringLiteral(":d"),  dict);
+    q.bindValue(QStringLiteral(":t"),  QDateTime::currentMSecsSinceEpoch());
+    q.bindValue(QStringLiteral(":sc"), sampleCount);
+    q.bindValue(QStringLiteral(":sb"), sampleBytes);
+    if (!q.exec()) {
+        qWarning("MessageRepository::saveDictionary (%s): %s",
+                 qUtf8Printable(accountId),
+                 qUtf8Printable(q.lastError().text()));
+        return;
+    }
+    // Refresh cache so the next compress/decompress sees the new dict.
+    QMutexLocker lock(&g_dictMutex);
+    g_dictCache.insert(accountId, dict);
+    g_dictLoaded.insert(accountId);
+}
+
+void MessageRepository::invalidateDictionaryCache(const QString& accountId) {
+    QMutexLocker lock(&g_dictMutex);
+    if (accountId.isEmpty()) {
+        g_dictCache.clear();
+        g_dictLoaded.clear();
+    } else {
+        g_dictCache.remove(accountId);
+        g_dictLoaded.remove(accountId);
+    }
+}
+
+int MessageRepository::bodyCountFor(const QString& accountId) {
+    if (accountId.isEmpty()) return 0;
+    auto db = databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM messages "
+        "WHERE account_id = :a "
+        "  AND body_text IS NOT NULL "
+        "  AND length(body_text) > 0"));
+    q.bindValue(QStringLiteral(":a"), accountId);
+    if (!q.exec() || !q.next()) return 0;
+    return q.value(0).toInt();
+}
+
+// ----------------------------------------------------------------------
+// Bulk FTS reconciliation. Used after wholesale row deletes (dropCache,
+// clearMessagesOlderThan, clearMessagesToTargetSize) where doing
+// per-row FTS 'delete' would require fetching every row's content
+// before the delete. The 'rebuild' command walks the live messages
+// table and re-derives the index — slow (O(N) over the table) but
+// safe and correct.
+void MessageRepository::reconcileFtsForAccount(const QString& accountId) {
+    Q_UNUSED(accountId);
+    auto db = databaseHandle();
+    QSqlQuery q(db);
+    // FTS5 'rebuild' is global (rebuilds the entire content='messages'
+    // index). Per-account scoping isn't supported by FTS5 — the
+    // tradeoff is one O(total messages) rebuild per bulk delete.
+    if (!q.exec(QStringLiteral(
+            "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"))) {
+        qWarning("reconcileFtsForAccount: %s",
+                 qUtf8Printable(q.lastError().text()));
+    }
+}
 
 }  // namespace fc::cache
