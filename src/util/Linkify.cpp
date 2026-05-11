@@ -129,8 +129,12 @@ QString decodeEntitiesInline(QString s) {
         const bool hex = !m.captured(1).isEmpty();
         bool ok = false;
         const uint cp = m.captured(2).toUInt(&ok, hex ? 16 : 10);
+        // Codepoints above U+FFFF need a UTF-16 surrogate pair —
+        // QChar(uint) only holds 16 bits and asserts at > 0xFFFF.
+        // QString::fromUcs4 does the encoding for us.
         if (ok && cp != 0 && cp <= 0x10FFFF) {
-            out.append(QChar(cp));
+            const char32_t cps = static_cast<char32_t>(cp);
+            out += QString::fromUcs4(&cps, 1);
         } else {
             out.append(m.captured(0));   // leave malformed alone
         }

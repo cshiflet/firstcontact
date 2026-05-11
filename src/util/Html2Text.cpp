@@ -39,7 +39,15 @@ QString decodeEntitiesImpl(QString s) {
         const bool hex = !m.captured(1).isEmpty();
         bool ok = false;
         const uint cp = m.captured(2).toUInt(&ok, hex ? 16 : 10);
-        if (ok && cp != 0) out.append(QChar(cp));
+        // QChar holds a single UTF-16 code unit (16 bits). Codepoints
+        // above U+FFFF (most emoji, supplementary planes) have to be
+        // encoded as a surrogate pair; constructing QChar(cp) directly
+        // with cp > 0xFFFF triggers a Qt assertion. QString::fromUcs4
+        // handles the encoding for us.
+        if (ok && cp != 0 && cp <= 0x10FFFF) {
+            const char32_t cps = static_cast<char32_t>(cp);
+            out += QString::fromUcs4(&cps, 1);
+        }
         idx = m.capturedEnd();
     }
     out.append(s.mid(idx));

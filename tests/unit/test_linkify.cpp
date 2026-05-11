@@ -156,6 +156,15 @@ private slots:
         const auto hex = fc::util::linkifyPlainText(
             QStringLiteral("Lorem &#x34F; ipsum"));
         QVERIFY(hex.contains(QChar(0x34F)));
+
+        // Emoji (codepoint > U+FFFF) must round-trip through a
+        // UTF-16 surrogate pair, not crash QChar's 16-bit
+        // assertion. &#128512; = U+1F600 grinning face.
+        const auto emoji = fc::util::linkifyPlainText(
+            QStringLiteral("hi &#128512; there"));
+        const char32_t expectedCp = 0x1F600;
+        QVERIFY(emoji.contains(QString::fromUcs4(&expectedCp, 1)));
+        QVERIFY(!emoji.contains(QStringLiteral("&#128512;")));
     }
 
     void decodesNamedEntityReferences() {
