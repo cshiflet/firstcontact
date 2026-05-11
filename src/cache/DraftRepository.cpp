@@ -174,29 +174,4 @@ void DraftRepository::remove(const QString& accountId, const QString& id) {
     q.exec();
 }
 
-// ---------- legacy zero-arg overloads ----------
-
-QString DraftRepository::upsert(const DraftRow& d) {
-    const QString aid = d.accountId.isEmpty()
-        ? Database::defaultAccountId()
-        : d.accountId;
-    return upsert(aid, d);
-}
-std::vector<DraftRow> DraftRepository::listLocal() {
-    return listLocal(Database::defaultAccountId());
-}
-DraftRow DraftRepository::byId(const QString& id) {
-    return byId(Database::defaultAccountId(), id);
-}
-std::vector<DraftRow> DraftRepository::dirtyDrafts() {
-    return dirtyDrafts(Database::defaultAccountId());
-}
-void DraftRepository::markSynced(const QString& localId,
-                                  const QString& gmailDraftId) {
-    markSynced(Database::defaultAccountId(), localId, gmailDraftId);
-}
-void DraftRepository::remove(const QString& id) {
-    remove(Database::defaultAccountId(), id);
-}
-
 }  // namespace fc::cache

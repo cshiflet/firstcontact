@@ -152,29 +152,4 @@ void LabelRepository::recomputeCounts(const QString& accountId) {
     q.exec();
 }
 
-// ---------- legacy zero-arg overloads ----------
-
-void LabelRepository::upsert(const LabelRow& l) {
-    const QString aid = l.accountId.isEmpty()
-        ? Database::defaultAccountId()
-        : l.accountId;
-    upsert(aid, l);
-}
-
-std::vector<LabelRow> LabelRepository::all() {
-    return all(Database::defaultAccountId());
-}
-
-LabelRow LabelRepository::byId(const QString& id) {
-    return byId(Database::defaultAccountId(), id);
-}
-
-void LabelRepository::remove(const QString& id) {
-    remove(Database::defaultAccountId(), id);
-}
-
-void LabelRepository::recomputeCounts() {
-    recomputeCounts(Database::defaultAccountId());
-}
-
 }  // namespace fc::cache

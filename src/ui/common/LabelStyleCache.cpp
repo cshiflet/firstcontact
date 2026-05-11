@@ -1,6 +1,5 @@
 #include "LabelStyleCache.h"
 
-#include "cache/Database.h"
 #include "cache/LabelRepository.h"
 
 namespace fc::ui {
@@ -10,11 +9,7 @@ LabelStyleCache& LabelStyleCache::instance() {
     return cache;
 }
 
-LabelStyleCache::LabelStyleCache() {
-    // Hot-path the initial load so views constructed before the first
-    // sync still have something useful to paint.
-    invalidate();
-}
+LabelStyleCache::LabelStyleCache() = default;
 
 void LabelStyleCache::invalidate(const QString& accountId) {
     cache_.clear();
@@ -29,10 +24,6 @@ void LabelStyleCache::invalidate(const QString& accountId) {
         }
     }
     emit changed();
-}
-
-void LabelStyleCache::invalidate() {
-    invalidate(fc::cache::Database::defaultAccountId());
 }
 
 LabelStyleCache::Style LabelStyleCache::get(const QString& labelId) const {

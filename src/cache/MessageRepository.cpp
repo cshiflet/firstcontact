@@ -223,6 +223,144 @@ void hydrateThreadAggregates(QSqlQuery& q, fc::Message& m) {
 
 }  // namespace
 
+// Runs the 3-step write (thread + message + label edges + attachments)
+// for one message INSIDE the caller's transaction. Returns the
+// inserted rowid (>0) on success, 0 on failure (caller decides
+// whether to rollback the outer transaction or just skip).
+//
+// Extracted so the public upsert() can wrap a single transaction
+// per call and upsertMany() can wrap one transaction across N calls.
+static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
+                              const fc::Message& m) {
+    // 1. Thread upsert (composite PK on account_id + id).
+    {
+        QSqlQuery threadUp(db);
+        threadUp.prepare(QStringLiteral(
+            "INSERT INTO threads(account_id, id, history_id, snippet, "
+            "                     last_message_internal_date) "
+            "VALUES(:a, :id, :h, :s, :d) "
+            "ON CONFLICT(account_id, id) DO UPDATE SET "
+            "  history_id = excluded.history_id, "
+            "  snippet    = excluded.snippet, "
+            "  last_message_internal_date = MAX(threads.last_message_internal_date, "
+            "                                   excluded.last_message_internal_date)"));
+        threadUp.bindValue(QStringLiteral(":a"),  accountId);
+        threadUp.bindValue(QStringLiteral(":id"), m.threadId);
+        threadUp.bindValue(QStringLiteral(":h"),  m.historyId);
+        threadUp.bindValue(QStringLiteral(":s"),  m.snippet);
+        threadUp.bindValue(QStringLiteral(":d"),  m.internalDate);
+        if (!threadUp.exec()) {
+            qWarning("MessageRepository::upsert (thread): %s",
+                     qUtf8Printable(threadUp.lastError().text()));
+            return 0;
+        }
+    }
+
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO messages(account_id, id, thread_id, history_id, "
+        "  internal_date, size_estimate, from_addr, from_name, to_addrs, "
+        "  cc_addrs, bcc_addrs, reply_to, subject, snippet, is_unread, "
+        "  is_starred, is_important, has_attachment, body_text, body_html, "
+        "  body_html_present, fetched_format, bytes_cached, last_accessed_at, "
+        "  created_at) "
+        "VALUES(:a, :id, :thread_id, :history_id, :internal_date, "
+        "  :size_estimate, :from_addr, :from_name, :to_addrs, :cc_addrs, "
+        "  :bcc_addrs, :reply_to, :subject, :snippet, :is_unread, :is_starred, "
+        "  :is_important, :has_attachment, :body_text, :body_html, "
+        "  :body_html_present, :fetched_format, :bytes_cached, "
+        "  :last_accessed_at, :created_at) "
+        "ON CONFLICT(account_id, id) DO UPDATE SET "
+        "  history_id     = excluded.history_id, "
+        "  internal_date  = excluded.internal_date, "
+        "  from_addr      = excluded.from_addr, "
+        "  from_name      = excluded.from_name, "
+        "  to_addrs       = excluded.to_addrs, "
+        "  cc_addrs       = excluded.cc_addrs, "
+        "  bcc_addrs      = excluded.bcc_addrs, "
+        "  reply_to       = excluded.reply_to, "
+        "  subject        = excluded.subject, "
+        "  snippet        = excluded.snippet, "
+        "  is_unread      = excluded.is_unread, "
+        "  is_starred     = excluded.is_starred, "
+        "  is_important   = excluded.is_important, "
+        "  has_attachment = excluded.has_attachment, "
+        "  body_text      = COALESCE(NULLIF(excluded.body_text, ''), messages.body_text), "
+        "  body_html      = COALESCE(NULLIF(excluded.body_html, ''), messages.body_html), "
+        "  body_html_present = excluded.body_html_present, "
+        "  fetched_format = excluded.fetched_format"));
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    q.bindValue(QStringLiteral(":a"),                 accountId);
+    q.bindValue(QStringLiteral(":id"),                m.id);
+    q.bindValue(QStringLiteral(":thread_id"),         m.threadId);
+    q.bindValue(QStringLiteral(":history_id"),        m.historyId);
+    q.bindValue(QStringLiteral(":internal_date"),     m.internalDate);
+    q.bindValue(QStringLiteral(":size_estimate"),     m.sizeEstimate);
+    q.bindValue(QStringLiteral(":from_addr"),         m.fromAddr);
+    q.bindValue(QStringLiteral(":from_name"),         m.fromName);
+    q.bindValue(QStringLiteral(":to_addrs"),          joinJsonArray(m.toAddrs));
+    q.bindValue(QStringLiteral(":cc_addrs"),          joinJsonArray(m.ccAddrs));
+    q.bindValue(QStringLiteral(":bcc_addrs"),         joinJsonArray(m.bccAddrs));
+    q.bindValue(QStringLiteral(":reply_to"),          m.replyTo);
+    q.bindValue(QStringLiteral(":subject"),           m.subject);
+    q.bindValue(QStringLiteral(":snippet"),           m.snippet);
+    q.bindValue(QStringLiteral(":is_unread"),         m.isUnread ? 1 : 0);
+    q.bindValue(QStringLiteral(":is_starred"),        m.isStarred ? 1 : 0);
+    q.bindValue(QStringLiteral(":is_important"),      m.isImportant ? 1 : 0);
+    q.bindValue(QStringLiteral(":has_attachment"),    m.hasAttachment ? 1 : 0);
+    q.bindValue(QStringLiteral(":body_text"),         m.bodyText);
+    q.bindValue(QStringLiteral(":body_html"),         m.bodyHtml);
+    q.bindValue(QStringLiteral(":body_html_present"), m.bodyHtmlPresent ? 1 : 0);
+    q.bindValue(QStringLiteral(":fetched_format"),
+                m.bodyText.isEmpty() ? QStringLiteral("metadata")
+                                     : QStringLiteral("full"));
+    q.bindValue(QStringLiteral(":bytes_cached"),
+                m.bodyText.size() + m.bodyHtml.size());
+    q.bindValue(QStringLiteral(":last_accessed_at"), now);
+    q.bindValue(QStringLiteral(":created_at"),       now);
+
+    if (!q.exec()) {
+        qWarning("MessageRepository::upsert (message): %s",
+                 qUtf8Printable(q.lastError().text()));
+        return 0;
+    }
+    // Label edges + attachments (each does its own SQL inside the
+    // same outer transaction — these helpers don't open one of
+    // their own).
+    writeLabelEdges(db, accountId, m.id, m.labelIds);
+    AttachmentRepository::replaceForMessage(accountId, m.id, m.attachments);
+    return q.lastInsertId().toLongLong();
+}
+
+int MessageRepository::upsertMany(const QString& accountId,
+                                   const std::vector<fc::Message>& msgs) {
+    if (accountId.isEmpty()) {
+        qWarning("MessageRepository::upsertMany called without an "
+                 "accountId; %lld msgs dropped",
+                 static_cast<long long>(msgs.size()));
+        return 0;
+    }
+    if (msgs.empty()) return 0;
+    auto db = databaseHandle();
+    if (!db.transaction()) {
+        qWarning("MessageRepository::upsertMany: BEGIN failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return 0;
+    }
+    int stored = 0;
+    for (const auto& m : msgs) {
+        if (upsertOneNoTxn(db, accountId, m) > 0) ++stored;
+    }
+    if (!db.commit()) {
+        qWarning("MessageRepository::upsertMany: COMMIT failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        db.rollback();
+        return 0;
+    }
+    return stored;
+}
+
 qint64 MessageRepository::upsert(const QString& accountId, const fc::Message& m) {
     if (accountId.isEmpty()) {
         qWarning("MessageRepository::upsert called without an accountId; "
@@ -231,8 +369,30 @@ qint64 MessageRepository::upsert(const QString& accountId, const fc::Message& m)
     }
     auto db = databaseHandle();
 
-    // Atomic 3-step write: thread row → message → label edges → attachments.
+    // Single-message write: thread row → message → label edges → attachments.
     // Wrapped in a transaction so a failure leaves the cache untouched.
+    if (!db.transaction()) {
+        qWarning("MessageRepository::upsert: BEGIN failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return 0;
+    }
+    const qint64 rowid = upsertOneNoTxn(db, accountId, m);
+    if (rowid == 0) {
+        db.rollback();
+        return 0;
+    }
+    db.commit();
+    return rowid;
+}
+
+// Legacy single-message implementation retained below for reference;
+// kept compiling-clean by inlining its body into upsertOneNoTxn above.
+// The old function body that started with db.transaction() at the top
+// is fully replaced; the only-remaining duplicate would have been the
+// inlined SQL string. Removing the old body:
+#if 0
+qint64 MessageRepository::upsertOldBody(const QString& accountId, const fc::Message& m) {
+    auto db = databaseHandle();
     db.transaction();
 
     // 1. Thread upsert (composite PK on account_id + id).
@@ -342,6 +502,7 @@ qint64 MessageRepository::upsert(const QString& accountId, const fc::Message& m)
     db.commit();
     return q.lastInsertId().toLongLong();
 }
+#endif  // legacy upsert body
 
 std::vector<fc::Message> MessageRepository::listByLabel(
         const QString& accountId, const QString& labelId,
@@ -680,6 +841,105 @@ QStringList MessageRepository::dueSnoozeWakeups(const QString& accountId) {
 
 // ---------- Cross-account API (v2) ----------
 
+std::vector<fc::Message> MessageRepository::listAllMail(
+        const QString& accountId, int limit, int offset, bool unreadOnly) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
+
+    // "All Mail": every cached message for the account except those
+    // carrying SPAM or TRASH. Implemented with NOT EXISTS rather
+    // than NOT IN (...) so the predicate is straightforward to
+    // index-match against the (account_id, label_id) pair.
+    QSqlQuery q(db);
+    if (unreadOnly) {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "WHERE m.account_id = :a AND m.is_unread = 1 "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM message_labels ml "
+            "    WHERE ml.account_id = m.account_id "
+            "      AND ml.message_id = m.id "
+            "      AND ml.label_id IN ('SPAM', 'TRASH')) "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    } else {
+        q.prepare(QStringLiteral(
+            "SELECT m.* FROM messages m "
+            "WHERE m.account_id = :a "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM message_labels ml "
+            "    WHERE ml.account_id = m.account_id "
+            "      AND ml.message_id = m.id "
+            "      AND ml.label_id IN ('SPAM', 'TRASH')) "
+            "ORDER BY m.internal_date DESC "
+            "LIMIT :lim OFFSET :off"));
+    }
+    q.bindValue(QStringLiteral(":a"),   accountId);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    q.bindValue(QStringLiteral(":off"), offset);
+    if (!q.exec()) {
+        qWarning("listAllMail: %s", qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) out.push_back(rowToMessage(accountId, q));
+    hydrateLabelIds(accountId, out);
+    qInfo("listAllMail(acc=%s, limit=%d, offset=%d): %zu messages",
+          qUtf8Printable(accountId), limit, offset, out.size());
+    return out;
+}
+
+std::vector<fc::Message> MessageRepository::listThreadsAllMail(
+        const QString& accountId, int limit, int offset, bool unreadOnly) {
+    auto db = databaseHandle();
+    std::vector<fc::Message> out;
+    if (accountId.isEmpty()) return out;
+
+    // Conversation-view variant. The inner WHERE is the same SPAM/
+    // TRASH exclusion; the rollup window selects one row per thread
+    // (latest by internal_date) and aggregates unread/starred/attach.
+    QString sql = buildThreadRollupSql(QStringLiteral(
+        "WHERE m.account_id = :a "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM message_labels ml "
+        "    WHERE ml.account_id = m.account_id "
+        "      AND ml.message_id = m.id "
+        "      AND ml.label_id IN ('SPAM', 'TRASH'))"));
+    if (unreadOnly) {
+        sql = QStringLiteral(
+            "SELECT * FROM (%1) WHERE t_unread > 0 "
+            "ORDER BY internal_date DESC "
+            "LIMIT :outerLim OFFSET :outerOff").arg(sql);
+    }
+
+    QSqlQuery q(db);
+    q.prepare(sql);
+    q.bindValue(QStringLiteral(":a"), accountId);
+    if (unreadOnly) {
+        q.bindValue(QStringLiteral(":lim"),       qMax(limit * 10, 200));
+        q.bindValue(QStringLiteral(":off"),       0);
+        q.bindValue(QStringLiteral(":outerLim"),  limit);
+        q.bindValue(QStringLiteral(":outerOff"),  offset);
+    } else {
+        q.bindValue(QStringLiteral(":lim"), limit);
+        q.bindValue(QStringLiteral(":off"), offset);
+    }
+    if (!q.exec()) {
+        qWarning("listThreadsAllMail: %s",
+                 qUtf8Printable(q.lastError().text()));
+        return out;
+    }
+    while (q.next()) {
+        auto m = rowToMessage(accountId, q);
+        hydrateThreadAggregates(q, m);
+        out.push_back(std::move(m));
+    }
+    hydrateLabelIds(accountId, out);
+    qInfo("listThreadsAllMail(acc=%s, limit=%d, offset=%d): %zu threads",
+          qUtf8Printable(accountId), limit, offset, out.size());
+    return out;
+}
+
 std::vector<fc::Message> MessageRepository::listByLabelAllAccounts(
         const QString& labelId, int limit, int offset) {
     auto db = databaseHandle();
@@ -787,55 +1047,5 @@ std::vector<fc::Message> MessageRepository::searchFtsThreadsAllAccounts(
     return out;
 }
 
-// ---------- Legacy zero-arg overloads ----------
-
-qint64 MessageRepository::upsert(const fc::Message& m) {
-    const QString aid = m.accountId.isEmpty()
-        ? Database::defaultAccountId()
-        : m.accountId;
-    return upsert(aid, m);
-}
-std::vector<fc::Message> MessageRepository::listByLabel(const QString& labelId,
-                                                        int limit, int offset,
-                                                        bool unreadOnly) {
-    return listByLabel(Database::defaultAccountId(), labelId, limit, offset,
-                        unreadOnly);
-}
-std::vector<fc::Message> MessageRepository::listThreadsByLabel(
-        const QString& labelId, int limit, int offset, bool unreadOnly) {
-    return listThreadsByLabel(Database::defaultAccountId(), labelId,
-                               limit, offset, unreadOnly);
-}
-std::vector<fc::Message> MessageRepository::searchFts(const QString& query, int limit) {
-    return searchFts(Database::defaultAccountId(), query, limit);
-}
-std::vector<fc::Message> MessageRepository::searchFtsThreads(const QString& query, int limit) {
-    return searchFtsThreads(Database::defaultAccountId(), query, limit);
-}
-fc::Message MessageRepository::byId(const QString& id) {
-    return byId(Database::defaultAccountId(), id);
-}
-bool MessageRepository::exists(const QString& id) {
-    return exists(Database::defaultAccountId(), id);
-}
-std::vector<fc::Message> MessageRepository::byThread(const QString& threadId) {
-    return byThread(Database::defaultAccountId(), threadId);
-}
-void MessageRepository::applyLabelDiff(const QString& messageId,
-                                       const QStringList& added,
-                                       const QStringList& removed) {
-    // Legacy zero-arg overload — route through the per-account
-    // version, which carries the transaction-wrap + error logging.
-    applyLabelDiff(Database::defaultAccountId(), messageId, added, removed);
-}
-void MessageRepository::markAccessed(const QString& id) {
-    markAccessed(Database::defaultAccountId(), id);
-}
-void MessageRepository::setSnoozeUntil(const QString& id, qint64 wakeAtMs) {
-    setSnoozeUntil(Database::defaultAccountId(), id, wakeAtMs);
-}
-QStringList MessageRepository::dueSnoozeWakeups() {
-    return dueSnoozeWakeups(Database::defaultAccountId());
-}
 
 }  // namespace fc::cache

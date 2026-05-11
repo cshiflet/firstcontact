@@ -56,15 +56,6 @@ void MetaRepository::set(const QString& accountId, const QString& key,
     q.exec();
 }
 
-// Legacy single-account API. Routes to the default account so unmigrated
-// callers (still being walked through the step-3 fan-out) keep working.
-QString MetaRepository::historyId() {
-    return historyId(Database::defaultAccountId());
-}
-void    MetaRepository::setHistoryId(const QString& v) {
-    setHistoryId(Database::defaultAccountId(), v);
-}
-
 QString MetaRepository::historyId(const QString& accountId) {
     return get(accountId, QStringLiteral("history_id"));
 }

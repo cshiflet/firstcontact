@@ -4,6 +4,7 @@
 #include "cache/OutboxRepository.h"
 
 #include <QDateTime>
+#include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
 
@@ -84,25 +85,41 @@ void OutboxWorker::flush() {
             continue;
         }
         fc::cache::OutboxRepository::markSending(it.id);
-        client->sendRaw(it.rfc5322, it.threadId,
-            [self, id = it.id, attempt = it.attemptCount + 1, onDone]
-            (QString gmailMsgId, fc::api::ApiError err) {
-                if (err) {
-                    if (attempt >= kMaxAttempts) {
-                        fc::cache::OutboxRepository::markFailed(
-                            id, err.message,
-                            QDateTime::currentMSecsSinceEpoch() + 24 * 60 * 60'000LL);
+        // client lives on its AccountContext's sync thread; we live on
+        // the UI thread. Bounce the call onto the right thread —
+        // GmailClient → RestClient → QNetworkAccessManager are all
+        // thread-affine and would warn (and probably hang the request)
+        // if we touched them directly from here. The callback then runs
+        // on the sync thread; the DB writes inside it use the sync
+        // thread's per-thread connection (Database::perThreadName), and
+        // the signal emits cross-thread via the workers' queued
+        // delivery to MainWindow.
+        const QByteArray rfc = it.rfc5322;
+        const QString threadId = it.threadId;
+        const qint64 id = it.id;
+        const int attempt = it.attemptCount + 1;
+        QMetaObject::invokeMethod(client,
+            [client, rfc, threadId, id, attempt, self, onDone] {
+            client->sendRaw(rfc, threadId,
+                [self, id, attempt, onDone]
+                (QString gmailMsgId, fc::api::ApiError err) {
+                    if (err) {
+                        if (attempt >= kMaxAttempts) {
+                            fc::cache::OutboxRepository::markFailed(
+                                id, err.message,
+                                QDateTime::currentMSecsSinceEpoch() + 24 * 60 * 60'000LL);
+                        } else {
+                            fc::cache::OutboxRepository::markFailed(
+                                id, err.message, backoffNextRetry(attempt));
+                        }
+                        if (self) emit self->itemFailed(id, err.message);
                     } else {
-                        fc::cache::OutboxRepository::markFailed(
-                            id, err.message, backoffNextRetry(attempt));
+                        fc::cache::OutboxRepository::markSent(id);
+                        if (self) emit self->itemSent(id, gmailMsgId);
                     }
-                    if (self) emit self->itemFailed(id, err.message);
-                } else {
-                    fc::cache::OutboxRepository::markSent(id);
-                    if (self) emit self->itemSent(id, gmailMsgId);
-                }
-                onDone();
-            });
+                    onDone();
+                });
+        }, Qt::QueuedConnection);
     }
 }
 

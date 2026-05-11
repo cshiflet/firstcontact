@@ -31,19 +31,13 @@ private slots:
         fc::cache::Database::initialize();
     }
 
-    void afterMigrationOnlyTheLegacySeedAccountIsPresent() {
+    void freshDatabaseHasNoAccounts() {
+        // The legacy synthetic-seed migration was removed; a freshly
+        // initialised cache has zero accounts rows and no current
+        // selection.
         fc::account::AccountManager mgr;
-        const auto list = mgr.accounts();
-        QCOMPARE(int(list.size()), 1);
-        QCOMPARE(list.front().id,
-                 QStringLiteral("00000000-0000-4000-8000-000000000001"));
-        QVERIFY(list.front().isDefault);
-        // The legacy seed picks the COALESCE fallback because the test DB
-        // had no meta.email row before migration ran.
-        QCOMPARE(list.front().email, QStringLiteral("legacy@local"));
-        // Default-account selection lands on the legacy id.
-        QCOMPARE(mgr.currentAccountId(),
-                 QStringLiteral("00000000-0000-4000-8000-000000000001"));
+        QCOMPARE(int(mgr.accounts().size()), 0);
+        QVERIFY(mgr.currentAccountId().isEmpty());
     }
 
     void addMintsAUuidAndPersists() {
@@ -57,7 +51,10 @@ private slots:
         const auto info = mgr.accountById(id);
         QCOMPARE(info.email,       QStringLiteral("alice@example.test"));
         QCOMPARE(info.displayName, QStringLiteral("Alice"));
-        QVERIFY(!info.isDefault);   // legacy seed already holds default
+        // First-added account becomes default automatically (the
+        // accounts.is_default INSERT branch fires when the table is
+        // otherwise empty).
+        QVERIFY(info.isDefault);
 
         // Round-trip: new manager instance reads the same data.
         fc::account::AccountManager mgr2;

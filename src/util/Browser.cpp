@@ -216,6 +216,30 @@ void launchBrowser(const QUrl& url, QObject* context,
                     std::function<void(bool)> onComplete) {
     QPointer<QObject> ctx(context);
     auto cb = std::move(onComplete);
+    // Test-mode short-circuit: ctest runs with QT_QPA_PLATFORM=offscreen
+    // and FC_NO_BROWSER_LAUNCH set, both of which mean "we have no
+    // user / no browser to actually drive an OAuth consent screen."
+    // Without this guard, every OAuth-flow test repeatedly fired the
+    // user's real browser at https://accounts.google.com/o/oauth2/v2/auth
+    // — at best annoying, at worst a small attack surface during CI
+    // runs against unfamiliar keychains.
+    {
+        const auto env = QProcessEnvironment::systemEnvironment();
+        if (env.value(QStringLiteral("QT_QPA_PLATFORM")) ==
+                QStringLiteral("offscreen") ||
+            !env.value(QStringLiteral("FC_NO_BROWSER_LAUNCH")).isEmpty()) {
+            qInfo("util::launchBrowser: offscreen / FC_NO_BROWSER_LAUNCH; "
+                  "skipping launch for %s",
+                  qUtf8Printable(url.toString()));
+            if (cb) {
+                if (!ctx) cb(false);
+                else QMetaObject::invokeMethod(ctx.data(),
+                    [cb] { cb(false); },
+                    Qt::QueuedConnection);
+            }
+            return;
+        }
+    }
     // Spin the chain on the global thread pool so xdg-open's blocking
     // QProcess::execute (and any other slow rung) doesn't freeze the UI
     // event loop. Side-effects are limited to spawning more processes,

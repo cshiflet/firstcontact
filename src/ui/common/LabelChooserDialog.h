@@ -38,6 +38,7 @@ public:
     //                   first user-label that's already on the thread
     //                   (or to no selection at all when there isn't one).
     LabelChooserDialog(Mode mode,
+                        const QString& accountId,
                         const QSet<QString>& currentlyApplied,
                         QWidget* parent = nullptr);
 
@@ -59,6 +60,7 @@ private:
     void applyFilter(const QString& needle);
 
     Mode                  mode_;
+    QString               accountId_;
     QSet<QString>         initiallyApplied_;
     QListWidget*          list_         = nullptr;
     QLineEdit*            filterEdit_   = nullptr;

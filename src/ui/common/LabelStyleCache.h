@@ -39,9 +39,6 @@ public:
     // pills paint correctly in the unified inbox view.
     void invalidate(const QString& accountId);
 
-    // Legacy zero-arg overload — routes to Database::defaultAccountId.
-    void invalidate();
-
     // Returns Style{} (empty / invalid) for unknown ids.
     Style get(const QString& labelId) const;
 

@@ -41,15 +41,6 @@ public:
     // all. Returns rows hydrated with accountId so the worker knows
     // which AccountContext.gmail to dispatch each draft through.
     static std::vector<DraftRow> dirtyDraftsAllAccounts();
-
-    // Legacy zero-arg overloads (route through default account).
-    static QString               upsert(const DraftRow& d);
-    static std::vector<DraftRow> listLocal();
-    static DraftRow              byId(const QString& id);
-    static std::vector<DraftRow> dirtyDrafts();
-    static void                  markSynced(const QString& localId,
-                                             const QString& gmailDraftId);
-    static void                  remove(const QString& id);
 };
 
 }  // namespace fc::cache

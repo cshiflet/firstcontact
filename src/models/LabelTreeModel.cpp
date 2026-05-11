@@ -1,7 +1,5 @@
 #include "LabelTreeModel.h"
 
-#include "cache/Database.h"
-
 #include <QHash>
 #include <QStringList>
 
@@ -42,11 +40,9 @@ constexpr SystemEntry kSystem[] = {
 
 LabelTreeModel::LabelTreeModel(QObject* parent)
     : QAbstractItemModel(parent), root_(new Node{}) {
-    // Default to the active account so existing single-account flows
-    // (and tests that construct a bare model) keep working without
-    // wiring AccountManager. MainWindow overrides this on every account
-    // switch via setAccountId.
-    accountId_ = fc::cache::Database::defaultAccountId();
+    // accountId_ starts empty; reload() will produce an empty tree
+    // until MainWindow wires it via setAccountId() on the first
+    // account switch.
     reload();
 }
 
@@ -73,12 +69,11 @@ void LabelTreeModel::reload() {
     auto rows = accountId_.isEmpty()
         ? std::vector<fc::cache::LabelRow>{}
         : fc::cache::LabelRepository::all(accountId_);
+    qInfo("LabelTreeModel::reload: accountId='%s' rows=%zu",
+          qUtf8Printable(accountId_), rows.size());
 
-    // v2: a synthetic "All Inboxes" node at the top of the tree when
-    // there's at least one signed-in account (i.e. the legacy seed
-    // doesn't count — but the seed is always present, so we just
-    // unconditionally render it; clicking it asks MainWindow to
-    // switch to the cross-account view).
+    // v2: a synthetic "All Inboxes" node at the top of the tree.
+    // Clicking it asks MainWindow to switch to the cross-account view.
     {
         auto allInboxes = std::make_unique<Node>();
         allInboxes->id       = QStringLiteral("__all_inboxes");
@@ -125,6 +120,23 @@ void LabelTreeModel::reload() {
             n->parent      = folders.get();
             folders->children.push_back(std::move(n));
         }
+    }
+
+    // Synthetic "All Mail" entry under Folders — Gmail's All Mail is
+    // a virtual view (not a real label), so we surface it as a
+    // synthetic node here. MainWindow handles the "__all_mail" id by
+    // routing through MessageListModel's all-mail source +
+    // SyncService::topUpLabel("__all_mail") for server-side
+    // pagination. No server-reported counts available, so unread /
+    // total stay at the model's defaults (0).
+    {
+        auto allMail = std::make_unique<Node>();
+        allMail->id        = QStringLiteral("__all_mail");
+        allMail->name      = QStringLiteral("All Mail");
+        allMail->fullName  = QStringLiteral("__all_mail");
+        allMail->type      = QStringLiteral("system");
+        allMail->parent    = folders.get();
+        folders->children.push_back(std::move(allMail));
     }
 
     // User labels: build tree by splitting on '/', parented under "Labels".

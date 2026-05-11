@@ -24,7 +24,8 @@ namespace fc::ui { class SpinningToolButton; }
 
 namespace fc { class MessageListModel; }
 namespace fc::auth  { class OAuthClient; class ClientConfig; }
-namespace fc::api   { class GmailClient; }
+namespace fc::api   { class GmailClient; class RestClient; }
+class QDialog;
 namespace fc::sync  { class SyncService; class OutboxWorker;
                       class PendingOpsWorker; class DraftSync; }
 namespace fc::account { class AccountManager; }
@@ -190,7 +191,27 @@ private:
     void updateToolbarOverflow(); // hide/show toolbar items into hamburger
     void onSwitchAccount();       // kick OAuth flow to mint a fresh
                                   // accounts row (no sign-out of existing)
+
+    // Adds a brand-new account: spins up a transient unbound stack
+    // (OAuthClient + RestClient + GmailClient + SyncService), runs
+    // the browser-based OAuth dance, and on success mints the
+    // accounts row, copies tokens onto the new AccountContext's
+    // bound OAuthClient, and tears the transient stack down.
+    void beginAddAccountFlow();
+    // Once the transient stack has produced an email (via getProfile
+    // after granted), mint the accounts row, copy tokens onto the
+    // bound AccountContext, repaint, and tear the transient stack
+    // down.
+    void finalizePendingAddAccountFlow(const QString& email);
+    void teardownPendingAddAccountFlow();
     void openComposeWindow(const fc::Message* parent, int mode);  // mode = ComposeWindow::Mode
+
+    // Returns the GmailClient owned by the active account's
+    // AccountContext, or the legacy anonymous gmail_ if no context
+    // is active. Use this for any per-thread / per-message API call
+    // — gmail_ is the no-tokens Bootstrap fallback and would fail
+    // with "no token" on every request.
+    fc::api::GmailClient* activeGmail() const;
 
     // Apply (add, remove) label sets to every message in a thread,
     // queue the equivalent server reconciliation for each, and refresh
@@ -240,9 +261,35 @@ private:
     //                        reported no more pages, OR the visible
     //                        label is one of the seed labels that
     //                        incremental sync keeps complete.
+    // Legacy widget pointer — replaced by an in-list placeholder row
+    // driven through MessageListModel::setFooterState. Kept as nullptr
+    // for now; remove the field outright once any external
+    // friend / accessor stops referencing it.
     QLabel*                  listFooter_       = nullptr;
     bool                     topUpInFlight_    = false;
     QHash<QString, bool>     serverExhaustedByLabel_;
+
+    // Per-label scroll memory: keyed by `<accountId>::<labelId>` so
+    // switching folders restores the user's last-viewed message
+    // position. Cross-account ("All Inboxes") gets its own key so it
+    // doesn't share state with INBOX of any single account. Saved
+    // on outbound label switch, restored on inbound.
+    struct LabelScrollState {
+        QString messageId;       // currently selected/highlighted, if any
+        int     verticalOffset = 0;
+        // Loaded row count when the user last left this label.
+        // Restored on return so progressive loading isn't redone — a
+        // 5000-row Sent folder doesn't get clipped back to the
+        // pageSize default of 100 just because the user clicked away
+        // and clicked back.
+        int     loadedRowCount = 0;
+    };
+    QHash<QString, LabelScrollState> labelScrollMemory_;
+    QString labelScrollKey(const QString& labelId,
+                           bool crossAccount) const;
+    void saveLabelScrollState();
+    void restoreLabelScrollState(const QString& labelId,
+                                 bool crossAccount);
 
     QLineEdit*               searchEdit_;
     QAction*                 searchIconAction_ = nullptr;
@@ -307,11 +354,23 @@ private:
     fc::Message              currentMessage_;
     int                      currentRow_ = -1;
 
+    // Transient stack used by Add-account / first-sign-in. Lives only
+    // for the duration of one OAuth dance; teardownPendingAddAccountFlow
+    // deletes every member when the flow either succeeds (tokens
+    // copied onto the new AccountContext) or fails. We don't include
+    // a transient SyncService — SyncService::runOnce bails on an
+    // empty accountId, and we just need one getProfile to learn the
+    // email so we can mint the accounts row.
+    fc::auth::OAuthClient*   pendingAuth_   = nullptr;
+    fc::api::RestClient*     pendingRest_   = nullptr;
+    fc::api::GmailClient*    pendingGmail_  = nullptr;
+    QDialog*                 pendingDlg_    = nullptr;
+
     // Multi-account: id of the account whose data the three panes
-    // currently display. Seeded from Database::defaultAccountId() at
-    // construction; replaced on user action via the toolbar account
-    // menu (step 8) and the AccountManagerDialog (step 9). Empty
-    // before sign-in / after the last account is removed.
+    // currently display. Seeded from AccountManager::currentAccountId
+    // at construction; replaced on user action via the toolbar account
+    // menu and the AccountManagerDialog. Empty before sign-in / after
+    // the last account is removed.
     QString                  currentAccountId_;
 
     // v2: when the user clicks "All Inboxes" in the sidebar, the

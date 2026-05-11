@@ -12,13 +12,38 @@ namespace fc {
 MessageListModel::MessageListModel(QObject* parent) : QAbstractListModel(parent) {}
 
 int MessageListModel::rowCount(const QModelIndex& parent) const {
-    return parent.isValid() ? 0 : static_cast<int>(rows_.size());
+    if (parent.isValid()) return 0;
+    return static_cast<int>(rows_.size())
+         + (footerState_ != FooterState::None ? 1 : 0);
+}
+
+Qt::ItemFlags MessageListModel::flags(const QModelIndex& idx) const {
+    if (!idx.isValid()) return Qt::NoItemFlags;
+    const int row = idx.row();
+    if (row >= static_cast<int>(rows_.size())) {
+        // Placeholder footer row — visible only, not interactable.
+        return Qt::ItemIsEnabled;
+    }
+    return QAbstractListModel::flags(idx);
 }
 
 QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
-    if (!idx.isValid() || idx.row() < 0 ||
-        idx.row() >= static_cast<int>(rows_.size())) return {};
-    const Message& m = rows_[idx.row()];
+    if (!idx.isValid() || idx.row() < 0) return {};
+    const int row = idx.row();
+    // Synthetic footer row (Loading more… / No more messages).
+    if (row >= static_cast<int>(rows_.size())) {
+        if (footerState_ == FooterState::None) return {};
+        const QString text = (footerState_ == FooterState::Loading)
+            ? QStringLiteral("Loading more messages…")
+            : QStringLiteral("No more messages");
+        switch (role) {
+            case IsPlaceholderRole:    return true;
+            case PlaceholderTextRole:  return text;
+            case Qt::DisplayRole:      return text;
+            default:                   return {};
+        }
+    }
+    const Message& m = rows_[row];
 
     // Belt-and-braces decode for rows that were cached before MessageParser
     // started decoding entities at ingest. The decoder is idempotent and
@@ -53,22 +78,52 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
 
 QHash<int, QByteArray> MessageListModel::roleNames() const {
     return {
-        {IdRole,            "id"},
-        {AccountIdRole,     "accountId"},
-        {ThreadIdRole,      "threadId"},
-        {FromRole,          "from"},
-        {SubjectRole,       "subject"},
-        {SnippetRole,       "snippet"},
-        {DateRole,          "date"},
-        {UnreadRole,        "unread"},
-        {StarredRole,       "starred"},
-        {ImportantRole,     "important"},
-        {HasAttachmentRole, "hasAttachment"},
-        {ThreadCountRole,   "threadCount"},
-        {LabelIdsRole,      "labelIds"},
-        {IsChildRole,       "isChild"},
-        {IsExpandedRole,    "expanded"},
+        {IdRole,                "id"},
+        {AccountIdRole,         "accountId"},
+        {ThreadIdRole,          "threadId"},
+        {FromRole,              "from"},
+        {SubjectRole,           "subject"},
+        {SnippetRole,           "snippet"},
+        {DateRole,              "date"},
+        {UnreadRole,            "unread"},
+        {StarredRole,           "starred"},
+        {ImportantRole,         "important"},
+        {HasAttachmentRole,     "hasAttachment"},
+        {ThreadCountRole,       "threadCount"},
+        {LabelIdsRole,          "labelIds"},
+        {IsChildRole,           "isChild"},
+        {IsExpandedRole,        "expanded"},
+        {IsPlaceholderRole,     "isPlaceholder"},
+        {PlaceholderTextRole,   "placeholderText"},
     };
+}
+
+void MessageListModel::setFooterState(FooterState s) {
+    const char* names[] = {"None", "Loading", "NoMore"};
+    qInfo("MessageListModel::setFooterState %s -> %s (realRows=%lld)",
+          names[static_cast<int>(footerState_)],
+          names[static_cast<int>(s)],
+          static_cast<long long>(rows_.size()));
+    if (footerState_ == s) return;
+    const int realRows = static_cast<int>(rows_.size());
+    const bool wasShowing = footerState_ != FooterState::None;
+    const bool willShow   = s != FooterState::None;
+    if (wasShowing && !willShow) {
+        beginRemoveRows({}, realRows, realRows);
+        footerState_ = s;
+        endRemoveRows();
+    } else if (!wasShowing && willShow) {
+        beginInsertRows({}, realRows, realRows);
+        footerState_ = s;
+        endInsertRows();
+    } else {
+        // Both showing — same row, just text changes. Update via
+        // dataChanged so the delegate repaints.
+        footerState_ = s;
+        const auto idx = index(realRows, 0);
+        emit dataChanged(idx, idx,
+            {PlaceholderTextRole, Qt::DisplayRole});
+    }
 }
 
 bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
@@ -80,7 +135,8 @@ bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
     // underlying repository variants take limit/offset and walk
     // newest-first.
     if (source_ != Source::ByLabel
-        && source_ != Source::CrossAccountLabel) return false;
+        && source_ != Source::CrossAccountLabel
+        && source_ != Source::AllMail) return false;
     // The cache is drained for this source — wait for messagesUpdated /
     // a server top-up to bring back new rows. (loadFirstPage / explicit
     // refresh resets this flag.)
@@ -90,7 +146,8 @@ bool MessageListModel::canFetchMore(const QModelIndex& parent) const {
 void MessageListModel::fetchMore(const QModelIndex& parent) {
     if (parent.isValid()) return;
     if (source_ != Source::ByLabel
-        && source_ != Source::CrossAccountLabel) return;
+        && source_ != Source::CrossAccountLabel
+        && source_ != Source::AllMail) return;
     if (cacheDrained_) return;
 
     const int offset = static_cast<int>(rows_.size());
@@ -99,10 +156,14 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
         more = conversationView_
             ? cache::MessageRepository::listThreadsByLabelAllAccounts(sourceParam_, pageSize(), offset)
             : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, pageSize(), offset);
+    } else if (source_ == Source::AllMail) {
+        more = conversationView_
+            ? cache::MessageRepository::listThreadsAllMail(accountId_, pageSize(), offset, unreadOnly_)
+            : cache::MessageRepository::listAllMail(accountId_, pageSize(), offset, unreadOnly_);
     } else {
         more = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), offset, unreadOnly_)
-            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), offset, unreadOnly_);
+            ? cache::MessageRepository::listThreadsByLabel(accountId_, sourceParam_, pageSize(), offset, unreadOnly_)
+            : cache::MessageRepository::listByLabel(accountId_, sourceParam_, pageSize(), offset, unreadOnly_);
     }
 
     if (more.empty()) {
@@ -134,6 +195,50 @@ void MessageListModel::fetchMore(const QModelIndex& parent) {
     }
 }
 
+void MessageListModel::expandLoadedRows(int targetRowCount) {
+    if (source_ == Source::None) return;
+    if (source_ == Source::BySearch) return;   // FTS has no offset
+    if (targetRowCount <= 0) return;
+    int parentRows = 0;
+    for (const auto& m : rows_) if (!m.isThreadChild) ++parentRows;
+    if (parentRows >= targetRowCount) return;   // already large enough
+
+    const int limit = qMax(targetRowCount, pageSize());
+    const int probe = limit + 1;
+
+    std::vector<Message> rows;
+    bool moreInCache = false;
+    if (source_ == Source::ByLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabel(
+                  accountId_, sourceParam_, probe, 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(
+                  accountId_, sourceParam_, probe, 0, unreadOnly_);
+    } else if (source_ == Source::CrossAccountLabel) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsByLabelAllAccounts(
+                  sourceParam_, probe, 0)
+            : cache::MessageRepository::listByLabelAllAccounts(
+                  sourceParam_, probe, 0);
+    } else if (source_ == Source::AllMail) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsAllMail(
+                  accountId_, probe, 0, unreadOnly_)
+            : cache::MessageRepository::listAllMail(
+                  accountId_, probe, 0, unreadOnly_);
+    } else {
+        return;
+    }
+    moreInCache = static_cast<int>(rows.size()) > limit;
+    if (moreInCache) rows.pop_back();
+
+    beginResetModel();
+    rows_ = std::move(rows);
+    expandedThreads_.clear();
+    cacheDrained_ = !moreInCache;
+    endResetModel();
+}
+
 void MessageListModel::resumeAfterTopUp() {
     // Top-up just finished — there should be more rows in the cache
     // below what we already have loaded. Clear the drain flag and
@@ -145,8 +250,9 @@ void MessageListModel::resumeAfterTopUp() {
     //
     // Cross-account doesn't go through topUpLabel today (every
     // contributing account's incremental sync keeps INBOX fresh on
-    // its own), so resumeAfterTopUp is a per-account-only thing.
-    if (source_ != Source::ByLabel) return;
+    // its own). All Mail does — its top-up walks Gmail's full mailbox
+    // page-by-page so resume is symmetric with ByLabel.
+    if (source_ != Source::ByLabel && source_ != Source::AllMail) return;
     // Re-entry guard. fetchMore inside the loop emits cacheExhausted
     // on short pages, which the owner connects to topUpLabel ->
     // topUpFinished -> back here. Without this guard a tight cascade
@@ -229,8 +335,8 @@ void MessageListModel::refreshFromSource() {
     bool moreInCache = false;
     if (source_ == Source::ByLabel) {
         rows = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, probe, 0, unreadOnly_)
-            : cache::MessageRepository::listByLabel(sourceParam_, probe, 0, unreadOnly_);
+            ? cache::MessageRepository::listThreadsByLabel(accountId_, sourceParam_, probe, 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(accountId_, sourceParam_, probe, 0, unreadOnly_);
         moreInCache = static_cast<int>(rows.size()) > limit;
         if (moreInCache) rows.pop_back();   // we only show `limit` rows
     } else if (source_ == Source::CrossAccountLabel) {
@@ -239,13 +345,19 @@ void MessageListModel::refreshFromSource() {
             : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, probe, 0);
         moreInCache = static_cast<int>(rows.size()) > limit;
         if (moreInCache) rows.pop_back();
+    } else if (source_ == Source::AllMail) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsAllMail(accountId_, probe, 0, unreadOnly_)
+            : cache::MessageRepository::listAllMail(accountId_, probe, 0, unreadOnly_);
+        moreInCache = static_cast<int>(rows.size()) > limit;
+        if (moreInCache) rows.pop_back();
     } else {
         // Search has no offset support, so the probe doesn't apply —
         // FTS top-K returns however many results match, capped at
         // `limit`.
         rows = conversationView_
-            ? cache::MessageRepository::searchFtsThreads(sourceParam_, limit)
-            : cache::MessageRepository::searchFts(sourceParam_, limit);
+            ? cache::MessageRepository::searchFtsThreads(accountId_, sourceParam_, limit)
+            : cache::MessageRepository::searchFts(accountId_, sourceParam_, limit);
     }
 
     // Capture the user's currently-expanded thread set before the
@@ -261,7 +373,7 @@ void MessageListModel::refreshFromSource() {
     if (source_ == Source::BySearch) {
         cacheDrained_ = true;
     } else {
-        // ByLabel and CrossAccountLabel both rely on the probe.
+        // ByLabel, CrossAccountLabel and AllMail all rely on the probe.
         cacheDrained_ = !moreInCache;
     }
     endResetModel();
@@ -285,16 +397,20 @@ void MessageListModel::loadFirstPage() {
     std::vector<Message> rows;
     if (source_ == Source::ByLabel) {
         rows = conversationView_
-            ? cache::MessageRepository::listThreadsByLabel(sourceParam_, pageSize(), 0, unreadOnly_)
-            : cache::MessageRepository::listByLabel(sourceParam_, pageSize(), 0, unreadOnly_);
+            ? cache::MessageRepository::listThreadsByLabel(accountId_, sourceParam_, pageSize(), 0, unreadOnly_)
+            : cache::MessageRepository::listByLabel(accountId_, sourceParam_, pageSize(), 0, unreadOnly_);
     } else if (source_ == Source::CrossAccountLabel) {
         rows = conversationView_
             ? cache::MessageRepository::listThreadsByLabelAllAccounts(sourceParam_, pageSize(), 0)
             : cache::MessageRepository::listByLabelAllAccounts(sourceParam_, pageSize(), 0);
+    } else if (source_ == Source::AllMail) {
+        rows = conversationView_
+            ? cache::MessageRepository::listThreadsAllMail(accountId_, pageSize(), 0, unreadOnly_)
+            : cache::MessageRepository::listAllMail(accountId_, pageSize(), 0, unreadOnly_);
     } else if (source_ == Source::BySearch) {
         rows = conversationView_
-            ? cache::MessageRepository::searchFtsThreads(sourceParam_, pageSize())
-            : cache::MessageRepository::searchFts(sourceParam_, pageSize());
+            ? cache::MessageRepository::searchFtsThreads(accountId_, sourceParam_, pageSize())
+            : cache::MessageRepository::searchFts(accountId_, sourceParam_, pageSize());
     }
 
     beginResetModel();
@@ -305,10 +421,32 @@ void MessageListModel::loadFirstPage() {
     endResetModel();
 }
 
+void MessageListModel::setAccountId(const QString& accountId) {
+    if (accountId_ == accountId) return;
+    accountId_ = accountId;
+    // Active per-account source needs to refetch under the new
+    // accountId; CrossAccountLabel ignores accountId and replaceAll
+    // sources are caller-driven, so we leave them alone.
+    if (source_ == Source::ByLabel || source_ == Source::BySearch
+        || source_ == Source::AllMail) {
+        loadFirstPage();
+    }
+}
+
 QString MessageListModel::sourceLabelId() const {
     if (source_ == Source::ByLabel
         || source_ == Source::CrossAccountLabel) return sourceParam_;
+    if (source_ == Source::AllMail) return QStringLiteral("__all_mail");
     return {};
+}
+
+void MessageListModel::setAllMailSource(bool conversationView,
+                                          bool unreadOnly) {
+    source_           = Source::AllMail;
+    sourceParam_      = QStringLiteral("__all_mail");
+    conversationView_ = conversationView;
+    unreadOnly_       = unreadOnly;
+    loadFirstPage();
 }
 
 void MessageListModel::replaceAll(std::vector<Message> messages) {
@@ -365,10 +503,14 @@ void MessageListModel::toggleThreadExpand(int row) {
     //
     // We scope the lookup to the parent's accountId so a multi-account
     // unified inbox (v2) keeps thread expansion correct.
-    auto thread = parent.accountId.isEmpty()
-        ? fc::cache::MessageRepository::byThread(parent.threadId)
-        : fc::cache::MessageRepository::byThread(parent.accountId,
-                                                  parent.threadId);
+    // The parent row was loaded from a per-account or cross-account
+    // source; either way it carries its source accountId. Fall back
+    // to the model's pinned accountId for older rows that pre-date
+    // AccountIdRole population.
+    const QString lookupAccount = parent.accountId.isEmpty()
+        ? accountId_ : parent.accountId;
+    auto thread = fc::cache::MessageRepository::byThread(lookupAccount,
+                                                         parent.threadId);
     std::sort(thread.begin(), thread.end(),
               [](const Message& a, const Message& b) {
                   return a.internalDate > b.internalDate;

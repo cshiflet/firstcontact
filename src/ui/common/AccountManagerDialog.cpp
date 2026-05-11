@@ -83,6 +83,15 @@ AccountManagerDialog::AccountManagerDialog(
     if (accounts_) {
         connect(accounts_, &fc::account::AccountManager::accountsChanged,
                 this,      &AccountManagerDialog::rebuild);
+        // Per-context auth state changes — without these the row
+        // doesn't update visually when a non-active account signs in
+        // / signs out. tokensLoaded covers fresh sign-ins (Add-account
+        // adopting tokens) and accountSignedOut covers Sign-out from
+        // any row in this dialog.
+        connect(accounts_, &fc::account::AccountManager::tokensLoaded,
+                this, [this](const QString&) { rebuild(); });
+        connect(accounts_, &fc::account::AccountManager::accountSignedOut,
+                this, [this](const QString&) { rebuild(); });
     }
 }
 

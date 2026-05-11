@@ -44,13 +44,31 @@ public:
         // currently shown inline. Drives the chevron direction
         // (right-pointing collapsed, down-pointing expanded).
         IsExpandedRole,
+        // True for the synthetic "Loading more messages…" / "No more
+        // messages" sentinel row appended at the end of the list
+        // during a top-up or once the label has been fully walked.
+        // The delegate paints these as plain centered italic text,
+        // and they aren't selectable / clickable.
+        IsPlaceholderRole,
+        // Text content for the placeholder row.
+        PlaceholderTextRole,
     };
+
+    // Footer placeholder state — drives the synthetic last-row
+    // sentinel rendered by the delegate. Setting Loading appends a
+    // "Loading more messages…" row; NoMore appends "No more messages";
+    // None removes the row. Setting the same state twice is a no-op.
+    enum class FooterState { None, Loading, NoMore };
 
     explicit MessageListModel(QObject* parent = nullptr);
 
     int rowCount(const QModelIndex& parent = {}) const override;
     QVariant data(const QModelIndex& index, int role) const override;
+    Qt::ItemFlags flags(const QModelIndex& index) const override;
     QHash<int, QByteArray> roleNames() const override;
+
+    void setFooterState(FooterState s);
+    FooterState footerState() const { return footerState_; }
 
     // Pagination hooks. Qt's view controllers call canFetchMore + fetchMore
     // automatically as the user scrolls past the bottom of what's loaded.
@@ -83,12 +101,25 @@ public:
     void setSearchSource(const QString& query, bool conversationView);
     void setCrossAccountLabelSource(const QString& labelId,
                                      bool conversationView);
+    // "All Mail" — every cached message except SPAM/TRASH for the
+    // model's current accountId. Paginates from cache the same way
+    // ByLabel does; cacheExhausted then triggers SyncService's
+    // "__all_mail" top-up for server-side history.
+    void setAllMailSource(bool conversationView, bool unreadOnly = false);
 
     // Re-queries the active source for offset=0, limit=loadedRows — used by
     // messagesUpdated handlers to refresh in place without losing the
     // user's scroll window. Falls back to a no-op when the source has
     // never been set.
     void refreshFromSource();
+
+    // Re-queries the active source for offset=0 with a caller-supplied
+    // minimum row count. Used when restoring a previously-visited
+    // folder so the user comes back to the same loaded window
+    // instead of losing it to loadFirstPage's pageSize cap (which
+    // would force progressive loading to re-walk thousands of rows).
+    // No-op for search sources (FTS has no offset / size hint).
+    void expandLoadedRows(int targetRowCount);
 
     // Called when an out-of-band server top-up has filled the cache with
     // additional rows BELOW the currently-loaded window (typically older
@@ -107,6 +138,15 @@ public:
 
     QString sourceLabelId() const;
 
+    // The account id every per-account repository call (ByLabel /
+    // BySearch) is scoped to. CrossAccountLabel ignores this; it goes
+    // through the *AllAccounts repository variants. MainWindow pushes
+    // the active id on every account switch via setAccountId; sources
+    // that load before the wiring happens see an empty id and produce
+    // an empty page.
+    void setAccountId(const QString& accountId);
+    QString accountId() const { return accountId_; }
+
     // True when the last fetchMore returned 0 or a short page — i.e.,
     // the cache has nothing more to give for the current source.
     // Owners use this to drive a "No more messages" footer or to
@@ -120,7 +160,7 @@ signals:
     void cacheExhausted(const QString& labelId);
 
 private:
-    enum class Source { None, ByLabel, BySearch, CrossAccountLabel };
+    enum class Source { None, ByLabel, BySearch, CrossAccountLabel, AllMail };
 
     int  pageSize() const { return 100; }
     void loadFirstPage();
@@ -132,6 +172,7 @@ private:
     QSet<QString> expandedThreads_;
 
     Source  source_           = Source::None;
+    QString accountId_;
     QString sourceParam_;     // labelId or search query
     bool    conversationView_ = true;
     bool    unreadOnly_       = false;
@@ -142,6 +183,13 @@ private:
     // topUpFinished and re-enters resumeAfterTopUp before the prior
     // call returns.
     bool    resumingAfterTopUp_ = false;
+    FooterState footerState_  = FooterState::None;
+
+    // Number of "real" message rows (excludes the optional footer
+    // placeholder). Helpers (refreshFromSource, expandLoadedRows,
+    // toggleThreadExpand, etc.) use this so the placeholder doesn't
+    // get counted as a fetched row.
+    int messageRowCount() const { return static_cast<int>(rows_.size()); }
 };
 
 }  // namespace fc

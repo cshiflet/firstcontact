@@ -4,6 +4,7 @@
 #include "cache/DraftRepository.h"
 #include "util/MimeBuilder.h"
 
+#include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
 
@@ -87,19 +88,29 @@ void DraftSync::flush() {
         }
 
         if (draft.gmailDraftId.isEmpty()) {
-            client->createDraft(rfc, draft.threadId,
-                [self, localId, accountId, onDone]
-                (QString gmailDraftId, fc::api::ApiError err) {
-                    if (err) {
-                        if (self) emit self->draftFailed(localId, err.message);
-                    } else {
-                        fc::cache::DraftRepository::markSynced(accountId,
-                                                                localId,
-                                                                gmailDraftId);
-                        if (self) emit self->draftPushed(localId, gmailDraftId);
-                    }
-                    onDone();
-                });
+            // client lives on its account's sync thread; bounce the
+            // createDraft call onto that thread so QNetworkAccessManager
+            // isn't poked from the UI thread. Callback runs on the sync
+            // thread (DraftRepository will pick up that thread's
+            // per-thread DB connection); the worker's signals reach UI
+            // via queued delivery on emit.
+            const QString threadId = draft.threadId;
+            QMetaObject::invokeMethod(client,
+                [client, rfc, threadId, self, localId, accountId, onDone] {
+                client->createDraft(rfc, threadId,
+                    [self, localId, accountId, onDone]
+                    (QString gmailDraftId, fc::api::ApiError err) {
+                        if (err) {
+                            if (self) emit self->draftFailed(localId, err.message);
+                        } else {
+                            fc::cache::DraftRepository::markSynced(accountId,
+                                                                    localId,
+                                                                    gmailDraftId);
+                            if (self) emit self->draftPushed(localId, gmailDraftId);
+                        }
+                        onDone();
+                    });
+            }, Qt::QueuedConnection);
         } else {
             // Phase 4 will add drafts.update; for now just clear the dirty
             // flag in place — the next full sync will pick up the canonical

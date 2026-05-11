@@ -22,8 +22,10 @@ constexpr int kIdRole = Qt::UserRole + 1;
 // Sort user labels by name, case-insensitive. Slash-separated parents
 // come along for the ride — they sort naturally because '/' < any
 // letter. Good enough for the picker.
-std::vector<fc::cache::LabelRow> userLabelsSorted() {
-    auto rows = fc::cache::LabelRepository::all();
+std::vector<fc::cache::LabelRow> userLabelsSorted(const QString& accountId) {
+    auto rows = accountId.isEmpty()
+        ? std::vector<fc::cache::LabelRow>{}
+        : fc::cache::LabelRepository::all(accountId);
     rows.erase(std::remove_if(rows.begin(), rows.end(),
         [](const fc::cache::LabelRow& r) { return r.type != "user"; }),
         rows.end());
@@ -37,10 +39,12 @@ std::vector<fc::cache::LabelRow> userLabelsSorted() {
 }  // namespace
 
 LabelChooserDialog::LabelChooserDialog(Mode mode,
+                                         const QString& accountId,
                                          const QSet<QString>& currentlyApplied,
                                          QWidget* parent)
     : QDialog(parent),
       mode_(mode),
+      accountId_(accountId),
       initiallyApplied_(currentlyApplied) {
     setWindowTitle(mode_ == Mode::Apply
         ? tr("Apply labels")
@@ -118,7 +122,7 @@ LabelChooserDialog::LabelChooserDialog(Mode mode,
 
 void LabelChooserDialog::buildList() {
     list_->clear();
-    const auto rows = userLabelsSorted();
+    const auto rows = userLabelsSorted(accountId_);
     for (const auto& r : rows) {
         auto* it = new QListWidgetItem(r.name, list_);
         it->setData(kIdRole, r.id);

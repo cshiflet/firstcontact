@@ -1,7 +1,6 @@
 #include "OAuthClient.h"
 
 #include "ClientConfig.h"
-#include "cache/Database.h"
 #include "util/Base64Url.h"
 #include "util/Browser.h"
 
@@ -62,6 +61,7 @@ QByteArray makeCodeChallenge(const QByteArray& verifier) {
 struct OAuthClient::Impl {
     ClientConfig* config = nullptr;
     TokenStore*   store  = nullptr;
+    QString       accountId;   // empty for unbound (pre-sign-in) clients
 
     QOAuthHttpServerReplyHandler*   handler = nullptr;
     QNetworkAccessManager*          nam     = nullptr;
@@ -80,28 +80,85 @@ struct OAuthClient::Impl {
     TokenStore::Tokens tokens;
 };
 
-OAuthClient::OAuthClient(ClientConfig* config, TokenStore* store, QObject* parent)
+OAuthClient::OAuthClient(ClientConfig* config, TokenStore* store,
+                          QString accountId, QObject* parent)
     : QObject(parent), d_(new Impl) {
-    d_->config = config;
-    d_->store  = store;
-    d_->nam    = new QNetworkAccessManager(this);
+    d_->config    = config;
+    d_->store     = store;
+    d_->accountId = std::move(accountId);
+    d_->nam       = new QNetworkAccessManager(this);
 
     hydrateFromStore();
 }
 
 OAuthClient::~OAuthClient() { delete d_; }
 
-void OAuthClient::hydrateFromStore() {
-    // Route through the per-account API. v1 still has a single
-    // OAuthClient instance, so it loads the default account's slot;
-    // step 6 introduces per-account OAuthClient instances inside
-    // AccountContext, each constructed against an explicit accountId.
-    const QString accountId = fc::cache::Database::defaultAccountId();
+QString OAuthClient::accountId() const {
+    QMutexLocker lock(&d_->tokenMutex);
+    return d_->accountId;
+}
+
+TokenStore::Tokens OAuthClient::tokensSnapshot() const {
+    QMutexLocker lock(&d_->tokenMutex);
+    return d_->tokens;
+}
+
+void OAuthClient::adoptTokens(const TokenStore::Tokens& tokens) {
+    QString aid;
+    {
+        QMutexLocker lock(&d_->tokenMutex);
+        if (d_->accountId.isEmpty()) {
+            qWarning("OAuthClient::adoptTokens called on an unbound client; "
+                     "use bindAccountId instead");
+            return;
+        }
+        d_->tokens             = tokens;
+        d_->tokens.accountId   = d_->accountId;   // overwrite — bound takes precedence
+        aid                    = d_->accountId;
+    }
+    if (!d_->tokens.valid()) return;
+    auto persisted = d_->tokens;
+    d_->store->save(persisted, [aid](bool ok, QString err) {
+        if (!ok) qWarning("TokenStore::save (adoptTokens for %s) failed: %s",
+                          qUtf8Printable(aid),
+                          qUtf8Printable(err));
+    });
+    emit tokensLoaded();
+}
+
+void OAuthClient::bindAccountId(const QString& accountId) {
     if (accountId.isEmpty()) {
+        qWarning("OAuthClient::bindAccountId: refusing to bind to empty id");
+        return;
+    }
+    TokenStore::Tokens snapshot;
+    {
+        QMutexLocker lock(&d_->tokenMutex);
+        if (!d_->accountId.isEmpty() && d_->accountId != accountId) {
+            qWarning("OAuthClient::bindAccountId: already bound to %s; "
+                     "refusing rebind to %s",
+                     qUtf8Printable(d_->accountId),
+                     qUtf8Printable(accountId));
+            return;
+        }
+        d_->accountId         = accountId;
+        d_->tokens.accountId  = accountId;
+        snapshot              = d_->tokens;
+    }
+    if (!snapshot.valid()) return;   // nothing to persist yet
+    d_->store->save(snapshot, [](bool ok, QString err) {
+        if (!ok) qWarning("TokenStore::save (bindAccountId) failed: %s",
+                          qUtf8Printable(err));
+    });
+}
+
+void OAuthClient::hydrateFromStore() {
+    if (d_->accountId.isEmpty()) {
+        // Unbound (sign-in-not-yet-complete) client — nothing to load.
         emit tokensLoaded();
         return;
     }
-    d_->store->load(accountId,
+    d_->store->load(d_->accountId,
         [this](bool ok, TokenStore::Tokens t, QString err) {
         if (!ok) {
             qWarning("TokenStore::load failed: %s", qUtf8Printable(err));
@@ -110,7 +167,16 @@ void OAuthClient::hydrateFromStore() {
         }
         {
             QMutexLocker lock(&d_->tokenMutex);
-            d_->tokens = std::move(t);
+            // Don't clobber valid in-memory tokens with an empty-slot
+            // result. The Add-account flow constructs a bound
+            // AccountContext (which schedules this load) and then
+            // adoptTokens()es the freshly-issued tokens onto it
+            // synchronously. If the load callback fires AFTER
+            // adoptTokens, an empty slot result would overwrite the
+            // valid tokens we just put in place.
+            if (t.valid() || !d_->tokens.valid()) {
+                d_->tokens = std::move(t);
+            }
         }
         emit tokensLoaded();
     });
@@ -132,17 +198,12 @@ void OAuthClient::setAccountEmail(const QString& email) {
         QMutexLocker lock(&d_->tokenMutex);
         if (d_->tokens.accountEmail == email) return;   // no-op, no save
         d_->tokens.accountEmail = email;
-        // Stamp the slot's accountId from the default account if it
-        // wasn't already set (legacy hydrate path that pre-dates step 5
-        // sets it on read; this is belt-and-braces).
-        if (d_->tokens.accountId.isEmpty()) {
-            d_->tokens.accountId = fc::cache::Database::defaultAccountId();
-        }
         snapshot = d_->tokens;
     }
-    if (snapshot.accountId.isEmpty()) return;   // no slot to save into
-    // Persist so we keep the email across restarts; otherwise we'd have to
-    // wait for the next initial sync to re-populate it.
+    // Unbound clients hold the email in memory until bindAccountId
+    // runs; persistence has to wait until we know which slot to write
+    // it to.
+    if (snapshot.accountId.isEmpty()) return;
     d_->store->save(snapshot, [](bool ok, QString err) {
         if (!ok) qWarning("TokenStore::save (email) failed: %s",
                           qUtf8Printable(err));
@@ -228,13 +289,14 @@ void OAuthClient::authorize() {
         qInfo("OAuth authorize URL: %s (query redacted)",
               qUtf8Printable(scrubbed.toString()));
     }
-    // Show the dialog immediately (with the URL so the user can copy/paste
-    // if the auto-launch fails downstream); we no longer block here waiting
-    // for the launcher chain to finish. Pre-async, this call could freeze
-    // the UI for tens of seconds when a wedged xdg-open / wslview hung the
-    // synchronous QProcess::execute.
-    emit browserAuthRequested(authUrl, /*openedAutomatically=*/true);
-    util::launchBrowser(authUrl);
+    // Hand the URL to the UI and stop there — we deliberately do NOT
+    // auto-launch a browser. The dialog the UI puts up offers an
+    // explicit "Open in Browser" button plus a copy field, so the user
+    // is in control of which browser receives the URL (and so we
+    // don't surprise them with a popup window during what looked like
+    // a benign click). The `openedAutomatically=false` signal value
+    // tells the dialog to phrase its prompt accordingly.
+    emit browserAuthRequested(authUrl, /*openedAutomatically=*/false);
 }
 
 void OAuthClient::onAuthCodeCallback(const QVariantMap& params) {
@@ -328,6 +390,9 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
         const QString errString = reply->errorString();
         reply->deleteLater();
 
+        qInfo("Token exchange reply: HTTP %d, error %d (%s)",
+              status, int(nerr), qUtf8Printable(errString));
+
         if (nerr != QNetworkReply::NoError) {
             // Log the high-level shape but NEVER the raw response
             // body — Google's token-exchange responses occasionally
@@ -376,15 +441,15 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
         {
             QMutexLocker lock(&d_->tokenMutex);
             t.accountEmail = d_->tokens.accountEmail;  // preserve if any
-            t.accountId    = d_->tokens.accountId.isEmpty()
-                ? fc::cache::Database::defaultAccountId()
-                : d_->tokens.accountId;
+            // For bound clients, stamp the tokens with our slot id so
+            // TokenStore::save targets the right slot; for unbound
+            // clients this stays empty until bindAccountId runs.
+            t.accountId    = d_->accountId;
             d_->tokens = t;
         }
-        if (t.accountId.isEmpty()) {
-            qWarning("OAuthClient: token exchange but no account row "
-                     "to attach the slot to; not persisting.");
-        } else {
+        // Unbound clients can't persist yet — bindAccountId will save
+        // once the caller has minted the accounts row.
+        if (!t.accountId.isEmpty()) {
             d_->store->save(t, [](bool ok, QString err) {
                 if (!ok) qWarning("TokenStore::save failed: %s",
                                   qUtf8Printable(err));
@@ -399,6 +464,8 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
             d_->handler = nullptr;
         }
 
+        qInfo("OAuthClient: emitting granted (accountId='%s')",
+              qUtf8Printable(t.accountId));
         emit granted();
     });
 }
@@ -454,10 +521,8 @@ bool OAuthClient::refreshIfNeededLocked() {
     // Refresh tokens are sticky; Google only re-issues them on consent.
 
     auto persisted = d_->tokens;
-    if (persisted.accountId.isEmpty()) {
-        persisted.accountId = fc::cache::Database::defaultAccountId();
-        d_->tokens.accountId = persisted.accountId;
-    }
+    persisted.accountId = d_->accountId;   // stamp from the bound id
+    d_->tokens.accountId = d_->accountId;
     if (!persisted.accountId.isEmpty()) {
         d_->store->save(persisted, [](bool ok, QString saveErr) {
             if (!ok) qWarning("TokenStore::save (refresh) failed: %s",
@@ -475,9 +540,11 @@ QString OAuthClient::accessTokenBlocking() {
 
 void OAuthClient::signOut() {
     TokenStore::Tokens copy;
+    QString accountId;
     {
         QMutexLocker lock(&d_->tokenMutex);
         copy = d_->tokens;
+        accountId = d_->accountId;
         d_->tokens = {};
     }
     if (!copy.refreshToken.isEmpty()) {
@@ -497,12 +564,12 @@ void OAuthClient::signOut() {
             reply->deleteLater();
         });
     }
-    // Erase the keychain slot for the account we were signed in as.
-    // Step 9 wraps this in the "drop cache?" prompt; here we just
-    // revoke + clear the slot.
-    const QString accountId = copy.accountId.isEmpty()
-        ? fc::cache::Database::defaultAccountId()
-        : copy.accountId;
+    if (accountId.isEmpty()) {
+        // Unbound client never had a keychain slot — just emit so
+        // callers wired to signedOut still wake up.
+        emit signedOut();
+        return;
+    }
     d_->store->erase(accountId,
         [this](bool, QString) { emit signedOut(); });
 }

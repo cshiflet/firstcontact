@@ -9,9 +9,12 @@ namespace fc::api { class GmailClient; }
 namespace fc::sync {
 
 // Coordinates initial and incremental sync against Gmail, persisting results
-// through fc::cache repositories. Phase 2 lives on the main (UI) thread for
-// simplicity — sqlite is fast enough that the small inserts don't block the
-// UI in noticeable ways. A Phase 4 polish moves this onto its own QThread.
+// through fc::cache repositories. Per-account SyncService instances live on
+// the AccountContext's dedicated sync thread (see AccountContext.h); SQL
+// batch upserts during initial sync and Gmail REST chatter no longer block
+// the UI's event loop. The legacy anonymous SyncService owned by Bootstrap
+// stays on the main thread (it never sees any real work — runOnce short-
+// circuits on the empty accountId).
 class SyncService : public QObject {
     Q_OBJECT
 public:
@@ -83,6 +86,13 @@ private:
                                bool isInitial,
                                std::function<void()> done = {});
     void setState(State s);
+    // Internal step-walker for topUpLabel. Each invocation pulls one
+    // server page; when every id on the page is already cached we
+    // advance the saved cursor and re-enter (bounded by `pagesWalked`)
+    // so the user-visible top-up actually surfaces new rows instead
+    // of stalling once the deduplication empties out the page.
+    void topUpLabelStep(const QString& labelId, int pagesWalked,
+                         int totalStoredSoFar);
 
     struct Impl;
     Impl* d_;

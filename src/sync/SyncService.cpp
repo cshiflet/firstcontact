@@ -44,13 +44,14 @@ SyncService::SyncService(fc::api::GmailClient* gmail, QObject* parent)
     : QObject(parent), d_(new Impl) {
     d_->gmail = gmail;
     fc::cache::Database::initialize();
-    // Seed from the default account so single-account flows continue to
-    // work pre-AccountContext. MainWindow / Bootstrap update this via
-    // setAccountId once the active account is selected.
-    d_->accountId = fc::cache::Database::defaultAccountId();
+    // accountId starts empty; AccountContext / MainWindow drive it via
+    // setAccountId() once the active account is known.
 }
 
 void SyncService::setAccountId(const QString& accountId) {
+    qInfo("SyncService::setAccountId(this=%p): '%s' -> '%s'",
+          static_cast<void*>(this),
+          qUtf8Printable(d_->accountId), qUtf8Printable(accountId));
     d_->accountId = accountId;
 }
 
@@ -66,16 +67,23 @@ void SyncService::setState(State s) {
 }
 
 void SyncService::runOnce() {
-    if (d_->busy) return;
+    if (d_->busy) {
+        qInfo("SyncService::runOnce(this=%p): busy, skip (accountId='%s')",
+              static_cast<void*>(this),
+              qUtf8Printable(d_->accountId));
+        return;
+    }
     if (d_->accountId.isEmpty()) {
-        // No account selected — nothing to sync. Common during the
-        // pre-sign-in state and during the brief window between sign-out
-        // and the next sign-in flow.
+        qInfo("SyncService::runOnce(this=%p): empty accountId, skip",
+              static_cast<void*>(this));
         return;
     }
     d_->busy = true;
 
     const QString hid = fc::cache::MetaRepository::historyId(d_->accountId);
+    qInfo("SyncService::runOnce: accountId='%s' hid='%s' → %s",
+          qUtf8Printable(d_->accountId), qUtf8Printable(hid),
+          hid.isEmpty() ? "doInitialSync" : "doIncrementalSync");
     if (hid.isEmpty()) {
         doInitialSync();
     } else {
@@ -97,16 +105,24 @@ void SyncService::stopScheduler() {
 
 void SyncService::doInitialSync() {
     setState(State::InitialSync);
+    qInfo("SyncService::doInitialSync: starting getProfile (accountId='%s')",
+          qUtf8Printable(d_->accountId));
 
     d_->gmail->getProfile(
         [this](fc::api::GmailClient::Profile p, fc::api::ApiError err) {
             if (err) {
+                qWarning("SyncService::doInitialSync: getProfile failed: %s",
+                         qUtf8Printable(err.message));
                 d_->lastError = err.message;
                 d_->busy = false;
                 setState(State::Idle);
                 emit failed(err.message);
                 return;
             }
+            qInfo("SyncService::doInitialSync: getProfile ok email='%s' "
+                  "historyId='%s'",
+                  qUtf8Printable(p.emailAddress),
+                  qUtf8Printable(p.historyId));
             // Persist the canonical email under the active account's
             // account_meta sheet (account_meta replaced the global
             // meta.email row in v6).
@@ -233,9 +249,17 @@ void SyncService::doIncrementalSync() {
 
 namespace {
 
-// Per-label top-up state: where to resume the next listMessages page
-// for that label. We key the meta column with a label-scoped prefix so
-// every label gets its own page-walk independent of the others.
+// Per-account, per-label top-up state: where to resume the next
+// listMessages page for that label. The key MUST include accountId
+// so two signed-in accounts walking the same label don't share /
+// corrupt each other's cursor — without this, account A's saved
+// SENT pageToken (pointing at, say, 2004 messages) would get
+// reused when account B clicks SENT, returning ancient ids that
+// land in B's cache and produce a 22-year gap in the display
+// between B's recent SENT messages and the wrong ones from A's
+// history. Stored in account_meta (cascades on dropCache) instead
+// of the global meta sheet so a per-account cache wipe also
+// resets the cursor.
 QString topUpTokenKey(const QString& labelId) {
     return QStringLiteral("labelTopUp/%1/pageToken").arg(labelId);
 }
@@ -250,87 +274,144 @@ constexpr int kTopUpPageSize = 500;
 }  // namespace
 
 void SyncService::topUpLabel(const QString& labelId) {
-    if (labelId.isEmpty()) return;
-    // Skip if a sync is already in progress — top-up shares the same
-    // busy / state machinery as incremental sync, so two paths racing
-    // each other to set State and emit messagesUpdated would scramble
-    // the FSM. The user can click the label again once the in-flight
-    // sync settles.
-    if (d_->busy) return;
-    // Skip the round-trip for labels that incremental sync already
-    // keeps up to date; they're guaranteed complete from the initial
-    // seed onward.
-    for (const auto& seed : seedLabels()) {
-        if (seed == labelId) return;
+    if (labelId.isEmpty()) {
+        qInfo("topUpLabel(account=%s): empty labelId, skip",
+              qUtf8Printable(d_->accountId));
+        return;
     }
+    if (d_->busy) {
+        qInfo("topUpLabel(account=%s, label=%s): busy, skip",
+              qUtf8Printable(d_->accountId), qUtf8Printable(labelId));
+        return;
+    }
+    qInfo("topUpLabel(account=%s, label=%s): starting",
+          qUtf8Printable(d_->accountId), qUtf8Printable(labelId));
+    emit topUpStarted(labelId);
+    topUpLabelStep(labelId, /*pagesWalked=*/0, /*totalStoredSoFar=*/0);
+}
 
-    // Claim the busy slot synchronously BEFORE the async listMessages
-    // call. Without this, a 60s sync timer firing between this point
-    // and the callback would also see busy=false, race past, and end
-    // up calling fetchAndStoreMessages from two paths concurrently.
+void SyncService::topUpLabelStep(const QString& labelId,
+                                  int pagesWalked,
+                                  int totalStoredSoFar) {
+    // Bound the auto-walk so a fully-cached label can't loop the
+    // sync indefinitely. Once we've walked the cap, surface
+    // topUpFinished and let the next user scroll resume from where
+    // the saved pageToken landed.
+    constexpr int kMaxPagesPerTopUp = 8;
+    if (d_->busy) {
+        // Between our previous step clearing busy and this scheduled
+        // step running, something else (incremental sync, another
+        // top-up) grabbed the slot. Close the topUp bracket so the
+        // UI doesn't get stuck in "Loading more…" — the user can
+        // scroll again to retry once the current sync settles.
+        emit topUpFinished(labelId, totalStoredSoFar,
+                            /*serverExhausted=*/false);
+        return;
+    }
     d_->busy = true;
     setState(State::IncrementalSync);
-    emit topUpStarted(labelId);
 
     const QString tokenKey = topUpTokenKey(labelId);
-    const QString pageToken = fc::cache::MetaRepository::get(tokenKey);
+    // Per-account scoping: store/load the cursor in account_meta
+    // (cascades on dropCache + isolates accounts). The previous
+    // implementation used global meta which let two accounts walking
+    // the same label clobber each other's cursor.
+    const QString pageToken = fc::cache::MetaRepository::get(d_->accountId,
+                                                              tokenKey);
+
+    // The synthetic "__all_mail" view passes through here too. Gmail's
+    // messages.list with no labelIds filter (the empty-string case)
+    // returns the full mailbox excluding SPAM/TRASH by default —
+    // exactly the All Mail semantics.
+    const QString gmailLabelArg = (labelId == QStringLiteral("__all_mail"))
+        ? QString() : labelId;
 
     QPointer<SyncService> self(this);
-    d_->gmail->listMessages(labelId, /*q=*/QString(), pageToken,
+    d_->gmail->listMessages(gmailLabelArg, /*q=*/QString(), pageToken,
         kTopUpPageSize,
-        [self, labelId, tokenKey]
+        [self, labelId, tokenKey, pagesWalked, totalStoredSoFar]
         (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
             if (!self) return;   // we were destroyed in flight
             if (err) {
-                // Don't escalate — top-up is best-effort. The user
-                // still sees whatever's in the cache. DO NOT advance
-                // the saved pageToken: we never actually got the next
-                // page, so the next attempt should retry the same
-                // window.
+                // Top-up is best-effort. The previous code refused to
+                // advance the cursor on failure ("retry the same
+                // window") — but if the saved token is itself the
+                // problem (stale from another account, opaque-token
+                // refresh, etc.), the next attempt would fail the
+                // same way and we'd be stuck. Clear the cursor so
+                // the next top-up restarts at the most-recent page.
+                qWarning("topUpLabel: listMessages failed for label='%s' "
+                         "(http=%d) — clearing cursor",
+                         qUtf8Printable(labelId), err.httpStatus);
+                fc::cache::MetaRepository::set(self->d_->accountId,
+                                                tokenKey, QString());
                 self->d_->busy = false;
                 self->setState(State::Idle);
-                emit self->topUpFinished(labelId, 0, /*serverExhausted=*/false);
+                emit self->topUpFinished(labelId, totalStoredSoFar,
+                                          /*serverExhausted=*/false);
                 return;
             }
             const bool serverExhausted = page.nextPageToken.isEmpty();
 
-            // Skip ids we already have in the cache to avoid a wasted
-            // getMessage round-trip per known message.
             QStringList missing;
             missing.reserve(page.ids.size());
             for (const auto& id : page.ids) {
-                if (!fc::cache::MessageRepository::exists(id)) {
+                if (!fc::cache::MessageRepository::exists(
+                        self->d_->accountId, id)) {
                     missing << id;
                 }
             }
+
             if (missing.isEmpty()) {
-                // Nothing to fetch — the page is fully cached. Safe
-                // to advance the cursor right now since no fetch can
-                // fail downstream of this branch.
-                fc::cache::MetaRepository::set(tokenKey, page.nextPageToken);
+                // Whole page already cached. Advance the cursor and
+                // either keep walking (so the user actually sees
+                // progress on labels like "All Mail" where the most
+                // recent thousand ids have all been seeded by other
+                // labels' syncs already) or settle if we've hit the
+                // safety cap / server end.
+                fc::cache::MetaRepository::set(self->d_->accountId,
+                                                tokenKey, page.nextPageToken);
                 self->d_->busy = false;
                 self->setState(State::Idle);
                 emit self->messagesUpdated();
-                emit self->topUpFinished(labelId, 0, serverExhausted);
+                const bool capReached = pagesWalked + 1 >= kMaxPagesPerTopUp;
+                if (serverExhausted || capReached) {
+                    emit self->topUpFinished(labelId, totalStoredSoFar,
+                                              serverExhausted);
+                    return;
+                }
+                // Re-enter on the event loop so we don't blow the
+                // stack and so other queued events (UI repaint,
+                // scroll handling) still get a chance to run between
+                // pages.
+                QPointer<SyncService> selfCopy = self;
+                const QString lbl = labelId;
+                const int pw = pagesWalked + 1;
+                const int ts = totalStoredSoFar;
+                QTimer::singleShot(0, self.data(),
+                    [selfCopy, lbl, pw, ts] {
+                        if (!selfCopy) return;
+                        selfCopy->topUpLabelStep(lbl, pw, ts);
+                    });
                 return;
             }
-            // The completion callback fires AFTER all per-message
-            // getMessage round-trips have settled, so the
-            // topUpFinished signal lines up with the moment the user
-            // actually has the new rows. fetchAndStoreMessages clears
-            // busy / state on its way out (we set them already to
-            // hold the slot through the listMessages await). Advance
-            // the saved pageToken ONLY when the fetch finishes — if
-            // the per-message fetches blow up partway, the next call
-            // can retry the same window rather than skipping ids
-            // permanently.
+            // Page has uncached ids — fetch them, then settle.
+            // (We don't continue auto-walking after a successful
+            // fetch; one server round-trip's worth of new rows is
+            // plenty for a single top-up. The user can scroll past
+            // the new rows to trigger the next walk.)
             const int storeCount = static_cast<int>(missing.size());
             const QString nextToken = page.nextPageToken;
-            self->fetchAndStoreMessages(missing, /*newCount=*/0, /*isInitial=*/false,
-                [self, labelId, tokenKey, nextToken, storeCount, serverExhausted] {
+            const int storedAfter = totalStoredSoFar + storeCount;
+            self->fetchAndStoreMessages(missing, /*newCount=*/0,
+                /*isInitial=*/false,
+                [self, labelId, tokenKey, nextToken, storedAfter,
+                 serverExhausted] {
                     if (!self) return;
-                    fc::cache::MetaRepository::set(tokenKey, nextToken);
-                    emit self->topUpFinished(labelId, storeCount, serverExhausted);
+                    fc::cache::MetaRepository::set(self->d_->accountId,
+                                                    tokenKey, nextToken);
+                    emit self->topUpFinished(labelId, storedAfter,
+                                              serverExhausted);
                 });
         });
 }
@@ -356,26 +437,40 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
 
     auto remaining = std::make_shared<int>(ids.size());
     auto stored    = std::make_shared<int>(0);
+    // Accumulate fetched messages and commit them in ONE SQLite
+    // transaction at the end. The previous code did one
+    // db.transaction()/commit() PER message, which fsyncs the WAL
+    // per call — for a 400-message initial seed listing that's
+    // hundreds of milliseconds of UI-thread blocking on disk I/O.
+    // Batching one transaction across the batch trades that cost for
+    // a single fsync and lets the event loop run between network
+    // callbacks (where setHtml / status-bar / placeholder repaints
+    // can actually land).
+    auto pending = std::make_shared<std::vector<fc::Message>>();
+    pending->reserve(ids.size());
 
-    auto onOne = [self, remaining, stored, newCount, isInitial,
+    auto onOne = [self, remaining, stored, pending,
+                   newCount, isInitial,
                    done = std::move(done)]
         (fc::Message m, fc::api::ApiError err) {
-        // We may have been destroyed mid-flight; the per-message
-        // upsert still goes to the cache (keyed by accountId we
-        // captured implicitly via `self`) only when self is alive,
-        // since accountId lives on the Impl.
+        // We may have been destroyed mid-flight. If self is gone we
+        // skip the per-message work; the completion callback below
+        // still runs once all remaining counters hit 0 so the caller
+        // can settle its own state (topUpFinished, etc.).
         if (!err && !m.id.isEmpty() && self) {
             m.accountId = self->d_->accountId;
-            fc::cache::MessageRepository::upsert(self->d_->accountId, m);
-            ++(*stored);
+            pending->push_back(std::move(m));
         }
         if (--(*remaining) > 0) return;
         if (!self) {
-            // Service destroyed; still run the completion callback so
-            // caller-side state (topUpFinished, etc.) settles.
             if (done) done();
             return;
         }
+        // All getMessage callbacks have returned. Commit the batch
+        // in a single transaction. upsertMany returns the number of
+        // rows successfully stored.
+        *stored = fc::cache::MessageRepository::upsertMany(
+            self->d_->accountId, *pending);
         fc::cache::LabelRepository::recomputeCounts(self->d_->accountId);
         emit self->labelsUpdated();
         emit self->messagesUpdated();

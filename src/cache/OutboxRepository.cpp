@@ -136,17 +136,4 @@ void OutboxRepository::markFailed(qint64 id, const QString& err,
     q.exec();
 }
 
-// ---------- legacy zero-arg overloads ----------
-
-qint64 OutboxRepository::enqueue(const OutboxItem& item) {
-    const QString aid = item.accountId.isEmpty()
-        ? Database::defaultAccountId()
-        : item.accountId;
-    return enqueue(aid, item);
-}
-
-std::vector<OutboxItem> OutboxRepository::dueForSend() {
-    return dueForSend(Database::defaultAccountId());
-}
-
 }  // namespace fc::cache

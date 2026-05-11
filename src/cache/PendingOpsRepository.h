@@ -35,12 +35,6 @@ public:
     // markAttempt/remove key off the autoincrement row id.
     static void markAttempt(qint64 id, const QString& err);
     static void remove(qint64 id);
-
-    // Legacy zero-arg overloads.
-    static qint64                 enqueueModify(const QString& messageId,
-                                                 const QStringList& addLabels,
-                                                 const QStringList& removeLabels);
-    static std::vector<PendingOp> due();
 };
 
 }  // namespace fc::cache

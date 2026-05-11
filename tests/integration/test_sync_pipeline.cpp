@@ -28,15 +28,26 @@ namespace fc::cache { QSqlDatabase databaseHandle(); }
 
 namespace {
 
-// Multi-account schema seeds a synthetic legacy account during
-// migration 0006 (UUID 00000000-0000-4000-8000-000000000001). The
-// legacy MessageRepository::upsert(m) and listByLabel(label, …)
-// overloads route through Database::defaultAccountId(), which returns
-// that synthetic account on a fresh test cache. We don't insert our
-// own — using the migration's seed keeps the test honest about what
-// the production legacy path actually sees.
+// The legacy single-account → multi-account migration was removed,
+// so a fresh schema has no accounts row. Tests seed one explicitly
+// with a deterministic UUID and stamp every per-account row with it.
+constexpr const char* kTestAccountId =
+    "00000000-0000-4000-8000-bbbbbbbbbbb1";
+
 QString testAccountId() {
-    return fc::cache::Database::defaultAccountId();
+    return QString::fromLatin1(kTestAccountId);
+}
+
+void seedTestAccount() {
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT OR IGNORE INTO accounts(id, email, sort_order, created_at) "
+        "VALUES(:id, :em, 0, strftime('%s','now')*1000)"));
+    q.bindValue(QStringLiteral(":id"), testAccountId());
+    q.bindValue(QStringLiteral(":em"),
+                QStringLiteral("sync-pipeline@example.test"));
+    q.exec();
 }
 
 // Production seeds the labels table from labels.list during InitialSync.
@@ -124,10 +135,7 @@ private slots:
         QFile::remove(dbPath + QStringLiteral("-wal"));
         QFile::remove(dbPath + QStringLiteral("-shm"));
         fc::cache::Database::initialize();
-        // Migration 0006 auto-seeds a synthetic legacy account row;
-        // sanity-check that defaultAccountId points at it so the
-        // legacy MessageRepository overloads have somewhere to land.
-        QVERIFY(!fc::cache::Database::defaultAccountId().isEmpty());
+        seedTestAccount();
     }
 
     // The bedrock case: parse one Gmail message, upsert it, list it back
@@ -151,10 +159,11 @@ private slots:
         // labels.list during InitialSync; tests do it explicitly.
         seedSystemLabels();
 
-        fc::cache::MessageRepository::upsert(m);
+        fc::cache::MessageRepository::upsert(testAccountId(), m);
 
         const auto rows = fc::cache::MessageRepository::listByLabel(
-            QStringLiteral("INBOX"), /*limit=*/10, /*offset=*/0);
+            testAccountId(), QStringLiteral("INBOX"),
+            /*limit=*/10, /*offset=*/0);
         QCOMPARE(rows.size(), size_t(1));
         QCOMPARE(rows[0].id, QStringLiteral("msg-aaa"));
         QCOMPARE(rows[0].subject, QStringLiteral("Fixture subject one"));
@@ -172,10 +181,11 @@ private slots:
     void orderingIsNewestFirst() {
         const auto m1 = fc::api::MessageParser::parse(
             QJsonDocument::fromJson(QByteArray(kFixture2)).object());
-        fc::cache::MessageRepository::upsert(m1);
+        fc::cache::MessageRepository::upsert(testAccountId(), m1);
 
         const auto rows = fc::cache::MessageRepository::listByLabel(
-            QStringLiteral("INBOX"), /*limit=*/10, /*offset=*/0);
+            testAccountId(), QStringLiteral("INBOX"),
+            /*limit=*/10, /*offset=*/0);
         QCOMPARE(rows.size(), size_t(2));
         // msg-aaa (1700000000000) > msg-bbb (1690000000000) → first row.
         QCOMPARE(rows[0].id, QStringLiteral("msg-aaa"));
@@ -186,7 +196,8 @@ private slots:
     // msg-aaa is unread; msg-bbb (STARRED but no UNREAD) should not appear.
     void unreadOnlyFilter() {
         const auto rows = fc::cache::MessageRepository::listByLabel(
-            QStringLiteral("INBOX"), /*limit=*/10, /*offset=*/0,
+            testAccountId(), QStringLiteral("INBOX"),
+            /*limit=*/10, /*offset=*/0,
             /*unreadOnly=*/true);
         QCOMPARE(rows.size(), size_t(1));
         QCOMPARE(rows[0].id, QStringLiteral("msg-aaa"));
@@ -197,11 +208,12 @@ private slots:
     void upsertIsIdempotent() {
         const auto m = fc::api::MessageParser::parse(
             QJsonDocument::fromJson(QByteArray(kFixture)).object());
-        fc::cache::MessageRepository::upsert(m);   // again
-        fc::cache::MessageRepository::upsert(m);   // and again
+        fc::cache::MessageRepository::upsert(testAccountId(), m);   // again
+        fc::cache::MessageRepository::upsert(testAccountId(), m);   // and again
 
         const auto rows = fc::cache::MessageRepository::listByLabel(
-            QStringLiteral("INBOX"), /*limit=*/10, /*offset=*/0);
+            testAccountId(), QStringLiteral("INBOX"),
+            /*limit=*/10, /*offset=*/0);
         // Still exactly the two messages from previous tests, no dupes.
         QCOMPARE(rows.size(), size_t(2));
     }

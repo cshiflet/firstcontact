@@ -1,6 +1,8 @@
 #include "CacheManagerDialog.h"
 
+#include "account/AccountContext.h"
 #include "account/AccountManager.h"
+#include "auth/OAuthClient.h"
 
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -51,8 +53,10 @@ CacheManagerDialog::CacheManagerDialog(
         "Each row shows the on-disk cache footprint for an account "
         "(message bodies, metadata, downloaded attachments). Dropping "
         "a cache deletes the rows but keeps the account signed in — "
-        "the next sync rebuilds. <b>Orphaned</b> rows are cache data "
-        "left over after an account row was deleted out-of-band."), this);
+        "the next sync rebuilds. <b>Orphaned</b> covers both cache "
+        "data left after an account row was removed out-of-band and "
+        "cache data for accounts that have signed out (no current "
+        "OAuth tokens)."), this);
     hint->setObjectName(QStringLiteral("FormHint"));
     hint->setWordWrap(true);
     hint->setTextFormat(Qt::RichText);
@@ -115,16 +119,53 @@ CacheManagerDialog::CacheManagerDialog(
     });
 
     connect(dropOrphansBtn, &QPushButton::clicked, this, [this] {
-        const auto orphans = accounts_->orphanedAccountIds();
-        if (orphans.isEmpty()) {
+        // True orphans (cache rows with no accounts row) plus
+        // signed-out accounts (accounts row exists but no per-context
+        // auth currently has tokens). Sign-out-keep-cache leaves the
+        // accounts row behind on purpose — but the cache is still
+        // not actively in use, and from the user's perspective "I
+        // signed that account out" reads as "the cache for that
+        // account is now orphaned."
+        QStringList stale = accounts_->orphanedAccountIds();
+        QStringList signedOutEmails;
+        for (const auto& a : accounts_->accounts()) {
+            auto* ctx = accounts_->contextFor(a.id);
+            const bool authed = ctx && ctx->auth()
+                && ctx->auth()->isAuthorized();
+            if (!authed) {
+                if (!stale.contains(a.id)) stale << a.id;
+                signedOutEmails << (a.email.isEmpty()
+                                        ? a.id : a.email);
+            }
+        }
+        if (stale.isEmpty()) {
             QMessageBox::information(this, tr("Drop orphaned cache"),
                 tr("No orphaned cache rows."));
             return;
         }
+        QString msg = tr("Found %1 orphaned account(s). Drop their cache?")
+                          .arg(stale.size());
+        if (!signedOutEmails.isEmpty()) {
+            msg += tr("\n\nIncludes signed-out accounts:\n• %1")
+                       .arg(signedOutEmails.join(QStringLiteral("\n• ")));
+        }
         if (QMessageBox::question(this, tr("Drop orphaned cache"),
-                tr("Found %1 orphaned account(s). Drop their cache?")
-                    .arg(orphans.size())) != QMessageBox::Yes) return;
-        const int n = accounts_->dropOrphanedCache();
+                msg) != QMessageBox::Yes) return;
+        int n = 0;
+        for (const auto& id : stale) {
+            // Drop the cache rows first, then remove the accounts
+            // row itself. Without removing the row, signed-out
+            // accounts kept showing in this dialog with 0 rows /
+            // 0 bytes — visually noisy and not useful: the only
+            // reason to preserve the row was to let a re-sign-in
+            // re-attach to the existing cache by email, and that
+            // cache no longer exists. accounts_->remove deletes
+            // the row + cascades any stragglers; sign-back-in
+            // will just mint a fresh UUID, identical to a
+            // first-time sign-in against an empty cache.
+            if (accounts_->dropCache(id)) ++n;
+            accounts_->remove(id);
+        }
         QMessageBox::information(this, tr("Drop orphaned cache"),
             tr("Cleaned up %1 orphan(s).").arg(n));
         rebuildTable();

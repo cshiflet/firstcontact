@@ -27,26 +27,21 @@ Bootstrap::Bootstrap(QObject* parent) : QObject(parent) {
     // It builds an AccountContext for every accounts row at startup.
     accounts_   = new fc::account::AccountManager(config_, tokenStore_, this);
 
-    // The legacy single-instance pointers below now alias the current
-    // account's context. MainWindow still consumes them directly until
-    // step 8 reroutes through accounts_->currentContext(). On account
-    // switch, MainWindow rebinds these via accounts_->currentContext().
-    if (auto* ctx = accounts_->currentContext()) {
-        auth_  = ctx->auth();
-        rest_  = ctx->rest();
-        gmail_ = ctx->gmail();
-        sync_  = ctx->sync();
-    } else {
-        // No accounts row yet (fresh install pre-sign-in): build a
-        // shared "anonymous" stack so the sign-in flow has somewhere
-        // to land. The OAuthClient here loads no slot (Database
-        // returns empty default). Once add() runs, the rebuilt
-        // currentContext takes over.
-        auth_  = new fc::auth::OAuthClient(config_, tokenStore_, this);
-        rest_  = new fc::api::RestClient(auth_, this);
-        gmail_ = new fc::api::GmailClient(rest_, this);
-        sync_  = new fc::sync::SyncService(gmail_, this);
-    }
+    // Legacy single-instance pointers. These were originally aliased
+    // to the current account's context, but that turned every
+    // MainWindow side-effect on `sync_` / `auth_` (e.g.
+    // clearAccountUiState's `sync_->setAccountId({})`) into a
+    // mutation of the active context's stack — which silently broke
+    // sync at startup whenever an accounts row already existed.
+    //
+    // The aliases now always own a separate, never-bound "anonymous"
+    // stack. Per-account work routes through accounts_->contextFor()
+    // / accounts_->currentContext() everywhere that matters.
+    auth_  = new fc::auth::OAuthClient(config_, tokenStore_,
+                                        /*accountId=*/QString(), this);
+    rest_  = new fc::api::RestClient(auth_, this);
+    gmail_ = new fc::api::GmailClient(rest_, this);
+    sync_  = new fc::sync::SyncService(gmail_, this);
 
     auto resolver = [mgr = accounts_](const QString& accountId)
                         -> fc::api::GmailClient* {

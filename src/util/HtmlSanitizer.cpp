@@ -9,6 +9,27 @@ namespace fc::util {
 
 namespace {
 
+// Tags that we keep structurally, but flatten to `<div>` on output.
+// Marketing emails almost universally use tables for layout (single-
+// column, no border, deeply nested). QTextBrowser's table layout
+// engine is roughly O(n²) in nesting depth — a 6-deep nested-table
+// email pegs the UI thread for several seconds during the post-
+// setHtml layout pass, even though setHtml itself returns in <5ms.
+// Rewriting to <div> preserves block flow and content order while
+// avoiding the table-layout cost; the cost is losing visual columns
+// for the rare data table, which the user can recover by clicking
+// "Open in browser" for the original HTML.
+const QSet<QString>& flattenToDiv() {
+    static const QSet<QString> s{
+        QStringLiteral("table"), QStringLiteral("thead"),
+        QStringLiteral("tbody"), QStringLiteral("tfoot"),
+        QStringLiteral("tr"),    QStringLiteral("td"),
+        QStringLiteral("th"),    QStringLiteral("caption"),
+        QStringLiteral("colgroup"),
+    };
+    return s;
+}
+
 const QSet<QString>& tagAllow() {
     static const QSet<QString> s{
         QStringLiteral("html"), QStringLiteral("body"), QStringLiteral("head"),
@@ -273,7 +294,9 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
         }
 
         if (t.isClose) {
-            out.append(QStringLiteral("</")).append(t.name).append(QChar('>'));
+            const QString outName = flattenToDiv().contains(t.name)
+                ? QStringLiteral("div") : t.name;
+            out.append(QStringLiteral("</")).append(outName).append(QChar('>'));
             continue;
         }
 
@@ -323,7 +346,15 @@ SanitizeResult sanitizeHtml(const QString& dirty, const SanitizeOptions& opts) {
                     .append(QChar('"'));
         }
 
-        out.append(QChar('<')).append(t.name).append(attrsOut);
+        // Flatten table-family tags to <div> on emit so QTextBrowser
+        // doesn't run its slow table-layout pass on deeply nested
+        // marketing-email layouts. We keep the attribute filter on
+        // the original tag name above so colspan/rowspan/etc. are
+        // dropped (they're meaningless on a div anyway), and emit
+        // the rewritten name here.
+        const QString outName = flattenToDiv().contains(t.name)
+            ? QStringLiteral("div") : t.name;
+        out.append(QChar('<')).append(outName).append(attrsOut);
         // HTML5 only treats VOID elements as self-closing when written
         // `<tag />`. For non-void tags an XHTML-style `<div/>` parses
         // as an open `<div>` (with no matching close), which leaves

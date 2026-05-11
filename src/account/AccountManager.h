@@ -33,9 +33,14 @@ struct AccountInfo {
 // API clients (OAuthClient, RestClient, GmailClient, SyncService)
 // off of via AccountContext.
 //
-// Thread-affinity: lives on the UI thread. The sync threads do not
-// touch it directly — they read account_id strings out of cache rows
-// and dispatch through the per-account stack picked by the manager.
+// Thread-affinity: lives on the UI thread. Each AccountContext spawns
+// its own QThread on which its OAuthClient / RestClient / GmailClient /
+// SyncService live; the per-context signal forwarders below connect
+// with AutoConnection, which becomes a queued cross-thread post when
+// the signal originates on a sync thread. The sync threads do not
+// touch AccountManager itself — they read account_id strings out of
+// cache rows and dispatch through the per-account stack picked by the
+// manager.
 class AccountManager : public QObject {
     Q_OBJECT
 public:
@@ -164,6 +169,13 @@ public:
     // sync scheduler per signed-in account, and by the workers.
     QList<AccountContext*> allContexts() const;
 
+    // The shared TokenStore + ClientConfig that every per-account
+    // OAuthClient was constructed against. Exposed so the Add-account
+    // flow can mint a transient unbound OAuthClient against the same
+    // keychain backing — see MainWindow::beginAddAccountFlow.
+    fc::auth::TokenStore*  tokenStore() const { return tokenStore_; }
+    fc::auth::ClientConfig* clientConfig() const { return config_; }
+
     // Wires (or rebuilds) an AccountContext for the given account id.
     // Idempotent: a second call returns the same context. Returns
     // nullptr if the manager wasn't given a config/tokenStore at
@@ -182,6 +194,36 @@ signals:
     void messagesUpdated(const QString& accountId);
     void newMessages(const QString& accountId, int count);
     void syncFailed(const QString& accountId, const QString& reason);
+    void topUpStarted(const QString& accountId, const QString& labelId);
+    void topUpFinished(const QString& accountId, const QString& labelId,
+                        int newRowsStored, bool serverExhausted);
+    // Coarser-grained "any sync is active for this account" pair.
+    // Fires when the per-account SyncService leaves Idle (initial
+    // sync, incremental sync, or top-up) and again when it returns
+    // to Idle. MainWindow uses these to drive the status-bar /
+    // placeholder "Syncing…" feedback for paths the per-label
+    // topUpStarted/Finished pair doesn't cover (notably the initial
+    // sync after a cache wipe).
+    void syncStarted(const QString& accountId);
+    void syncFinished(const QString& accountId);
+    // Forwarded from the per-account OAuthClient::tokensLoaded.
+    // MainWindow uses this to trigger a sidebar/list reload after
+    // async keychain hydration completes (or after Add-account
+    // adopts tokens onto a freshly-built context).
+    void tokensLoaded(const QString& accountId);
+    // Forwarded from the per-account OAuthClient::signedOut.
+    // AccountManagerDialog and the toolbar indicator listen so the
+    // signed-out row disappears (or flips to "Signed out") without
+    // waiting for the dialog to be re-opened.
+    void accountSignedOut(const QString& accountId);
+
+    // Fired right after dropCache successfully wipes a per-account
+    // cache. MainWindow uses this to repaint the sidebar / message
+    // list (which would otherwise still show the now-gone rows
+    // until the next sync emits messagesUpdated) and to nudge a
+    // fresh runOnce so the empty cache doesn't sit there until the
+    // 60s scheduler tick.
+    void cacheCleared(const QString& accountId);
 
 private:
     void selectInitialCurrent();

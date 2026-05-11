@@ -121,17 +121,4 @@ void PendingOpsRepository::remove(qint64 id) {
     q.exec();
 }
 
-// ---------- legacy zero-arg overloads ----------
-
-qint64 PendingOpsRepository::enqueueModify(const QString& messageId,
-                                            const QStringList& addLabels,
-                                            const QStringList& removeLabels) {
-    return enqueueModify(Database::defaultAccountId(), messageId,
-                         addLabels, removeLabels);
-}
-
-std::vector<PendingOp> PendingOpsRepository::due() {
-    return due(Database::defaultAccountId());
-}
-
 }  // namespace fc::cache

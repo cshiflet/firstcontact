@@ -35,22 +35,6 @@ QString Database::connectionName() { return perThreadName(); }
 
 QString Database::filePath() { return fc::util::cacheDbPath(); }
 
-QString Database::defaultAccountId() {
-    QSqlDatabase db = QSqlDatabase::database(perThreadName(), /*open=*/true);
-    if (!db.isOpen()) return {};
-    QSqlQuery q(db);
-    if (!q.exec(QStringLiteral(
-            "SELECT id FROM accounts "
-            "ORDER BY is_default DESC, "
-            "         COALESCE(last_used_at, 0) DESC, "
-            "         sort_order ASC, email ASC "
-            "LIMIT 1"))) {
-        return {};
-    }
-    if (!q.next()) return {};
-    return q.value(0).toString();
-}
-
 void Database::initialize() {
     const QString name = perThreadName();
     if (QSqlDatabase::contains(name)) return;

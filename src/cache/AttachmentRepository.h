@@ -19,7 +19,6 @@ namespace fc::cache {
 // then optionally cached at the local_path.
 class AttachmentRepository {
 public:
-    // Per-account API. Step 3 walks every call site over.
     static void replaceForMessage(const QString& accountId,
                                   const QString& messageId,
                                   const std::vector<fc::Attachment>& attachments);
@@ -27,13 +26,6 @@ public:
                                                   const QString& messageId);
     static void markDownloaded(const QString& accountId,
                                const QString& attachmentId,
-                               const QString& localPath);
-
-    // Legacy zero-arg overloads (route through default account).
-    static void replaceForMessage(const QString& messageId,
-                                  const std::vector<fc::Attachment>& attachments);
-    static std::vector<fc::Attachment> byMessage(const QString& messageId);
-    static void markDownloaded(const QString& attachmentId,
                                const QString& localPath);
 };
 

@@ -20,8 +20,6 @@ struct LabelRow {
 
 class LabelRepository {
 public:
-    // Per-account API — preferred. Step-3 of the multi-account migration
-    // moves every call site to these.
     static void                  upsert(const QString& accountId,
                                         const LabelRow& l);
     static std::vector<LabelRow> all(const QString& accountId);
@@ -36,15 +34,6 @@ public:
     // back. Used by the v2 unified search overlay so pills paint
     // correctly even when results span accounts.
     static std::vector<LabelRow> allAccounts();
-
-    // Legacy single-account overloads. Forward to the default account
-    // (Database::defaultAccountId). Once step 3 finishes, only a few
-    // entry points still need these and they go away in step 12.
-    static void                  upsert(const LabelRow& l);
-    static std::vector<LabelRow> all();
-    static LabelRow              byId(const QString& id);
-    static void                  remove(const QString& id);
-    static void                  recomputeCounts();
 };
 
 }  // namespace fc::cache

@@ -5,12 +5,31 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QObject>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QStandardPaths>
 #include <QtTest>
+
+namespace fc::cache { QSqlDatabase databaseHandle(); }
 
 class TestLabelTreeModel : public QObject {
     Q_OBJECT
 private:
+    static constexpr const char* kAccountId =
+        "00000000-0000-4000-8000-aaaaaaaaaaa3";
+
+    static void seedAccount() {
+        auto db = fc::cache::databaseHandle();
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "INSERT OR IGNORE INTO accounts(id, email, sort_order, created_at) "
+            "VALUES(:id, :em, 0, strftime('%s','now')*1000)"));
+        q.bindValue(QStringLiteral(":id"), QString::fromLatin1(kAccountId));
+        q.bindValue(QStringLiteral(":em"),
+                    QStringLiteral("label-tree@example.test"));
+        QVERIFY(q.exec());
+    }
+
     int countDescendants(fc::LabelTreeModel& m, const QModelIndex& parent) {
         int n = m.rowCount(parent);
         int total = n;
@@ -39,32 +58,44 @@ private slots:
         QCoreApplication::setApplicationName(QStringLiteral("FirstContactTest"));
         QFile::remove(fc::cache::Database::filePath());
         fc::cache::Database::initialize();
+        seedAccount();
 
-        // Seed: a couple of system labels and a nested user-label hierarchy.
-        auto sys = [](const QString& id, const QString& name) {
+        // Seed: a couple of system labels and a nested user-label hierarchy,
+        // all scoped to the test account.
+        const QString account = QString::fromLatin1(kAccountId);
+        auto sys = [&account](const QString& id, const QString& name) {
             fc::cache::LabelRow r;
+            r.accountId = account;
             r.id = id; r.name = name; r.type = QStringLiteral("system");
             return r;
         };
-        fc::cache::LabelRepository::upsert(sys(QStringLiteral("INBOX"),  QStringLiteral("INBOX")));
-        fc::cache::LabelRepository::upsert(sys(QStringLiteral("SENT"),   QStringLiteral("SENT")));
-        fc::cache::LabelRepository::upsert(sys(QStringLiteral("STARRED"),QStringLiteral("STARRED")));
+        fc::cache::LabelRepository::upsert(account,
+            sys(QStringLiteral("INBOX"),  QStringLiteral("INBOX")));
+        fc::cache::LabelRepository::upsert(account,
+            sys(QStringLiteral("SENT"),   QStringLiteral("SENT")));
+        fc::cache::LabelRepository::upsert(account,
+            sys(QStringLiteral("STARRED"),QStringLiteral("STARRED")));
 
-        auto user = [](const QString& id, const QString& name) {
+        auto user = [&account](const QString& id, const QString& name) {
             fc::cache::LabelRow r;
+            r.accountId = account;
             r.id = id; r.name = name; r.type = QStringLiteral("user");
             return r;
         };
-        fc::cache::LabelRepository::upsert(user(QStringLiteral("Label_1"),
-                                                QStringLiteral("Travel/Booking")));
-        fc::cache::LabelRepository::upsert(user(QStringLiteral("Label_2"),
-                                                QStringLiteral("Travel/Receipts")));
-        fc::cache::LabelRepository::upsert(user(QStringLiteral("Label_3"),
-                                                QStringLiteral("Personal")));
+        fc::cache::LabelRepository::upsert(account,
+            user(QStringLiteral("Label_1"),
+                  QStringLiteral("Travel/Booking")));
+        fc::cache::LabelRepository::upsert(account,
+            user(QStringLiteral("Label_2"),
+                  QStringLiteral("Travel/Receipts")));
+        fc::cache::LabelRepository::upsert(account,
+            user(QStringLiteral("Label_3"),
+                  QStringLiteral("Personal")));
     }
 
     void buildsSystemLabelsUnderFoldersSectionInOrder() {
         fc::LabelTreeModel m;
+        m.setAccountId(QString::fromLatin1(kAccountId));
         // v2 added an "All Inboxes" synthetic node at the top, ahead of
         // the per-account "Folders" / "Labels" sections.
         QCOMPARE(m.rowCount(), 3);
@@ -97,6 +128,7 @@ private slots:
 
     void nestsSlashSeparatedUserLabels() {
         fc::LabelTreeModel m;
+        m.setAccountId(QString::fromLatin1(kAccountId));
         const auto travel = findByName(m, QStringLiteral("Travel"));
         QVERIFY(travel.isValid());
         QCOMPARE(m.rowCount(travel), 2);

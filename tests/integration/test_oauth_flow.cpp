@@ -56,7 +56,7 @@ private slots:
         QVERIFY(config.isConfigured());
 
         fc::auth::TokenStore store;
-        fc::auth::OAuthClient oauth(&config, &store);
+        fc::auth::OAuthClient oauth(&config, &store, /*accountId=*/QString());
 
         // browserAuthRequested fires from inside authorize() once the URL
         // has been built and the loopback handler is listening. We catch
@@ -116,7 +116,7 @@ private slots:
         QVERIFY(!config.isConfigured());
 
         fc::auth::TokenStore store;
-        fc::auth::OAuthClient oauth(&config, &store);
+        fc::auth::OAuthClient oauth(&config, &store, /*accountId=*/QString());
         QSignalSpy failed(&oauth, &fc::auth::OAuthClient::failed);
         oauth.authorize();
         QVERIFY(failed.wait(1000) || !failed.isEmpty());

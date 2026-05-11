@@ -59,6 +59,16 @@ MessageItemDelegate::MessageItemDelegate(QObject* parent)
 
 QSize MessageItemDelegate::sizeHint(const QStyleOptionViewItem&,
                                     const QModelIndex&) const {
+    // Use a single uniform row height regardless of whether the
+    // index is a real message row or the synthetic footer
+    // placeholder. The MessageListView sets
+    // setUniformItemSizes(true), which makes Qt cache the FIRST
+    // row's sizeHint and reuse it for every row. If the first row
+    // happens to be the placeholder (e.g. STARRED/IMPORTANT with
+    // an empty cache plus a "Loading more messages…" footer), a
+    // shorter sizeHint would silently squash every subsequent
+    // real-message row down to that height, causing the two-line
+    // sender/subject layout to overlap.
     return {0, kRowHeight};
 }
 
@@ -94,6 +104,24 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
                                 const QModelIndex& idx) const {
     p->save();
     p->setRenderHint(QPainter::Antialiasing, true);
+
+    // Synthetic footer placeholder — "Loading more messages…" /
+    // "No more messages". Rendered as a single line of italic gray
+    // text centered horizontally; no background painting, no
+    // hover/selection styling. The model marks these rows with
+    // IsPlaceholderRole; they live at the very end of the list and
+    // aren't selectable (see MessageListModel::flags).
+    if (idx.data(fc::MessageListModel::IsPlaceholderRole).toBool()) {
+        const QString text =
+            idx.data(fc::MessageListModel::PlaceholderTextRole).toString();
+        QFont f = opt.font;
+        f.setItalic(true);
+        p->setFont(f);
+        p->setPen(opt.palette.color(QPalette::Disabled, QPalette::Text));
+        p->drawText(opt.rect, Qt::AlignCenter, text);
+        p->restore();
+        return;
+    }
 
     QStyleOptionViewItem o = opt;
     initStyleOption(&o, idx);

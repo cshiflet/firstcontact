@@ -3,6 +3,7 @@
 #include "account/AccountContext.h"
 #include "account/AccountManager.h"
 #include "api/GmailClient.h"
+#include "api/RestClient.h"
 #include "api/SessionTransfer.h"
 #include "auth/ClientConfig.h"
 #include "auth/OAuthClient.h"
@@ -65,6 +66,7 @@ namespace fc::cache { QSqlDatabase databaseHandle(); }
 #include <QDialog>
 #include <QFrame>
 #include <QLabel>
+#include <QMetaObject>
 #include <QTimer>
 #include <QLineEdit>
 #include <QMenuBar>
@@ -93,7 +95,23 @@ namespace fc::ui {
 
 namespace {
 constexpr int kPageSize = 100;
+
+// AccountContext's per-account stack (OAuthClient / RestClient /
+// GmailClient / SyncService) lives on the context's own QThread to
+// keep heavy upserts and Gmail REST traffic off the UI thread. Any
+// non-thread-safe method on those QObjects has to be invoked via a
+// queued cross-thread post, otherwise QNetworkAccessManager and
+// QSqlDatabase would touch state on the wrong thread (best-case Qt
+// warning; worst-case crash). These thin wrappers keep the call
+// sites readable and avoid repeating the lambda+Qt::QueuedConnection
+// boilerplate.
+template<class Target, class Fn>
+inline void postToObject(Target* target, Fn&& fn) {
+    if (!target) return;
+    QMetaObject::invokeMethod(target, std::forward<Fn>(fn),
+                               Qt::QueuedConnection);
 }
+}  // namespace
 
 MainWindow::MainWindow(fc::auth::ClientConfig* config,
                        fc::auth::OAuthClient* auth,
@@ -112,10 +130,7 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     resize(1200, 760);
     fc::cache::Database::initialize();
 
-    // Seed the active account from AccountManager's selection (which
-    // applies the same default-account rule as Database::defaultAccountId,
-    // but in-memory). Step 8 wires currentAccountChanged to UI repaints
-    // so the toolbar account menu can flip the panes between accounts.
+    // Seed the active account from AccountManager's selection.
     currentAccountId_ = accounts_->currentAccountId();
     sync_->setAccountId(currentAccountId_);
 
@@ -197,20 +212,39 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     connect(Theme::instance(), &Theme::changed, this,
             [this](Theme::Mode) { refreshToolbarIcons(); });
 
-    // Hydrate UI from cache without waiting for a network round trip —
-    // BUT only when the active account is actually signed in. The
-    // accounts table can carry rows for accounts that signed in once
-    // and signed out (we keep the row + cache when the user said "keep
-    // cached data" so a re-sign-in is fast); migration 0006 also seeds
-    // a synthetic legacy row. Without this gate, a launched-with-no-
-    // signed-in-account window would render the previous account's
-    // mail straight from cache. enforceActiveAccountGate() runs the
-    // check now (best-effort — keychain hydration is async, so this
-    // first call may say "not signed in" even when we will be) AND
-    // again from the tokensLoaded handler once the per-account
-    // OAuthClients have finished hydrating from the keychain.
-    enforceActiveAccountGate();
-    if (auth_->isAuthorized()) {
+    // Construction-time gate. Per-context keychain hydration is
+    // async — at this point every context's OAuthClient.isAuthorized()
+    // returns false even when the slot is about to land valid tokens
+    // a millisecond later. Calling enforceActiveAccountGate() here
+    // would clobber currentAccountId_ on a fresh launch with a real
+    // signed-in account, and the eventual tokensLoaded relay can't
+    // restore it cleanly because AccountManager::setCurrentAccountId
+    // early-returns when the id is unchanged — leaving MainWindow's
+    // view of "no current account" and AccountManager's view ("yes,
+    // 39592a3a-…") permanently out of sync.
+    //
+    // Instead we only fire the gate synchronously when we can be
+    // certain there is no account at all (fresh install, all rows
+    // signed-out-and-removed). Otherwise we trust the tokensLoaded
+    // relay to drive the UI transition once hydration settles.
+    if (accounts_ && accounts_->accounts().isEmpty()) {
+        clearAccountUiState();
+    }
+    // Helper: any per-account context already holding tokens? After
+    // the Add-account refactor, auth_ is the Bootstrap-anonymous
+    // OAuthClient and never authorizes; the right signal is whether
+    // any AccountContext has hydrated successfully. Hydration is
+    // async, so this may answer "no" at construction time even when
+    // a real account is on disk — the per-context tokensLoaded
+    // re-emit through AccountManager picks up the slack later.
+    auto anyContextAuthorized = [this] {
+        if (!accounts_) return false;
+        for (auto* c : accounts_->allContexts()) {
+            if (c && c->auth() && c->auth()->isAuthorized()) return true;
+        }
+        return false;
+    };
+    if (anyContextAuthorized()) {
         reloadSidebar();
         currentLabelId_ = QStringLiteral("INBOX");
         reloadCurrentLabel();
@@ -230,24 +264,29 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         snoozeTimer->start();
     }
 
-    // If we have credentials already, kick off background sync. With
-    // per-account contexts (step 6+), each account runs its own
-    // SyncService timer so a stuck account doesn't starve others; the
-    // workers stay shared because their drain queries run cross-account
-    // and dispatch via the GmailResolver.
-    if (auth_->isAuthorized()) {
-        for (auto* ctx : accounts_->allContexts()) {
-            if (auto* s = ctx->sync()) {
-                s->runOnce();
-                s->startScheduler();
-            }
+    // If we have credentials already, kick off background sync. Each
+    // account runs its own SyncService timer so a stuck account
+    // doesn't starve others; the workers stay shared because their
+    // drain queries run cross-account and dispatch via the
+    // GmailResolver.
+    //
+    // We start an authorized context's scheduler eagerly here AND
+    // again from the per-context tokensLoaded relay below — keychain
+    // hydration is async, so contexts that aren't authorized at
+    // construction time may flip to authorized milliseconds later.
+    bool anyStarted = false;
+    for (auto* ctx : accounts_->allContexts()) {
+        if (!ctx || !ctx->auth() || !ctx->auth()->isAuthorized()) continue;
+        if (auto* s = ctx->sync()) {
+            // s lives on the AccountContext's sync thread; bounce the
+            // calls cross-thread so SyncService's internal state and
+            // its QTimer-driven scheduler are set up on the right
+            // thread.
+            postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
+            anyStarted = true;
         }
-        // If no contexts (anonymous fallback) fire the legacy sync
-        // path so the sign-in flow still completes.
-        if (accounts_->allContexts().isEmpty() && sync_) {
-            sync_->runOnce();
-            sync_->startScheduler();
-        }
+    }
+    if (anyStarted) {
         outbox_->start();
         pending_->start();
         drafts_->start();
@@ -259,6 +298,15 @@ void MainWindow::buildLayout() {
 
     sidebar_ = new SidebarWidget(splitter_);
     sidebar_->setMaximumWidth(260);
+    // Seed the tree model with the active account so it queries the
+    // right account on startup. Without this, the model defaults to
+    // an empty accountId, draws zero labels, and only fills in if
+    // the user manually toggles accounts (because the
+    // currentAccountChanged signal fires on mutation, not on the
+    // already-set initial value).
+    if (sidebar_->model() && !currentAccountId_.isEmpty()) {
+        sidebar_->model()->setAccountId(currentAccountId_);
+    }
 
     // Wrap the list view + a small footer label in a single column so
     // the footer ("Loading more messages…" / "No more messages") sits
@@ -270,16 +318,17 @@ void MainWindow::buildLayout() {
 
     list_      = new MessageListView(listColumn);
     listModel_ = new fc::MessageListModel(this);
+    listModel_->setAccountId(currentAccountId_);
     list_->setModel(listModel_);
     listColumnLayout->addWidget(list_, /*stretch=*/1);
 
-    listFooter_ = new QLabel(listColumn);
-    listFooter_->setObjectName(QStringLiteral("listFooter"));
-    listFooter_->setAlignment(Qt::AlignCenter);
-    listFooter_->setContentsMargins(8, 6, 8, 6);
-    listFooter_->setStyleSheet(QStringLiteral("color: gray; font-style: italic;"));
-    listFooter_->setVisible(false);
-    listColumnLayout->addWidget(listFooter_);
+    // Footer is now an in-list synthetic row (driven by
+    // MessageListModel::setFooterState) rather than a separate
+    // widget. The model appends a "Loading more messages…" /
+    // "No more messages" placeholder row that the delegate renders
+    // as centered italic text and that scrolls naturally with the
+    // rest of the list.
+    listFooter_ = nullptr;
 
     reader_ = new ReaderPane(splitter_);
 
@@ -722,11 +771,12 @@ void MainWindow::wireSignals() {
         // accountsChanged hook below.
         for (auto* ctx : accounts_->allContexts()) {
             if (auto* s = ctx->sync()) {
-                s->runOnce();
-                s->startScheduler();
+                postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
             }
         }
         if (accounts_->allContexts().isEmpty() && sync_) {
+            // Legacy anonymous sync_ stays on the UI thread; direct
+            // calls are still safe here.
             sync_->runOnce();
             sync_->startScheduler();
         }
@@ -767,14 +817,11 @@ void MainWindow::wireSignals() {
         reader_->showEmpty();
     });
     connect(auth_, &fc::auth::OAuthClient::browserAuthRequested, this,
-            [this](const QUrl& url, bool openedAutomatically) {
-                // Always show the dialog with the URL — auto-launch can
-                // report success while the launcher (e.g. wslview on a
-                // non-standard Windows install) silently fails downstream.
-                // On success the dialog flips to a confirmation state
-                // and waits for the user to dismiss it; that way the
-                // user actually sees that OAuth completed instead of
-                // wondering whether anything happened.
+            [this](const QUrl& url, bool /*openedAutomatically*/) {
+                // We deliberately don't auto-launch; OAuthClient::authorize
+                // emits this signal but no longer fires util::launchBrowser
+                // itself. The dialog gives the user explicit Copy / Open in
+                // Browser controls and waits for them to choose.
                 QApplication::clipboard()->setText(url.toString());
 
                 auto* dlg = new QDialog(this);
@@ -783,13 +830,11 @@ void MainWindow::wireSignals() {
                 dlg->resize(640, 240);
 
                 auto* layout = new QVBoxLayout(dlg);
-                const QString headline = openedAutomatically
-                    ? tr("<p>We tried to open your browser. "
-                         "<b>If a sign-in page didn't appear, paste this URL "
-                         "into your browser:</b></p>")
-                    : tr("<p>Couldn't launch your default browser "
-                         "automatically. <b>Paste this URL into any browser "
-                         "to continue.</b></p>");
+                const QString headline = tr(
+                    "<p>To finish signing in, open the URL below in your "
+                    "browser. <b>Click <i>Open in Browser</i></b>, or "
+                    "copy the URL and paste it into any browser yourself."
+                    "</p>");
                 const QString footnote = tr(
                     "<p>The URL is already on your clipboard. FirstContact is "
                     "listening on a local port — once you complete consent, "
@@ -910,19 +955,162 @@ void MainWindow::wireSignals() {
             });
     // Per-account contexts that arrive mid-session (Add account flow)
     // need their schedulers kicked. accountsChanged fires on every
-    // add()/remove(); piggy-back on the same hook to start any newly
-    // created context.
+    // add()/remove(); start the scheduler on every authorized
+    // context. SyncService::startScheduler is idempotent — calling
+    // it on an already-running timer just resets the interval, which
+    // is fine.
     connect(accounts_, &fc::account::AccountManager::accountsChanged, this,
             [this] {
-                if (!auth_->isAuthorized()) return;
                 for (auto* ctx : accounts_->allContexts()) {
+                    if (!ctx || !ctx->auth() || !ctx->auth()->isAuthorized())
+                        continue;
                     if (auto* s = ctx->sync()) {
-                        // SyncService::startScheduler is idempotent —
-                        // calling it on an already-running timer just
-                        // resets the interval, which is fine.
-                        s->startScheduler();
+                        postToObject(s, [s] { s->startScheduler(); });
                     }
                 }
+            });
+    // Per-context tokensLoaded relay. Keychain hydration on app
+    // restart is async; this fires once a context has finished
+    // loading its slot. We re-evaluate the active-account gate, kick
+    // the per-account sync that just became authorized, and
+    // refresh the indicator so the toolbar shows the right email.
+    connect(accounts_, &fc::account::AccountManager::cacheCleared, this,
+            [this](const QString& accountId) {
+                // Cache wipe leaves the in-memory views (sidebar tree,
+                // message list) showing rows that no longer exist —
+                // they were populated from cache before the wipe and
+                // nothing has yet emitted messagesUpdated/labelsUpdated
+                // to refresh them. Reload now so the user sees an
+                // empty mailbox immediately. If the wiped account is
+                // the active one, also kick a runOnce so we re-pull
+                // from Gmail without waiting for the 60s scheduler
+                // tick — and schedule a 1500ms retry, because the
+                // SyncService may still be busy with the in-flight
+                // tick that ran just before the cache wipe (which
+                // would skip the immediate runOnce as busy).
+                if (accountId == currentAccountId_) {
+                    serverExhaustedByLabel_.clear();
+                    if (listModel_) {
+                        listModel_->setFooterState(
+                            fc::MessageListModel::FooterState::None);
+                    }
+                    if (sidebar_ && sidebar_->model()) {
+                        sidebar_->model()->reload();
+                    }
+                    // Drive the message list through reloadCurrentLabel
+                    // rather than replaceAll({}) — replaceAll resets
+                    // the model's `source_` to None, after which the
+                    // messagesUpdated handler's refreshFromSource bails
+                    // and the view stays empty even after initial sync
+                    // re-fills the cache.
+                    if (currentLabelId_.isEmpty())
+                        currentLabelId_ = QStringLiteral("INBOX");
+                    reloadCurrentLabel();
+                    refreshAccountIndicator();
+                    refreshListFooter();
+                }
+                if (auto* ctx = accounts_->contextFor(accountId)) {
+                    if (auto* s = ctx->sync()) {
+                        postToObject(s, [s] { s->runOnce(); });
+                    }
+                    QPointer<MainWindow> self(this);
+                    QTimer::singleShot(1500, this, [self, accountId] {
+                        if (!self || !self->accounts_) return;
+                        if (auto* c = self->accounts_->contextFor(accountId))
+                            if (auto* s = c->sync()) {
+                                postToObject(s, [s] { s->runOnce(); });
+                            }
+                    });
+                }
+            });
+    connect(accounts_, &fc::account::AccountManager::accountSignedOut, this,
+            [this](const QString& accountId) {
+                // Re-run the gate (clears the UI if the last
+                // authorized context just went away), refresh the
+                // toolbar indicator + menu, and if the signed-out
+                // account was the active one, promote another or
+                // clear the panes.
+                refreshAccountIndicator();
+                refreshAccountMenu();
+                if (accountId == currentAccountId_) {
+                    QString next;
+                    for (const auto& a : accounts_->accounts()) {
+                        if (a.id == accountId) continue;
+                        if (auto* c = accounts_->contextFor(a.id)) {
+                            if (c->auth() && c->auth()->isAuthorized()) {
+                                next = a.id; break;
+                            }
+                        }
+                    }
+                    if (!next.isEmpty()) {
+                        accounts_->setCurrentAccountId(next);
+                    } else {
+                        clearAccountUiState();
+                    }
+                }
+                enforceActiveAccountGate();
+            });
+    connect(accounts_, &fc::account::AccountManager::tokensLoaded, this,
+            [this](const QString& accountId) {
+                enforceActiveAccountGate();
+                auto* ctx = accounts_->contextFor(accountId);
+                if (!ctx || !ctx->auth() || !ctx->auth()->isAuthorized()) {
+                    refreshAccountIndicator();
+                    return;
+                }
+                if (auto* s = ctx->sync()) {
+                    postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
+                }
+                if (outbox_)  outbox_->start();
+                if (pending_) pending_->start();
+                if (drafts_)  drafts_->start();
+                // App startup: enforceActiveAccountGate() ran before
+                // keychain hydration completed and cleared the active
+                // account because no context was authorized yet. Now
+                // that THIS context has tokens, promote it as the
+                // active account if there isn't one — that drives the
+                // currentAccountChanged path which retargets the
+                // sidebar's model, the message list's accountId, and
+                // re-paints from cache. Add-account already calls
+                // setCurrentAccountId in finalize, so this branch
+                // only kicks in for the resume-existing-account
+                // restart case.
+                if (currentAccountId_.isEmpty()) {
+                    // Resume case. Multiple per-context tokensLoaded
+                    // signals can arrive in any order — the first to
+                    // fire isn't necessarily the account
+                    // AccountManager picked as current. Only adopt
+                    // when this id matches AccountManager's choice
+                    // (or when AccountManager hasn't picked one at
+                    // all, which on startup means there's only this
+                    // one account). Otherwise the wrong account
+                    // claims the UI and the user has to toggle
+                    // accounts to make the sidebar load.
+                    const QString chosen = accounts_->currentAccountId();
+                    if (!chosen.isEmpty() && chosen != accountId) {
+                        refreshAccountIndicator();
+                        return;
+                    }
+                    currentAccountId_ = accountId;
+                    if (sync_) sync_->setAccountId(accountId);
+                    if (sidebar_ && sidebar_->model())
+                        sidebar_->model()->setAccountId(accountId);
+                    if (listModel_) listModel_->setAccountId(accountId);
+                    LabelStyleCache::instance().invalidate(accountId);
+                    if (currentLabelId_.isEmpty()) {
+                        currentLabelId_ = QStringLiteral("INBOX");
+                    }
+                    accounts_->setCurrentAccountId(accountId);
+                    reloadCurrentLabel();
+                    reloadSidebar();
+                } else if (accountId == currentAccountId_) {
+                    if (currentLabelId_.isEmpty()) {
+                        currentLabelId_ = QStringLiteral("INBOX");
+                    }
+                    reloadCurrentLabel();
+                    reloadSidebar();
+                }
+                refreshAccountIndicator();
             });
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
@@ -959,6 +1147,7 @@ void MainWindow::wireSignals() {
                 if (sidebar_ && sidebar_->model()) {
                     sidebar_->model()->setAccountId(aid);
                 }
+                if (listModel_) listModel_->setAccountId(aid);
                 LabelStyleCache::instance().invalidate(aid);
                 listModel_->replaceAll({});
                 reader_->showEmpty();
@@ -974,9 +1163,37 @@ void MainWindow::wireSignals() {
                 LabelStyleCache::instance().invalidate(currentAccountId_);
                 reloadSidebar();
             });
+    // Background sync landing new rows + our own topUpLabel finishing
+    // both come through here. The instinct is to call
+    // reloadCurrentLabel — but that calls setLabelSource →
+    // loadFirstPage which resets the model to offset=0 and snaps the
+    // scroll bar to the top. With a 700-row IMPORTANT folder loaded,
+    // every per-message upsert during a top-up was triggering a full
+    // reset, which is why the scroll position jumped during
+    // progressive loading. refreshFromSource re-queries the same
+    // window the model already shows (limit = currently-loaded count)
+    // so freshly-cached rows surface without losing the user's
+    // position.
     connect(accounts_, &fc::account::AccountManager::messagesUpdated, this,
             [this](const QString& aid) {
-                if (aid == currentAccountId_) reloadCurrentLabel();
+                if (aid != currentAccountId_) return;
+                if (!list_ || !listModel_) return;
+                auto* sb = list_->verticalScrollBar();
+                const int   y   = sb ? sb->value() : 0;
+                const QString sel = currentMessage_.id;
+                listModel_->refreshFromSource();
+                if (sb) sb->setValue(y);
+                if (!sel.isEmpty()) {
+                    for (int i = 0; i < listModel_->rowCount(); ++i) {
+                        const auto idx = listModel_->index(i, 0);
+                        if (idx.data(fc::MessageListModel::IdRole)
+                                .toString() == sel) {
+                            list_->setCurrentIndex(idx);
+                            break;
+                        }
+                    }
+                }
+                refreshListFooter();
             });
     connect(accounts_, &fc::account::AccountManager::newMessages, this,
             [this](const QString& aid, int count) {
@@ -1033,7 +1250,16 @@ void MainWindow::wireSignals() {
     // brings the new rows back via refreshFromSource above.
     connect(listModel_, &fc::MessageListModel::cacheExhausted,
             this,        [this](const QString& labelId) {
-                if (sync_) sync_->topUpLabel(labelId);
+                qInfo("MainWindow: cacheExhausted label='%s', kicking topUpLabel",
+                      qUtf8Printable(labelId));
+                if (auto* ctx = accounts_ ? accounts_->currentContext()
+                                          : nullptr) {
+                    if (auto* s = ctx->sync()) {
+                        postToObject(s, [s, labelId] { s->topUpLabel(labelId); });
+                    }
+                } else if (sync_) {
+                    sync_->topUpLabel(labelId);
+                }
                 refreshListFooter();
             });
 
@@ -1041,10 +1267,21 @@ void MainWindow::wireSignals() {
     // already shows "Syncing…" / "Syncing… Done" for INITIAL +
     // INCREMENTAL passes; these layer on top with a label name when
     // the top-up is for the visible label, so the user can tell
-    // "Syncing Receipts…" apart from a global background pass.
-    connect(sync_, &fc::sync::SyncService::topUpStarted, this,
-            [this](const QString& labelId) {
-                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+    // "Syncing Receipts…" apart from a global background pass. Routed
+    // through AccountManager so we listen to the *active* account's
+    // per-context sync, not the dead anonymous Bootstrap sync_.
+    connect(accounts_, &fc::account::AccountManager::topUpStarted, this,
+            [this](const QString& aid, const QString& labelId) {
+                qInfo("MainWindow: topUpStarted aid='%s' label='%s' "
+                      "current='%s' sourceLabel='%s'",
+                      qUtf8Printable(aid), qUtf8Printable(labelId),
+                      qUtf8Printable(currentAccountId_),
+                      qUtf8Printable(
+                          listModel_ ? listModel_->sourceLabelId()
+                                     : QString()));
+                if (aid != currentAccountId_) return;
+                const QString name = fc::cache::LabelRepository::byId(
+                    currentAccountId_, labelId).name;
                 statusBar()->showMessage(name.isEmpty()
                     ? tr("Syncing…")
                     : tr("Syncing %1…").arg(name));
@@ -1053,9 +1290,16 @@ void MainWindow::wireSignals() {
                     refreshListFooter();
                 }
             });
-    connect(sync_, &fc::sync::SyncService::topUpFinished, this,
-            [this](const QString& labelId, int newRows, bool serverExhausted) {
-                const QString name = fc::cache::LabelRepository::byId(labelId).name;
+    connect(accounts_, &fc::account::AccountManager::topUpFinished, this,
+            [this](const QString& aid, const QString& labelId,
+                    int newRows, bool serverExhausted) {
+                qInfo("MainWindow: topUpFinished aid='%s' label='%s' "
+                      "newRows=%d serverExhausted=%d",
+                      qUtf8Printable(aid), qUtf8Printable(labelId),
+                      newRows, serverExhausted);
+                if (aid != currentAccountId_) return;
+                const QString name = fc::cache::LabelRepository::byId(
+                    currentAccountId_, labelId).name;
                 if (!name.isEmpty()) {
                     const QString msg = newRows > 0
                         ? tr("%1: %n new", "", newRows).arg(name)
@@ -1168,7 +1412,15 @@ void MainWindow::wireSignals() {
                     statusBar()->showMessage(tr("Syncing…"));
                     return;
                 }
-                const QString email = auth_->accountEmail();
+                // Read identity from the active context — auth_ alias
+                // never hydrates after the Add-account refactor.
+                auto* ctx = accounts_ ? accounts_->currentContext() : nullptr;
+                QString email = (ctx && ctx->auth())
+                    ? ctx->auth()->accountEmail()
+                    : auth_->accountEmail();
+                if (email.isEmpty() && !currentAccountId_.isEmpty()) {
+                    email = accounts_->accountById(currentAccountId_).email;
+                }
                 statusBar()->showMessage(email.isEmpty()
                     ? tr("Not signed in.")
                     : tr("Signed in as %1").arg(email));
@@ -1177,7 +1429,12 @@ void MainWindow::wireSignals() {
     connect(outbox_, &fc::sync::OutboxWorker::itemSent, this,
             [this](qint64, const QString&) {
                 statusBar()->showMessage(tr("Message sent."), 3000);
-                sync_->runOnce();
+                if (auto* ctx = accounts_ ? accounts_->currentContext()
+                                          : nullptr) {
+                    if (auto* s = ctx->sync()) {
+                        postToObject(s, [s] { s->runOnce(); });
+                    }
+                }
             });
     connect(outbox_, &fc::sync::OutboxWorker::itemFailed, this,
             [this](qint64, const QString& err) {
@@ -1302,7 +1559,20 @@ void MainWindow::refreshBandwidthLabel() {
 }
 
 void MainWindow::refreshAccountIndicator() {
-    const QString email = auth_->accountEmail();
+    // Prefer the active account's context: auth_ is the Bootstrap
+    // anonymous stack and stays empty even after a successful Add-
+    // account. Fall back to auth_ for the brief pre-context window.
+    auto* ctx = accounts_ ? accounts_->currentContext() : nullptr;
+    QString email = (ctx && ctx->auth()) ? ctx->auth()->accountEmail()
+                                         : auth_->accountEmail();
+    if (email.isEmpty() && !currentAccountId_.isEmpty()) {
+        email = fc::cache::MetaRepository::get(currentAccountId_,
+                                               QStringLiteral("email"));
+    }
+    if (email.isEmpty()) {
+        const auto info = accounts_->accountById(currentAccountId_);
+        email = info.email;
+    }
     const QString dryPrefix = fc::util::DryRun::enabled()
         ? QStringLiteral("[DRY RUN] ") : QString();
     setWindowTitle(dryPrefix + (email.isEmpty()
@@ -1324,16 +1594,31 @@ void MainWindow::refreshAccountMenu() {
     if (!accountButton_ || !accountMenu_) return;
     accountMenu_->clear();
 
-    // Try the auth layer first; fall back to MetaRepository which the
-    // sync layer populates from getProfile. The two can briefly disagree
-    // on the very first sign-in (token exchange completes before profile
-    // fetch) — the fallback keeps the menu honest in that window.
-    QString email = auth_->accountEmail();
+    // Read auth state from the active account's context — the
+    // Bootstrap-time auth_ alias never hydrates after Add-account
+    // because we drove the sign-in through a transient stack.
+    auto* activeCtx = accounts_ ? accounts_->currentContext() : nullptr;
+    auto* activeAuth = (activeCtx && activeCtx->auth())
+        ? activeCtx->auth() : auth_;
+    QString email = activeAuth ? activeAuth->accountEmail() : QString();
     if (email.isEmpty()) {
         email = fc::cache::MetaRepository::get(currentAccountId_,
                                                QStringLiteral("email"));
     }
-    const bool signedIn = auth_->isAuthorized();
+    if (email.isEmpty() && !currentAccountId_.isEmpty()) {
+        email = accounts_->accountById(currentAccountId_).email;
+    }
+    // "Signed in" if any per-account context has tokens, OR the
+    // legacy anonymous auth_ is somehow authorized (shouldn't happen
+    // post-cleanup but kept as a defensive check).
+    bool signedIn = activeAuth && activeAuth->isAuthorized();
+    if (!signedIn && accounts_) {
+        for (auto* c : accounts_->allContexts()) {
+            if (c && c->auth() && c->auth()->isAuthorized()) {
+                signedIn = true; break;
+            }
+        }
+    }
 
     accountButton_->setText(tr("Accounts"));
     accountButton_->setToolTip(signedIn && !email.isEmpty()
@@ -1412,12 +1697,7 @@ void MainWindow::refreshAccountMenu() {
             SetupWizard wiz(config_, this);
             if (wiz.exec() != QDialog::Accepted) return;
         }
-        // The granted handler will mint the accounts row + start the
-        // scheduler. We just kick the OAuth dance.
-        statusBar()->showMessage(
-            tr("Starting OAuth flow for new account — opening your browser…"),
-            0);
-        auth_->authorize();
+        beginAddAccountFlow();
     });
 
     // "Manage…" — full multi-row dialog (per-account sign-out,
@@ -1431,12 +1711,11 @@ void MainWindow::refreshAccountMenu() {
                 this, &MainWindow::onSignOutAccount);
         connect(&dlg, &AccountManagerDialog::addAccountRequested,
                 this, [this] {
-                    // Add another → kick OAuth without signing out.
                     if (!config_->isConfigured()) {
                         SetupWizard wiz(config_, this);
                         if (wiz.exec() != QDialog::Accepted) return;
                     }
-                    auth_->authorize();
+                    beginAddAccountFlow();
                 });
         dlg.exec();
     });
@@ -1455,9 +1734,11 @@ void MainWindow::onSignIn() {
         SetupWizard wiz(config_, this);
         if (wiz.exec() != QDialog::Accepted) return;
     }
-    statusBar()->showMessage(
-        tr("Starting OAuth flow — opening your browser…"), 0);
-    auth_->authorize();
+    // First sign-in is the same flow as Add-account: a transient
+    // unbound stack runs the OAuth dance, mints the accounts row from
+    // the email returned by getProfile, and copies the tokens onto
+    // the new AccountContext.
+    beginAddAccountFlow();
 }
 
 // Decides whether ANY account currently has valid OAuth tokens, and
@@ -1506,7 +1787,10 @@ void MainWindow::clearAccountUiState() {
     currentLabelId_.clear();
     if (sync_)     sync_->setAccountId({});
     if (sidebar_ && sidebar_->model()) sidebar_->model()->setAccountId({});
-    if (listModel_) listModel_->replaceAll({});
+    if (listModel_) {
+        listModel_->setAccountId({});
+        listModel_->replaceAll({});
+    }
     if (reader_)    reader_->showEmpty(tr("Not signed in."));
     if (errorBanner_) errorBanner_->hide();
     if (outbox_)  outbox_->stop();
@@ -1561,13 +1845,19 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
     const bool dropCache = (clicked == dropBtn);
     Q_UNUSED(keepBtn);
 
-    // Sign out the OAuth side. The OAuthClient currently aliases the
-    // active account; signing out a non-active account via this path
-    // is uncommon but possible (Manage… → Sign out a different row).
-    // Step 12 will add per-account OAuth resolution here; for now,
-    // sign out the active stack only when the active account matches.
+    // Sign out the per-context OAuthClient — that's the slot the
+    // tokens actually live in. The anonymous Bootstrap auth_ never
+    // holds tokens, so signing it out would be a no-op that leaves
+    // the active account's keychain entry untouched.
+    if (auto* ctx = accounts_->contextFor(accountId)) {
+        if (auto* a = ctx->auth()) {
+            // a lives on the AccountContext's sync thread; signOut
+            // mutates token state and uses QNetworkAccessManager to
+            // revoke at Google. Has to run on that thread.
+            postToObject(a, [a] { a->signOut(); });
+        }
+    }
     if (accountId == currentAccountId_) {
-        auth_->signOut();
         // Reset transient session state so a stale "current message"
         // / "current row" can't drive a shortcut press (r, e, #, …)
         // into operating on cached data that no longer represents
@@ -1576,16 +1866,15 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
         currentMessage_ = {};
         currentRow_     = -1;
         if (reader_) reader_->showEmpty(tr("Not signed in."));
-    } else if (auto* ctx = accounts_->contextFor(accountId)) {
-        // Sign out the named context's OAuthClient directly.
-        if (auto* a = ctx->auth()) a->signOut();
     }
 
     // Stop the named context's scheduler. The shared workers stay
     // running; their drain queries simply skip rows for the now-
     // signed-out account once its context is gone.
     if (auto* ctx = accounts_->contextFor(accountId)) {
-        if (auto* s = ctx->sync()) s->stopScheduler();
+        if (auto* s = ctx->sync()) {
+            postToObject(s, [s] { s->stopScheduler(); });
+        }
     }
 
     if (dropCache) {
@@ -1633,12 +1922,20 @@ void MainWindow::onSwitchAccount() {
 }
 
 void MainWindow::onRefresh() {
-    if (!auth_->isAuthorized()) {
+    // Drive refresh through the active account's per-context sync,
+    // not the Bootstrap-anonymous sync_ alias. After Add-account the
+    // legacy auth_ never authorizes, so checking auth_->isAuthorized
+    // here would always fall into onSignIn() and re-kick the OAuth
+    // flow even when a real account is signed in.
+    auto* ctx = accounts_ ? accounts_->currentContext() : nullptr;
+    if (!ctx || !ctx->auth() || !ctx->auth()->isAuthorized()) {
         onSignIn();
         return;
     }
     statusBar()->showMessage(tr("Syncing…"));
-    sync_->runOnce();
+    if (auto* s = ctx->sync()) {
+        postToObject(s, [s] { s->runOnce(); });
+    }
 }
 
 void MainWindow::onLabelSelected(const QString& id) {
@@ -1658,12 +1955,20 @@ void MainWindow::onLabelSelected(const QString& id) {
     // label changed — repeated clicks on the same row should be a
     // no-op rather than a full reload.
     if (!wasCross && !crossAccountView_ && resolvedId == currentLabelId_) return;
+    // Save the outgoing label's scroll position before swapping the
+    // model out from under us; we'll try to restore it the next time
+    // the user comes back to that label.
+    saveLabelScrollState();
     currentLabelId_ = resolvedId;
     // Reset top-up state for the new label — any in-flight top-up
     // for the old label is no longer interesting to the footer.
     topUpInFlight_ = false;
     refreshListFooter();
     reloadCurrentLabel();
+    // After reloadCurrentLabel has populated the model for the new
+    // label, restore scroll position (or land at the top if we have
+    // no memory for this label).
+    restoreLabelScrollState(resolvedId, crossAccountView_);
     // Initial sync only seeds INBOX / SENT / DRAFT / STARRED — every
     // other label (every user label, plus categories like SPAM /
     // TRASH) only carries cached rows for messages that happened to
@@ -1671,8 +1976,12 @@ void MainWindow::onLabelSelected(const QString& id) {
     // the user sees what Gmail web sees, not just the lucky overlap.
     // SyncService::topUpLabel itself is a no-op for the seed labels
     // and for the empty / search-mode case.
-    if (sync_ && currentSearchQuery_.isEmpty()) {
-        sync_->topUpLabel(id);
+    if (currentSearchQuery_.isEmpty()) {
+        if (auto* ctx = accounts_ ? accounts_->currentContext() : nullptr) {
+            if (auto* s = ctx->sync()) {
+                postToObject(s, [s, id] { s->topUpLabel(id); });
+            }
+        }
     }
     refreshListFooter();
 }
@@ -1681,53 +1990,94 @@ void MainWindow::reloadSidebar() {
     sidebar_->model()->reload();
 }
 
+QString MainWindow::labelScrollKey(const QString& labelId,
+                                    bool crossAccount) const {
+    // Cross-account "All Inboxes" gets its own key so it doesn't
+    // share state with any single account's INBOX. Otherwise we
+    // namespace by the active account so each account remembers its
+    // own per-folder scroll position independently.
+    if (crossAccount) return QStringLiteral("__all::") + labelId;
+    return currentAccountId_ + QStringLiteral("::") + labelId;
+}
+
+void MainWindow::saveLabelScrollState() {
+    if (!list_ || !listModel_) return;
+    if (currentLabelId_.isEmpty()) return;
+    const QString key = labelScrollKey(currentLabelId_, crossAccountView_);
+    LabelScrollState s;
+    s.verticalOffset = list_->verticalScrollBar()
+        ? list_->verticalScrollBar()->value() : 0;
+    s.loadedRowCount = listModel_->rowCount();
+    if (currentRow_ >= 0 && currentRow_ < listModel_->rowCount()) {
+        const auto idx = listModel_->index(currentRow_, 0);
+        s.messageId = idx.data(fc::MessageListModel::IdRole).toString();
+    }
+    labelScrollMemory_.insert(key, s);
+}
+
+void MainWindow::restoreLabelScrollState(const QString& labelId,
+                                          bool crossAccount) {
+    if (!list_ || !listModel_) return;
+    const QString key = labelScrollKey(labelId, crossAccount);
+    const auto it = labelScrollMemory_.constFind(key);
+    if (it == labelScrollMemory_.constEnd()) {
+        // No memory for this label — start at the top so the user
+        // sees the most recent message instead of inheriting the
+        // previous label's scroll offset.
+        if (auto* sb = list_->verticalScrollBar()) sb->setValue(0);
+        return;
+    }
+    const auto& s = it.value();
+    // Expand the loaded window first — setLabelSource just loaded
+    // pageSize rows, but the user previously had thousands. Without
+    // this, the saved messageId/offset usually points past the end
+    // of what's currently in the model and progressive loading has
+    // to re-walk the whole label.
+    if (s.loadedRowCount > listModel_->rowCount()) {
+        listModel_->expandLoadedRows(s.loadedRowCount);
+    }
+    // Prefer message-id restoration (model rows can shift between
+    // visits if sync brought new messages in). Fall back to the raw
+    // scroll offset if we can't find the saved id.
+    if (!s.messageId.isEmpty()) {
+        for (int i = 0; i < listModel_->rowCount(); ++i) {
+            const auto idx = listModel_->index(i, 0);
+            if (idx.data(fc::MessageListModel::IdRole).toString()
+                    == s.messageId) {
+                list_->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+                return;
+            }
+        }
+    }
+    if (auto* sb = list_->verticalScrollBar()) sb->setValue(s.verticalOffset);
+}
+
+fc::api::GmailClient* MainWindow::activeGmail() const {
+    if (accounts_) {
+        if (auto* ctx = accounts_->currentContext()) {
+            if (ctx->gmail()) return ctx->gmail();
+        }
+    }
+    return gmail_;
+}
+
 void MainWindow::refreshListFooter() {
-    if (!listFooter_ || !listModel_) return;
+    if (!listModel_) return;
 
-    // While a server top-up for the visible label is in flight, the
-    // footer always shows the loading state regardless of the
-    // model's current row count — the user just triggered a fetch
-    // and wants to know it's working.
+    using FooterState = fc::MessageListModel::FooterState;
+    FooterState target = FooterState::None;
+
     if (topUpInFlight_) {
-        listFooter_->setText(tr("Loading more messages…"));
-        listFooter_->setVisible(true);
-        return;
-    }
-
-    const QString labelId = listModel_->sourceLabelId();
-    if (labelId.isEmpty()) {
-        listFooter_->setVisible(false);
-        return;
-    }
-
-    // Cache still has more to give — don't show the footer; scrolling
-    // pulls more rows in directly.
-    if (!listModel_->cacheDrained()) {
-        listFooter_->setVisible(false);
-        return;
-    }
-
-    // Drained cache. Show "No more messages" if we know we've walked
-    // the label end-to-end on the server, OR if this is one of the
-    // seed labels that incremental sync keeps fully cached. For
-    // non-seed labels where the server walk hasn't yielded an empty
-    // nextPageToken yet, leave the footer hidden — a future scroll
-    // will trigger another top-up that may bring more rows back.
-    static const QSet<QString> seedLabels = {
-        QStringLiteral("INBOX"),
-        QStringLiteral("SENT"),
-        QStringLiteral("DRAFT"),
-        QStringLiteral("STARRED"),
-    };
-    const bool isSeed   = seedLabels.contains(labelId);
-    const bool srvDone  = serverExhaustedByLabel_.value(labelId, false);
-
-    if (isSeed || srvDone) {
-        listFooter_->setText(tr("No more messages"));
-        listFooter_->setVisible(true);
+        target = FooterState::Loading;
     } else {
-        listFooter_->setVisible(false);
+        const QString labelId = listModel_->sourceLabelId();
+        if (!labelId.isEmpty() && listModel_->cacheDrained()) {
+            const bool srvDone =
+                serverExhaustedByLabel_.value(labelId, false);
+            if (srvDone) target = FooterState::NoMore;
+        }
     }
+    listModel_->setFooterState(target);
 }
 
 void MainWindow::reloadCurrentLabel() {
@@ -1756,12 +2106,14 @@ void MainWindow::reloadCurrentLabel() {
         // every contributing account's incremental sync keeps INBOX
         // (the only cross-account label today) fresh on its own.
         listModel_->setCrossAccountLabelSource(currentLabelId_, conv);
+    } else if (currentLabelId_ == QStringLiteral("__all_mail")) {
+        // Synthetic "All Mail" view — every cached message except
+        // SPAM/TRASH for the active account. Server-side top-up
+        // routes through SyncService::topUpLabel("__all_mail"),
+        // which maps to a Gmail messages.list call with no label
+        // filter (the API excludes SPAM/TRASH by default).
+        listModel_->setAllMailSource(conv, Preferences::unreadOnly());
     } else if (currentSearchQuery_.isEmpty()) {
-        // Single-account, label browsing: paginated source-pinned
-        // mode. The legacy zero-arg listByLabel inside the model
-        // routes through Database::defaultAccountId() — fine for
-        // single-account-default; multi-account routing for the
-        // paginated path lands in a follow-up.
         listModel_->setLabelSource(currentLabelId_, conv,
                                     Preferences::unreadOnly());
     } else {
@@ -1889,19 +2241,49 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
 
     reader_->showLoading();
     QPointer<MainWindow> self(this);
-    const QString accountForFetch = currentAccountId_;
-    gmail_->getMessage(messageId,
-        [self, messageId, renderThread, accountForFetch]
-        (fc::Message m, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->reader_->showEmpty(tr("Failed to load: %1").arg(err.message));
-                return;
-            }
-            m.accountId = accountForFetch;
-            fc::cache::MessageRepository::upsert(accountForFetch, m);
-            renderThread(m);
-        });
+    // For cross-account browsing the message belongs to whichever
+    // account owns the row, not the toolbar selection — same logic
+    // as `lookupAccount` above. Stamping with currentAccountId_
+    // could land an empty string ("All Inboxes" before any account
+    // is selected) and trigger the dropped-without-accountId path.
+    const QString accountForFetch = lookupAccount;
+    fc::api::GmailClient* fetchGmail = activeGmail();
+    if (accounts_ && !lookupAccount.isEmpty()) {
+        if (auto* fc = accounts_->contextFor(lookupAccount)) {
+            if (fc->gmail()) fetchGmail = fc->gmail();
+        }
+    }
+    // fetchGmail lives on the AccountContext's sync thread (for any
+    // signed-in account). Queue the call cross-thread, then bring
+    // the result back to the UI thread before touching widgets.
+    postToObject(fetchGmail, [fetchGmail, messageId, self, renderThread,
+                              accountForFetch] {
+        fetchGmail->getMessage(messageId,
+            [self, renderThread, accountForFetch]
+            (fc::Message m, fc::api::ApiError err) {
+                // Callback runs on the sync thread. DB write is safe
+                // here (per-thread connection); UI work has to bounce
+                // back. We invokeMethod on `self` (a MainWindow,
+                // which lives on the UI thread); the queued connection
+                // also handles the destroyed-mid-flight case via the
+                // QPointer null check inside the lambda.
+                if (!err && !m.id.isEmpty()) {
+                    m.accountId = accountForFetch;
+                    fc::cache::MessageRepository::upsert(accountForFetch, m);
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(),
+                    [self, renderThread, m, err] {
+                        if (!self) return;
+                        if (err) {
+                            self->reader_->showEmpty(
+                                tr("Failed to load: %1").arg(err.message));
+                            return;
+                        }
+                        renderThread(m);
+                    }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onSearchChanged() {
@@ -1918,34 +2300,54 @@ void MainWindow::onSearchSubmit() {
     statusBar()->showMessage(tr("Searching server: %1").arg(q));
     QPointer<MainWindow> self(this);
     const QString accountForSearch = currentAccountId_;
-    gmail_->listMessages({}, q, {}, kPageSize,
-        [self, gmail = gmail_, q, accountForSearch]
-        (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->statusBar()->showMessage(
-                    tr("Server search failed: %1").arg(err.message));
-                return;
-            }
-            // Hydrate any missing ids; the cache will then surface them.
-            for (const auto& id : page.ids) {
-                if (fc::cache::MessageRepository::exists(accountForSearch, id))
-                    continue;
-                gmail->getMessage(id,
-                    [accountForSearch](fc::Message m, fc::api::ApiError gErr) {
-                        if (!gErr) {
-                            m.accountId = accountForSearch;
-                            fc::cache::MessageRepository::upsert(
-                                accountForSearch, m);
-                        }
-                    });
-            }
-            self->statusBar()->showMessage(
-                tr("Server returned %1 ids; cache updates in background.")
-                    .arg(page.ids.size()));
-            self->currentSearchQuery_ = q;
-            self->reloadCurrentLabel();
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    // gmail lives on the AccountContext's sync thread; bounce the
+    // listMessages call across so QNetworkAccessManager isn't touched
+    // here. The hydration loop inside the callback fires more
+    // getMessage calls — those also need to run on the sync thread,
+    // which they will naturally (the callback already runs there).
+    // UI updates marshal back via invokeMethod(self).
+    postToObject(gmail, [gmail, q, self, accountForSearch] {
+        gmail->listMessages({}, q, {}, kPageSize,
+            [self, gmail, q, accountForSearch]
+            (fc::api::GmailClient::ListPage page, fc::api::ApiError err) {
+                if (err) {
+                    if (!self) return;
+                    QMetaObject::invokeMethod(self.data(),
+                        [self, err] {
+                            if (!self) return;
+                            self->statusBar()->showMessage(
+                                tr("Server search failed: %1").arg(err.message));
+                        }, Qt::QueuedConnection);
+                    return;
+                }
+                // Hydrate any missing ids on the sync thread (cache
+                // writes use this thread's connection).
+                for (const auto& id : page.ids) {
+                    if (fc::cache::MessageRepository::exists(accountForSearch, id))
+                        continue;
+                    gmail->getMessage(id,
+                        [accountForSearch](fc::Message m, fc::api::ApiError gErr) {
+                            if (!gErr) {
+                                m.accountId = accountForSearch;
+                                fc::cache::MessageRepository::upsert(
+                                    accountForSearch, m);
+                            }
+                        });
+                }
+                const int idCount = static_cast<int>(page.ids.size());
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(),
+                    [self, q, idCount] {
+                        if (!self) return;
+                        self->statusBar()->showMessage(
+                            tr("Server returned %1 ids; cache updates in background.")
+                                .arg(idCount));
+                        self->currentSearchQuery_ = q;
+                        self->reloadCurrentLabel();
+                    }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
@@ -2098,21 +2500,21 @@ void MainWindow::onForwardCurrent() {
 
 void MainWindow::onReplyToMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::Reply));
 }
 
 void MainWindow::onReplyAllToMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::ReplyAll));
 }
 
 void MainWindow::onForwardMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(messageId);
+    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::Forward));
 }
@@ -2125,8 +2527,8 @@ void MainWindow::onArchiveMessage(const QString& messageId) {
         return;
     }
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, {}, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Message archived."), 3000);
     reloadCurrentLabel();
@@ -2142,8 +2544,8 @@ void MainWindow::onMarkMessageRead(const QString& messageId, bool read) {
     QStringList add, rem;
     if (read) rem << QStringLiteral("UNREAD");
     else      add << QStringLiteral("UNREAD");
-    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, add, rem);
     pending_->flush();
     statusBar()->showMessage(read ? tr("Marked read.") : tr("Marked unread."),
                               3000);
@@ -2165,8 +2567,8 @@ void MainWindow::onDeleteMessage(const QString& messageId) {
     }
     const QStringList add{QStringLiteral("TRASH")};
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(messageId, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(messageId, add, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, add, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, add, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Message moved to Trash."), 3000);
     reloadCurrentLabel();
@@ -2214,10 +2616,10 @@ void MainWindow::onSnoozeMessage(const QString& messageId) {
     }
 
     const qint64 wakeAt = when.toMSecsSinceEpoch();
-    fc::cache::MessageRepository::setSnoozeUntil(messageId, wakeAt);
+    fc::cache::MessageRepository::setSnoozeUntil(currentAccountId_, messageId, wakeAt);
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(messageId, {}, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(messageId, {}, rem);
+    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, {}, rem);
+    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, {}, rem);
     pending_->flush();
     statusBar()->showMessage(
         tr("Snoozed until %1.").arg(when.toString(QStringLiteral("MMM d, h:mm AP"))),
@@ -2238,22 +2640,33 @@ void MainWindow::onCreateLabel(const QString& parentLabelId) {
     }
     QPointer<MainWindow> self(this);
     const QString accountForCreate = currentAccountId_;
-    gmail_->createLabel(name,
-        [self, accountForCreate]
-        (fc::api::GmailClient::Label l, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                QMessageBox::warning(self, tr("Create label"), err.message);
-                return;
-            }
-            fc::cache::LabelRow row;
-            row.accountId = accountForCreate;
-            row.id        = l.id;
-            row.name      = l.name;
-            row.type      = l.type;
-            fc::cache::LabelRepository::upsert(accountForCreate, row);
-            self->reloadSidebar();
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    // gmail lives on the sync thread; bounce the createLabel and
+    // marshal UI work back to the UI thread once the API call lands.
+    postToObject(gmail, [gmail, name, self, accountForCreate] {
+        gmail->createLabel(name,
+            [self, accountForCreate]
+            (fc::api::GmailClient::Label l, fc::api::ApiError err) {
+                if (!err) {
+                    fc::cache::LabelRow row;
+                    row.accountId = accountForCreate;
+                    row.id        = l.id;
+                    row.name      = l.name;
+                    row.type      = l.type;
+                    fc::cache::LabelRepository::upsert(accountForCreate, row);
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(), [self, err] {
+                    if (!self) return;
+                    if (err) {
+                        QMessageBox::warning(self, tr("Create label"),
+                                             err.message);
+                        return;
+                    }
+                    self->reloadSidebar();
+                }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onRenameLabel(const QString& labelId) {
@@ -2273,19 +2686,29 @@ void MainWindow::onRenameLabel(const QString& labelId) {
 
     QPointer<MainWindow> self(this);
     const QString accountForRename = currentAccountId_;
-    gmail_->updateLabel(labelId, newName,
-        [self, labelId, newName, accountForRename]
-        (fc::api::GmailClient::Label, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                QMessageBox::warning(self, tr("Rename label"), err.message);
-                return;
-            }
-            auto row = fc::cache::LabelRepository::byId(accountForRename, labelId);
-            row.name = newName;
-            fc::cache::LabelRepository::upsert(accountForRename, row);
-            self->reloadSidebar();
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    postToObject(gmail, [gmail, labelId, newName, self, accountForRename] {
+        gmail->updateLabel(labelId, newName,
+            [self, labelId, newName, accountForRename]
+            (fc::api::GmailClient::Label, fc::api::ApiError err) {
+                if (!err) {
+                    auto row = fc::cache::LabelRepository::byId(
+                        accountForRename, labelId);
+                    row.name = newName;
+                    fc::cache::LabelRepository::upsert(accountForRename, row);
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(), [self, err] {
+                    if (!self) return;
+                    if (err) {
+                        QMessageBox::warning(self, tr("Rename label"),
+                                             err.message);
+                        return;
+                    }
+                    self->reloadSidebar();
+                }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onDeleteLabel(const QString& labelId) {
@@ -2303,16 +2726,25 @@ void MainWindow::onDeleteLabel(const QString& labelId) {
 
     QPointer<MainWindow> self(this);
     const QString accountForDelete = currentAccountId_;
-    gmail_->deleteLabel(labelId,
-        [self, labelId, accountForDelete](fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                QMessageBox::warning(self, tr("Delete label"), err.message);
-                return;
-            }
-            fc::cache::LabelRepository::remove(accountForDelete, labelId);
-            self->reloadSidebar();
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    postToObject(gmail, [gmail, labelId, self, accountForDelete] {
+        gmail->deleteLabel(labelId,
+            [self, labelId, accountForDelete](fc::api::ApiError err) {
+                if (!err) {
+                    fc::cache::LabelRepository::remove(accountForDelete, labelId);
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(), [self, err] {
+                    if (!self) return;
+                    if (err) {
+                        QMessageBox::warning(self, tr("Delete label"),
+                                             err.message);
+                        return;
+                    }
+                    self->reloadSidebar();
+                }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onToggleStar() {
@@ -2431,30 +2863,46 @@ void MainWindow::onOpenAttachment(const QString& messageId,
 
     statusBar()->showMessage(tr("Opening %1…").arg(filename));
     QPointer<MainWindow> self(this);
-    gmail_->getAttachment(messageId, attachmentId,
-        [self, filename](QByteArray bytes, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->statusBar()->showMessage(
-                    tr("Open failed: %1").arg(err.message), 8000);
-                return;
-            }
-            // Drop into a per-session temp dir so multiple "Open" clicks
-            // for the same filename don't collide and the OS can hold
-            // the file open as long as the viewer wants to.
-            const QString target = uniqueTargetPath(sessionTempDir(), filename);
-            QString writeErr;
-            if (!writeBytesToPath(target, bytes, &writeErr)) {
-                self->statusBar()->showMessage(
-                    tr("Couldn't write temp file: %1").arg(writeErr), 8000);
-                return;
-            }
-            // Intentionally NOT calling AttachmentRepository::markDownloaded —
-            // these temp files aren't a permanent download.
-            self->statusBar()->showMessage(
-                tr("Opened %1").arg(QFileInfo(target).fileName()), 5000);
-            QDesktopServices::openUrl(QUrl::fromLocalFile(target));
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    // gmail lives on the sync thread; bounce the API call. The
+    // callback can do its temp-file write on either thread (POSIX
+    // file I/O), but the status-bar + QDesktopServices::openUrl
+    // touch the UI and have to marshal back.
+    postToObject(gmail, [gmail, messageId, attachmentId, filename, self] {
+        gmail->getAttachment(messageId, attachmentId,
+            [self, filename](QByteArray bytes, fc::api::ApiError err) {
+                QString writeErr;
+                QString target;
+                bool writeOk = false;
+                if (!err) {
+                    target = uniqueTargetPath(sessionTempDir(), filename);
+                    writeOk = writeBytesToPath(target, bytes, &writeErr);
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(),
+                    [self, err, writeErr, writeOk, target] {
+                        if (!self) return;
+                        if (err) {
+                            self->statusBar()->showMessage(
+                                tr("Open failed: %1").arg(err.message), 8000);
+                            return;
+                        }
+                        if (!writeOk) {
+                            self->statusBar()->showMessage(
+                                tr("Couldn't write temp file: %1").arg(writeErr),
+                                8000);
+                            return;
+                        }
+                        // Intentionally NOT calling
+                        // AttachmentRepository::markDownloaded — these temp
+                        // files aren't a permanent download.
+                        self->statusBar()->showMessage(
+                            tr("Opened %1").arg(QFileInfo(target).fileName()),
+                            5000);
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(target));
+                    }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onSaveAsAttachment(const QString& messageId,
@@ -2487,28 +2935,44 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
     QPointer<MainWindow> self(this);
     const QString accountForSave = currentAccountId_;
-    gmail_->getAttachment(messageId, attachmentId,
-        [self, attachmentId, target, accountForSave]
-        (QByteArray bytes, fc::api::ApiError err) {
-            if (!self) return;
-            if (err) {
-                self->statusBar()->showMessage(
-                    tr("Download failed: %1").arg(err.message), 8000);
-                return;
-            }
-            QString writeErr;
-            if (!writeBytesToPath(target, bytes, &writeErr)) {
-                self->statusBar()->showMessage(
-                    tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
-                return;
-            }
-            fc::cache::AttachmentRepository::markDownloaded(accountForSave,
-                                                            attachmentId,
-                                                            target);
-            // No auto-open here — the user explicitly chose Save as…, so
-            // we respect that and don't pop a viewer afterwards.
-            self->statusBar()->showMessage(tr("Saved to %1").arg(target), 8000);
-        });
+    fc::api::GmailClient* gmail = activeGmail();
+    postToObject(gmail, [gmail, messageId, attachmentId, target, self,
+                          accountForSave] {
+        gmail->getAttachment(messageId, attachmentId,
+            [self, attachmentId, target, accountForSave]
+            (QByteArray bytes, fc::api::ApiError err) {
+                QString writeErr;
+                bool writeOk = false;
+                if (!err) {
+                    writeOk = writeBytesToPath(target, bytes, &writeErr);
+                    if (writeOk) {
+                        fc::cache::AttachmentRepository::markDownloaded(
+                            accountForSave, attachmentId, target);
+                    }
+                }
+                if (!self) return;
+                QMetaObject::invokeMethod(self.data(),
+                    [self, err, writeErr, writeOk, target] {
+                        if (!self) return;
+                        if (err) {
+                            self->statusBar()->showMessage(
+                                tr("Download failed: %1").arg(err.message), 8000);
+                            return;
+                        }
+                        if (!writeOk) {
+                            self->statusBar()->showMessage(
+                                tr("Couldn't write %1: %2").arg(target, writeErr),
+                                8000);
+                            return;
+                        }
+                        // No auto-open here — the user explicitly chose
+                        // Save as…, so we respect that and don't pop a
+                        // viewer afterwards.
+                        self->statusBar()->showMessage(
+                            tr("Saved to %1").arg(target), 8000);
+                    }, Qt::QueuedConnection);
+            });
+    });
 }
 
 void MainWindow::onDownloadAllAttachments(const QString& messageId) {
@@ -2542,33 +3006,48 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
     int kicked = 0;
     QPointer<MainWindow> self(this);
     const QString accountForBatch = currentAccountId_;
+    fc::api::GmailClient* gmail = activeGmail();
     for (const auto& a : m.attachments) {
         if (a.id.isEmpty()) continue;   // inline-only; not addressable
         const QString target = uniqueTargetPath(dir, a.filename);
         const QString attachmentId = a.id;
         const QString filename     = a.filename;
-        gmail_->getAttachment(messageId, attachmentId,
-            [self, attachmentId, target, filename, accountForBatch]
-            (QByteArray bytes, fc::api::ApiError err) {
-                if (!self) return;
-                if (err) {
-                    self->statusBar()->showMessage(
-                        tr("Download failed (%1): %2").arg(filename, err.message),
-                        8000);
-                    return;
-                }
-                QString writeErr;
-                if (!writeBytesToPath(target, bytes, &writeErr)) {
-                    self->statusBar()->showMessage(
-                        tr("Couldn't write %1: %2").arg(target, writeErr), 8000);
-                    return;
-                }
-                fc::cache::AttachmentRepository::markDownloaded(accountForBatch,
-                                                                attachmentId,
-                                                                target);
-                self->statusBar()->showMessage(
-                    tr("Saved %1").arg(QFileInfo(target).fileName()), 4000);
-            });
+        postToObject(gmail, [gmail, messageId, attachmentId, target, filename,
+                              self, accountForBatch] {
+            gmail->getAttachment(messageId, attachmentId,
+                [self, attachmentId, target, filename, accountForBatch]
+                (QByteArray bytes, fc::api::ApiError err) {
+                    QString writeErr;
+                    bool writeOk = false;
+                    if (!err) {
+                        writeOk = writeBytesToPath(target, bytes, &writeErr);
+                        if (writeOk) {
+                            fc::cache::AttachmentRepository::markDownloaded(
+                                accountForBatch, attachmentId, target);
+                        }
+                    }
+                    if (!self) return;
+                    QMetaObject::invokeMethod(self.data(),
+                        [self, err, writeErr, writeOk, target, filename] {
+                            if (!self) return;
+                            if (err) {
+                                self->statusBar()->showMessage(
+                                    tr("Download failed (%1): %2")
+                                        .arg(filename, err.message), 8000);
+                                return;
+                            }
+                            if (!writeOk) {
+                                self->statusBar()->showMessage(
+                                    tr("Couldn't write %1: %2")
+                                        .arg(target, writeErr), 8000);
+                                return;
+                            }
+                            self->statusBar()->showMessage(
+                                tr("Saved %1").arg(QFileInfo(target).fileName()),
+                                4000);
+                        }, Qt::QueuedConnection);
+                });
+        });
         ++kicked;
     }
 
@@ -2818,9 +3297,13 @@ void MainWindow::onToggleLinkDisplay() {
 
     // Re-render the reader so the change is immediately visible.
     if (currentMessage_.id.isEmpty()) return;
-    const auto cached = fc::cache::MessageRepository::byId(currentMessage_.id);
+    const QString lookupAccount = currentMessage_.accountId.isEmpty()
+        ? currentAccountId_ : currentMessage_.accountId;
+    const auto cached = fc::cache::MessageRepository::byId(lookupAccount,
+                                                           currentMessage_.id);
     if (cached.id.isEmpty()) return;
-    const auto thread = fc::cache::MessageRepository::byThread(cached.threadId);
+    const auto thread = fc::cache::MessageRepository::byThread(lookupAccount,
+                                                               cached.threadId);
     if (thread.size() > 1) {
         reader_->showThread(thread, cached.id);
     } else {
@@ -2840,14 +3323,17 @@ void MainWindow::onApplyLabelsCurrent() {
     // matches what the user sees in the message-list row badges and
     // avoids the surprise of "I checked Work but only one of three
     // messages had it; now the others are missing it."
+    const QString threadAccount = currentMessage_.accountId.isEmpty()
+        ? currentAccountId_ : currentMessage_.accountId;
     const auto messages = fc::cache::MessageRepository::byThread(
-                              currentMessage_.threadId);
+                              threadAccount, currentMessage_.threadId);
     QSet<QString> applied;
     for (const auto& m : messages) {
         for (const auto& id : m.labelIds) applied.insert(id);
     }
 
-    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, applied, this);
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, currentAccountId_,
+                            applied, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const QStringList add = dlg.added();
@@ -2867,14 +3353,17 @@ void MainWindow::onMoveToLabelCurrent() {
         return;
     }
 
+    const QString threadAccount = currentMessage_.accountId.isEmpty()
+        ? currentAccountId_ : currentMessage_.accountId;
     const auto messages = fc::cache::MessageRepository::byThread(
-                              currentMessage_.threadId);
+                              threadAccount, currentMessage_.threadId);
     QSet<QString> applied;
     for (const auto& m : messages) {
         for (const auto& id : m.labelIds) applied.insert(id);
     }
 
-    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, applied, this);
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, currentAccountId_,
+                            applied, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const QString chosen = dlg.chosen();
@@ -3125,6 +3614,217 @@ void MainWindow::onNewMessagesForAccount(const QString& accountId, int count) {
 
     tray_->notifier()->notifyNewMail(mode, accountEmail, count,
                                       sender, subject, threadId);
+}
+
+// ---------- Add-account flow ----------
+//
+// First sign-in and "Add another account…" share this path. We can't
+// reuse the current account's OAuthClient: it's bound to that
+// account's keychain slot, so a fresh authorize() would clobber the
+// existing tokens. Instead we mint a transient unbound stack
+// (OAuthClient + RestClient + GmailClient + SyncService), run the
+// OAuth dance against it, and on profileFetched mint the accounts
+// row + copy the just-issued tokens onto the new AccountContext's
+// bound OAuthClient. Then we tear down the transient stack.
+
+void MainWindow::beginAddAccountFlow() {
+    if (pendingAuth_) {
+        statusBar()->showMessage(
+            tr("Sign-in already in progress."), 4000);
+        return;
+    }
+
+    auto* config     = config_;
+    auto* tokenStore = accounts_->tokenStore();
+    if (!tokenStore) {
+        QMessageBox::warning(this, tr("Sign-in unavailable"),
+            tr("AccountManager was constructed without a TokenStore; "
+               "rebuild with a config + token store and try again."));
+        return;
+    }
+
+    pendingAuth_  = new fc::auth::OAuthClient(config, tokenStore,
+                                               /*accountId=*/QString(), this);
+    pendingRest_  = new fc::api::RestClient(pendingAuth_, this);
+    pendingGmail_ = new fc::api::GmailClient(pendingRest_, this);
+
+    // browserAuthRequested → small dialog so the user can paste the
+    // URL if the auto-launch fails. The dialog deletes itself on
+    // close; we hold a QPointer so we can flip it to "Signed in" once
+    // granted fires (or close it if the flow fails).
+    connect(pendingAuth_, &fc::auth::OAuthClient::browserAuthRequested,
+            this, [this](const QUrl& url, bool /*openedAutomatically*/) {
+        QApplication::clipboard()->setText(url.toString());
+
+        auto* dlg = new QDialog(this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->setWindowTitle(tr("Sign in with Google"));
+        dlg->resize(640, 240);
+
+        auto* layout = new QVBoxLayout(dlg);
+        const QString headline = tr(
+            "<p>To finish signing in, open the URL below in your "
+            "browser. <b>Click <i>Open in Browser</i></b>, or copy the "
+            "URL and paste it into any browser yourself.</p>");
+        const QString footnote = tr(
+            "<p>The URL is already on your clipboard. FirstContact is "
+            "listening on a local port — once you complete consent, "
+            "the redirect will land here and this dialog will switch "
+            "to a sign-in-complete confirmation.</p>");
+
+        auto* msg = new QLabel(headline + footnote, dlg);
+        msg->setWordWrap(true);
+        msg->setTextFormat(Qt::RichText);
+        layout->addWidget(msg);
+
+        auto* urlField = new QLineEdit(url.toString(), dlg);
+        urlField->setReadOnly(true);
+        urlField->setCursorPosition(0);
+        urlField->selectAll();
+        layout->addWidget(urlField);
+
+        auto* btnRow = new QHBoxLayout;
+        auto* copyBtn  = new QPushButton(tr("Copy URL"),         dlg);
+        auto* retryBtn = new QPushButton(tr("Open in Browser"),  dlg);
+        auto* closeBtn = new QPushButton(tr("Close"),            dlg);
+        btnRow->addWidget(copyBtn);
+        btnRow->addWidget(retryBtn);
+        btnRow->addStretch(1);
+        btnRow->addWidget(closeBtn);
+        layout->addLayout(btnRow);
+
+        connect(copyBtn,  &QPushButton::clicked, [url] {
+            QApplication::clipboard()->setText(url.toString());
+        });
+        connect(retryBtn, &QPushButton::clicked, [url] {
+            fc::util::launchBrowser(url);
+        });
+        connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+
+        pendingDlg_ = dlg;
+        dlg->show();
+    });
+
+    connect(pendingAuth_, &fc::auth::OAuthClient::granted,
+            this, [this] {
+        qInfo("MainWindow: pendingAuth granted, kicking getProfile");
+        if (!pendingGmail_) {
+            qWarning("MainWindow: granted fired but pendingGmail_ is null "
+                     "(teardown race?)");
+            return;
+        }
+        QPointer<MainWindow> self(this);
+        pendingGmail_->getProfile(
+            [self](fc::api::GmailClient::Profile p, fc::api::ApiError err) {
+            if (!self) {
+                qWarning("MainWindow: getProfile callback after destruction");
+                return;
+            }
+            if (err) {
+                qWarning("MainWindow: getProfile failed: %s",
+                         qUtf8Printable(err.message));
+                QMessageBox::warning(self, self->tr("Sign-in failed"),
+                    self->tr("Sign-in succeeded but the profile lookup "
+                             "failed: %1").arg(err.message));
+                if (self->pendingDlg_) self->pendingDlg_->close();
+                self->teardownPendingAddAccountFlow();
+                return;
+            }
+            qInfo("MainWindow: getProfile returned email='%s'",
+                  qUtf8Printable(p.emailAddress));
+            self->finalizePendingAddAccountFlow(p.emailAddress);
+        });
+    });
+
+    connect(pendingAuth_, &fc::auth::OAuthClient::failed,
+            this, [this](const QString& reason) {
+        if (pendingDlg_) pendingDlg_->close();
+        QMessageBox::warning(this, tr("Sign-in failed"), reason);
+        teardownPendingAddAccountFlow();
+    });
+
+    statusBar()->showMessage(
+        tr("Starting OAuth flow — opening your browser…"), 0);
+    pendingAuth_->authorize();
+}
+
+void MainWindow::finalizePendingAddAccountFlow(const QString& email) {
+    qInfo("MainWindow: finalize entry email='%s', pendingAuth=%p",
+          qUtf8Printable(email), static_cast<void*>(pendingAuth_));
+    if (!pendingAuth_) return;   // teardown raced us
+
+    // Mint the accounts row (idempotent on email — re-running OAuth
+    // for an already-signed-in address returns the existing id).
+    const QString id = accounts_->add(email);
+    if (id.isEmpty()) {
+        QMessageBox::warning(this, tr("Sign-in failed"),
+            tr("Couldn't add account row for %1.").arg(email));
+        if (pendingDlg_) pendingDlg_->close();
+        teardownPendingAddAccountFlow();
+        return;
+    }
+
+    // Build (or fetch) the per-account stack and seed it with the
+    // tokens we just minted on the transient client. adoptTokens
+    // persists synchronously to the bound slot, so the new context
+    // is immediately authorized.
+    auto* ctx = accounts_->ensureContext(id);
+    if (ctx && ctx->auth() && pendingAuth_) {
+        // ctx->auth() lives on the AccountContext's sync thread; both
+        // calls mutate the in-memory token blob (under a mutex) and
+        // kick TokenStore::save asynchronously. Queue them onto that
+        // thread; we don't need to wait for completion here — the
+        // tokensLoaded signal flowing back through AccountManager
+        // already drives the post-adoption UI refresh.
+        auto* a = ctx->auth();
+        const auto snap = pendingAuth_->tokensSnapshot();
+        postToObject(a, [a, snap, email] {
+            a->adoptTokens(snap);
+            a->setAccountEmail(email);
+        });
+    }
+
+    // Make the new account current. The currentAccountChanged hook
+    // wires sidebar / list / reader to the new account_id.
+    accounts_->setCurrentAccountId(id);
+
+    if (pendingDlg_) {
+        pendingDlg_->setWindowTitle(tr("Sign in with Google — done"));
+        pendingDlg_->close();
+    }
+    statusBar()->showMessage(
+        tr("Sign-in successful — %1").arg(email), 6000);
+
+    // Kick the new context's sync onto its scheduler.
+    if (ctx && ctx->sync()) {
+        auto* s = ctx->sync();
+        qInfo("MainWindow: kicking initial sync ctx=%p sync=%p "
+              "ctx->accountId='%s' (target id='%s')",
+              static_cast<void*>(ctx),
+              static_cast<void*>(s),
+              qUtf8Printable(ctx->accountId()),
+              qUtf8Printable(id));
+        // s lives on the sync thread now; runOnce/startScheduler touch
+        // d_->state / d_->timer which must be set up there.
+        postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
+    } else {
+        qWarning("MainWindow: no ctx/sync to kick after Add-account "
+                 "(ctx=%p)", static_cast<void*>(ctx));
+    }
+    if (outbox_)  outbox_->start();
+    if (pending_) pending_->start();
+    if (drafts_)  drafts_->start();
+
+    teardownPendingAddAccountFlow();
+    refreshAccountIndicator();
+    refreshAccountMenu();
+}
+
+void MainWindow::teardownPendingAddAccountFlow() {
+    if (pendingGmail_) { pendingGmail_->deleteLater(); pendingGmail_ = nullptr; }
+    if (pendingRest_)  { pendingRest_->deleteLater();  pendingRest_  = nullptr; }
+    if (pendingAuth_)  { pendingAuth_->deleteLater();  pendingAuth_  = nullptr; }
+    pendingDlg_ = nullptr;   // QDialog::WA_DeleteOnClose handles teardown
 }
 
 }  // namespace fc::ui

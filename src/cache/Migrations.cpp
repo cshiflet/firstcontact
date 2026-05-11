@@ -185,6 +185,25 @@ void Migrations::run(QSqlDatabase& db) {
     }
 
     const int v = currentSchemaVersion(db);
+
+    // v0–v5 are the pre-multi-account single-tenant schemas. The
+    // legacy migration that lifted single-account data into the
+    // multi-account tables was removed; an in-place upgrade from one
+    // of those versions is no longer supported. Refuse to start
+    // rather than silently dropping the user's cached data on the
+    // next migration step.
+    //
+    // v == 0 with the meta table missing means "fresh install" and
+    // is allowed. v == 0 with `meta` already populated would be a
+    // truly unusual state — we treat it as legacy data and reject
+    // the same way.
+    if (v >= 1 && v < 6) {
+        qFatal("FirstContact cache at schema_version=%d (single-account "
+               "v0–v5) is no longer supported. Delete the cache "
+               "(typically ~/.local/share/FirstContact/firstcontact.db*) "
+               "and the app will resync from Gmail on next launch.", v);
+    }
+
     if (v < 1) {
         runStep(db, [&] {
             execAll(db, readResource(QStringLiteral(":/schema/0001_init.sql")));
@@ -223,6 +242,15 @@ void Migrations::run(QSqlDatabase& db) {
         execAllInTransaction(
             db, readResource(QStringLiteral(":/schema/0006_multi_account.sql")));
         setSchemaVersion(db, 6);
+    }
+    if (v < 7) {
+        // Drop the v6 synthetic legacy accounts seed (UUID 0000…0001) if
+        // it's still around. Cascades through every per-account table.
+        runStep(db, [&] {
+            execAll(db, readResource(
+                QStringLiteral(":/schema/0007_drop_legacy_seed.sql")));
+            setSchemaVersion(db, 7);
+        });
     }
 }
 

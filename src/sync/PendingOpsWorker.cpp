@@ -4,6 +4,7 @@
 #include "cache/PendingOpsRepository.h"
 #include "util/DryRun.h"
 
+#include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
 
@@ -83,24 +84,38 @@ void PendingOpsWorker::flush() {
             continue;
         }
 
-        client->modifyMessage(op.messageId, op.addLabels, op.removeLabels,
-            [self, id = op.id, attempts = op.attempts, onDone]
-            (fc::api::ApiError err) {
-                if (!err) {
-                    fc::cache::PendingOpsRepository::remove(id);
-                    if (self) emit self->itemReconciled(id);
-                } else if (err.kind == fc::api::ApiErrorKind::BadRequest ||
-                           err.kind == fc::api::ApiErrorKind::NotFound) {
-                    fc::cache::PendingOpsRepository::remove(id);
-                    if (self) emit self->itemDropped(id, err.message);
-                } else if (attempts + 1 >= kGiveUpAttempts) {
-                    fc::cache::PendingOpsRepository::remove(id);
-                    if (self) emit self->itemDropped(id, err.message);
-                } else {
-                    fc::cache::PendingOpsRepository::markAttempt(id, err.message);
-                }
-                onDone();
-            });
+        // client lives on its AccountContext's sync thread; bounce the
+        // modify call onto that thread so QNetworkAccessManager isn't
+        // touched cross-thread. The callback runs on the sync thread
+        // and uses that thread's per-thread DB connection for the
+        // PendingOpsRepository writes; the worker's signals re-cross
+        // back to UI via queued delivery on emit.
+        const QString messageId   = op.messageId;
+        const QStringList addList = op.addLabels;
+        const QStringList remList = op.removeLabels;
+        const qint64      opId    = op.id;
+        const int         attempts = op.attempts;
+        QMetaObject::invokeMethod(client,
+            [client, messageId, addList, remList, opId, attempts, self, onDone] {
+            client->modifyMessage(messageId, addList, remList,
+                [self, opId, attempts, onDone]
+                (fc::api::ApiError err) {
+                    if (!err) {
+                        fc::cache::PendingOpsRepository::remove(opId);
+                        if (self) emit self->itemReconciled(opId);
+                    } else if (err.kind == fc::api::ApiErrorKind::BadRequest ||
+                               err.kind == fc::api::ApiErrorKind::NotFound) {
+                        fc::cache::PendingOpsRepository::remove(opId);
+                        if (self) emit self->itemDropped(opId, err.message);
+                    } else if (attempts + 1 >= kGiveUpAttempts) {
+                        fc::cache::PendingOpsRepository::remove(opId);
+                        if (self) emit self->itemDropped(opId, err.message);
+                    } else {
+                        fc::cache::PendingOpsRepository::markAttempt(opId, err.message);
+                    }
+                    onDone();
+                });
+        }, Qt::QueuedConnection);
     }
 }
 

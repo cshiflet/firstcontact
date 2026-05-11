@@ -102,22 +102,4 @@ void AttachmentRepository::markDownloaded(const QString& accountId,
     q.exec();
 }
 
-// ---------- legacy zero-arg overloads ----------
-
-void AttachmentRepository::replaceForMessage(
-        const QString& messageId,
-        const std::vector<fc::Attachment>& attachments) {
-    replaceForMessage(Database::defaultAccountId(), messageId, attachments);
-}
-
-std::vector<fc::Attachment> AttachmentRepository::byMessage(
-        const QString& messageId) {
-    return byMessage(Database::defaultAccountId(), messageId);
-}
-
-void AttachmentRepository::markDownloaded(const QString& attachmentId,
-                                           const QString& localPath) {
-    markDownloaded(Database::defaultAccountId(), attachmentId, localPath);
-}
-
 }  // namespace fc::cache

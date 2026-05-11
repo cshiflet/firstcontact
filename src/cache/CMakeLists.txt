@@ -19,6 +19,7 @@ qt_add_resources(fc_cache "fc_cache_schema"
         "${CMAKE_SOURCE_DIR}/resources/schema/0004_send_at.sql"
         "${CMAKE_SOURCE_DIR}/resources/schema/0005_snooze.sql"
         "${CMAKE_SOURCE_DIR}/resources/schema/0006_multi_account.sql"
+        "${CMAKE_SOURCE_DIR}/resources/schema/0007_drop_legacy_seed.sql"
 )
 target_include_directories(fc_cache PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_cache

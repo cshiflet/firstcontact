@@ -93,8 +93,15 @@ void GmailClient::getProfile(std::function<void(Profile, ApiError)> cb) {
             const auto o = QJsonDocument::fromJson(body).object();
             Profile p;
             p.emailAddress = o.value(QStringLiteral("emailAddress")).toString();
-            p.historyId    = QString::number(static_cast<qint64>(
-                                o.value(QStringLiteral("historyId")).toDouble()));
+            // Gmail returns historyId as a JSON string (the value is a
+            // uint64, too large for IEEE-754 doubles to hold without
+            // precision loss). The previous code went through
+            // toDouble() — which returns 0 for non-number values —
+            // and stored "0" as the historyId. listHistory then 400-d
+            // on "0", clearing the slot and re-entering initial sync
+            // on every tick, while messages from each fetch leaked
+            // through with empty accountId stamps.
+            p.historyId = o.value(QStringLiteral("historyId")).toString();
             cb(p, {});
         });
 }
@@ -203,14 +210,16 @@ void GmailClient::listHistory(const QString& startHistoryId,
             }
             if (err) { cb({}, err); return; }
             const auto o = QJsonDocument::fromJson(body).object();
-            p.historyId     = QString::number(static_cast<qint64>(
-                                o.value(QStringLiteral("historyId")).toDouble()));
+            // Gmail wire format: historyId / history.id are JSON
+            // strings (the values are uint64). Reading them as
+            // doubles silently returns 0 — see the matching note in
+            // getProfile.
+            p.historyId     = o.value(QStringLiteral("historyId")).toString();
             p.nextPageToken = o.value(QStringLiteral("nextPageToken")).toString();
             for (const auto v : o.value(QStringLiteral("history")).toArray()) {
                 const auto h = v.toObject();
                 HistoryEntry e;
-                e.id = QString::number(static_cast<qint64>(
-                            h.value(QStringLiteral("id")).toDouble()));
+                e.id = h.value(QStringLiteral("id")).toString();
                 for (const auto m : h.value(QStringLiteral("messagesAdded")).toArray()) {
                     e.messagesAdded
                         << m.toObject().value(QStringLiteral("message"))

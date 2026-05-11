@@ -40,10 +40,6 @@ public:
     // Cross-account helper for OutboxWorker — pulls due rows across
     // every account so a single tick can drain them all.
     static std::vector<OutboxItem> dueForSendAllAccounts();
-
-    // Legacy zero-arg overloads.
-    static qint64                  enqueue(const OutboxItem& item);
-    static std::vector<OutboxItem> dueForSend();
 };
 
 }  // namespace fc::cache

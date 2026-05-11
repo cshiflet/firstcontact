@@ -2,6 +2,7 @@
 
 #include "AccountContext.h"
 #include "auth/ClientConfig.h"
+#include "auth/OAuthClient.h"
 #include "auth/TokenStore.h"
 #include "cache/Database.h"
 #include "cache/Migrations.h"
@@ -69,6 +70,35 @@ void AccountManager::buildContextsForAllAccounts() {
                     [this, aid](const QString& reason) {
                         emit syncFailed(aid, reason);
                     });
+            connect(s, &fc::sync::SyncService::topUpStarted, this,
+                    [this, aid](const QString& labelId) {
+                        emit topUpStarted(aid, labelId);
+                    });
+            connect(s, &fc::sync::SyncService::topUpFinished, this,
+                    [this, aid](const QString& labelId, int newRows,
+                                bool serverExhausted) {
+                        emit topUpFinished(aid, labelId, newRows,
+                                           serverExhausted);
+                    });
+            // Coarse-grained syncStarted/syncFinished: fires on
+            // every Idle ↔ non-Idle transition so the UI can show
+            // "Syncing…" feedback for initial / incremental syncs
+            // (not just top-ups, which only fire for explicit
+            // topUpLabel calls).
+            connect(s, &fc::sync::SyncService::stateChanged, this,
+                    [this, aid](fc::sync::SyncService::State st) {
+                        if (st == fc::sync::SyncService::State::Idle)
+                            emit syncFinished(aid);
+                        else
+                            emit syncStarted(aid);
+                    });
+        }
+        if (auto* a_oauth = ctx->auth()) {
+            const QString aid = a.id;
+            connect(a_oauth, &fc::auth::OAuthClient::tokensLoaded, this,
+                    [this, aid] { emit tokensLoaded(aid); });
+            connect(a_oauth, &fc::auth::OAuthClient::signedOut, this,
+                    [this, aid] { emit accountSignedOut(aid); });
         }
     }
 }
@@ -93,6 +123,45 @@ AccountContext* AccountManager::ensureContext(const QString& id) {
     if (auto* existing = contexts_.value(id, nullptr)) return existing;
     auto* ctx = new AccountContext(id, config_, tokenStore_, this);
     contexts_.insert(id, ctx);
+    // Same per-context signal forwarding that buildContextsForAllAccounts
+    // installs at startup. Without this, contexts created mid-session
+    // (Add-account flow) would never propagate sync / token events out
+    // through AccountManager — the toolbar / sidebar would go quiet
+    // until the next launch.
+    if (auto* s = ctx->sync()) {
+        connect(s, &fc::sync::SyncService::labelsUpdated, this,
+                [this, id] { emit labelsUpdated(id); });
+        connect(s, &fc::sync::SyncService::messagesUpdated, this,
+                [this, id] { emit messagesUpdated(id); });
+        connect(s, &fc::sync::SyncService::newMessages, this,
+                [this, id](int count) { emit newMessages(id, count); });
+        connect(s, &fc::sync::SyncService::failed, this,
+                [this, id](const QString& reason) {
+                    emit syncFailed(id, reason);
+                });
+        connect(s, &fc::sync::SyncService::topUpStarted, this,
+                [this, id](const QString& labelId) {
+                    emit topUpStarted(id, labelId);
+                });
+        connect(s, &fc::sync::SyncService::topUpFinished, this,
+                [this, id](const QString& labelId, int newRows,
+                            bool serverExhausted) {
+                    emit topUpFinished(id, labelId, newRows, serverExhausted);
+                });
+        connect(s, &fc::sync::SyncService::stateChanged, this,
+                [this, id](fc::sync::SyncService::State st) {
+                    if (st == fc::sync::SyncService::State::Idle)
+                        emit syncFinished(id);
+                    else
+                        emit syncStarted(id);
+                });
+    }
+    if (auto* a_oauth = ctx->auth()) {
+        connect(a_oauth, &fc::auth::OAuthClient::tokensLoaded, this,
+                [this, id] { emit tokensLoaded(id); });
+        connect(a_oauth, &fc::auth::OAuthClient::signedOut, this,
+                [this, id] { emit accountSignedOut(id); });
+    }
     return ctx;
 }
 
@@ -297,6 +366,7 @@ bool AccountManager::dropCache(const QString& id) {
                  qUtf8Printable(db.lastError().text()));
         return false;
     }
+    emit cacheCleared(id);
     return true;
 }
 
@@ -525,8 +595,8 @@ AccountInfo AccountManager::accountById(const QString& id) const {
 }
 
 void AccountManager::selectInitialCurrent() {
-    // Same selection rule as Database::defaultAccountId() — pick the
-    // is_default row, fall back to most-recently-used, then sort_order.
+    // Pick the active account: the is_default row, falling back to
+    // most-recently-used, then sort_order, then email.
     if (accounts_.isEmpty()) {
         currentId_.clear();
         return;

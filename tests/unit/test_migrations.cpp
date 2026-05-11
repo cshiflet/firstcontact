@@ -48,7 +48,7 @@ private slots:
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT value FROM meta WHERE key = 'schema_version'")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 6);   // bump on each schema change
+            QCOMPARE(q.value(0).toInt(), 7);   // bump on each schema change
 
             // body_html column landed in v3.
             QVERIFY(q.exec(QStringLiteral(
@@ -61,8 +61,7 @@ private slots:
                 "SELECT snooze_until FROM messages LIMIT 1")));
 
             // v6 multi-account: every per-account table now carries an
-            // `account_id` column, and the new `accounts` table holds at
-            // least the legacy seed row.
+            // `account_id` column.
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT account_id FROM messages LIMIT 1")));
             QVERIFY(q.exec(QStringLiteral(
@@ -79,15 +78,19 @@ private slots:
                 "SELECT account_id FROM outbox LIMIT 1")));
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT account_id FROM pending_ops LIMIT 1")));
-            QVERIFY(q.exec(QStringLiteral(
-                "SELECT id, email FROM accounts")));
-            QVERIFY(q.next());   // legacy seed row
-            QVERIFY(!q.value(0).toString().isEmpty());
 
-            // account_meta is the per-account key/value sheet (history_id
-            // and email migrated out of `meta`).
+            // The accounts table exists and is empty on a fresh install
+            // (the v0→v6 legacy seed migration was removed).
             QVERIFY(q.exec(QStringLiteral(
-                "SELECT account_id, key, value FROM account_meta LIMIT 1")));
+                "SELECT COUNT(*) FROM accounts")));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 0);
+
+            // account_meta exists and is empty.
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT COUNT(*) FROM account_meta")));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 0);
 
             // Idempotency: second run should not fail.
             fc::cache::Migrations::run(db);

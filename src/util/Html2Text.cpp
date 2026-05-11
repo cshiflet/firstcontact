@@ -12,7 +12,16 @@ QString collapseWhitespace(QString s) {
     // literal character class instead of relying on \v.
     static const QRegularExpression spaces(QStringLiteral("[ \\t\\r\\f]+"));
     s.replace(spaces, QStringLiteral(" "));
-    static const QRegularExpression manyNl(QStringLiteral("\\n{3,}"));
+    // Collapse runs of blank (or whitespace-only) lines down to a
+    // single empty line. The previous \n{3,} pattern only caught
+    // *consecutive* newlines; structural HTML indentation like
+    // `\n          \n        \n      \n` turns into `\n \n \n \n`
+    // after the horizontal-whitespace pass — separate newlines that
+    // each surround a single space — and that wouldn't match.
+    // `\n([ ]*\n)+` grabs the leading newline plus every following
+    // (optional-spaces, newline) line, so any number of blank-ish
+    // lines collapse to one.
+    static const QRegularExpression manyNl(QStringLiteral("\\n([ ]*\\n)+"));
     s.replace(manyNl, QStringLiteral("\n\n"));
     return s.trimmed();
 }

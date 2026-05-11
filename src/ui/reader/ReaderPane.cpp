@@ -13,6 +13,7 @@
 
 #include <QAction>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
@@ -207,6 +208,12 @@ bool plainTextLooksLossy(const QString& text) {
 }
 
 QString bodyHtml(const fc::Message& m) {
+    QElapsedTimer timer; timer.start();
+    qInfo("ReaderPane bodyHtml: id=%s bodyText=%lld bodyHtml=%lld",
+          qUtf8Printable(m.id),
+          static_cast<long long>(m.bodyText.size()),
+          static_cast<long long>(m.bodyHtml.size()));
+
     // Prefer the HTML body when the plain-text part looks auto-generated
     // and lossy — we can re-derive plain text from HTML with paragraph
     // structure intact via util::html2text. The original bodyText path
@@ -217,7 +224,14 @@ QString bodyHtml(const fc::Message& m) {
         && plainTextLooksLossy(m.bodyText);
 
     if (!m.bodyText.isEmpty() && !preferHtmlOverLossyText) {
-        return util::linkifyPlainText(m.bodyText, Preferences::linkDisplayMode());
+        const qint64 t0 = timer.elapsed();
+        QString out = util::linkifyPlainText(m.bodyText,
+                                              Preferences::linkDisplayMode());
+        qInfo("ReaderPane: text-only (cached bodyText path) "
+              "linkify=%lldms total=%lldms",
+              static_cast<long long>(timer.elapsed() - t0),
+              static_cast<long long>(timer.elapsed()));
+        return out;
     }
     if (!m.bodyHtml.isEmpty()) {
         if (preferHtmlOverLossyText) {
@@ -226,8 +240,19 @@ QString bodyHtml(const fc::Message& m) {
             // then linkify. Sanitisation isn't required here — html2text
             // drops every tag — but we still feed the result through
             // linkifyPlainText so URLs render as clickable anchors.
+            const qint64 t0 = timer.elapsed();
             const QString rebuilt = util::html2text(m.bodyHtml);
-            return util::linkifyPlainText(rebuilt, Preferences::linkDisplayMode());
+            const qint64 t1 = timer.elapsed();
+            QString out = util::linkifyPlainText(
+                rebuilt, Preferences::linkDisplayMode());
+            qInfo("ReaderPane: text-only (rebuild from HTML) "
+                  "html2text=%lldms (rebuilt=%lld bytes) linkify=%lldms "
+                  "total=%lldms",
+                  static_cast<long long>(t1 - t0),
+                  static_cast<long long>(rebuilt.size()),
+                  static_cast<long long>(timer.elapsed() - t1),
+                  static_cast<long long>(timer.elapsed()));
+            return out;
         }
         const auto safe = util::sanitizeHtml(m.bodyHtml);
         QString r = safe.html;
@@ -444,7 +469,18 @@ QWidget* ReaderPane::buildMessageCard(const fc::Message& m, bool initiallyExpand
                                  : QStringLiteral("#7c4dff")));
         body->setPalette(pal);
     }
-    body->setHtml(bodyHtml(m));
+    {
+        QElapsedTimer setHtmlT; setHtmlT.start();
+        const QString html = bodyHtml(m);
+        const qint64 t0 = setHtmlT.elapsed();
+        body->setHtml(html);
+        qInfo("ReaderPane: setHtml id=%s html_size=%lld bodyHtml=%lldms "
+              "setHtml=%lldms",
+              qUtf8Printable(m.id),
+              static_cast<long long>(html.size()),
+              static_cast<long long>(t0),
+              static_cast<long long>(setHtmlT.elapsed() - t0));
+    }
     body->setVisible(initiallyExpanded);
 
     // "Open in browser" rows. We render TWO copies — above and below the
