@@ -4,6 +4,7 @@
 
 #include <QAbstractItemModel>
 #include <QHash>
+#include <QList>
 #include <QString>
 
 #include <memory>
@@ -25,6 +26,17 @@ public:
         TotalRole,
         ColorBgRole,
         ColorFgRole,
+        AccountIdRole,
+    };
+
+    // Lightweight per-account descriptor — id + display label. fc_models
+    // can't depend on fc_account (circular: fc_account -> fc_sync ->
+    // fc_models), so callers populate this list from AccountManager and
+    // hand it in via setAccounts().
+    struct AccountDescriptor {
+        QString id;
+        QString email;
+        QString displayName;   // optional; falls back to email
     };
 
     explicit LabelTreeModel(QObject* parent = nullptr);
@@ -39,6 +51,19 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void reload();
+
+    // Multi-account tree layout. Pass every signed-in account here
+    // (typically from AccountManager::accounts()). reload() builds one
+    // top-level branch per account, each containing its own Folders /
+    // Labels sections. The "All Inboxes" cross-account synthetic stays
+    // at the very top of the tree.
+    //
+    // When the list is empty the tree falls back to legacy single-
+    // account mode: it shows just the Folders / Labels sections of
+    // accountId_ (set via setAccountId). v1 startup hits this path
+    // briefly while AccountManager populates.
+    void setAccounts(const QList<AccountDescriptor>& accounts);
+    QList<AccountDescriptor> accounts() const { return accounts_; }
 
     // Multi-account: switches which account's labels populate the tree.
     // Calling this triggers a reload(). v1: empty string clears the tree.
@@ -56,12 +81,14 @@ public:
     void setSyncing(bool on);
 
     QString labelIdAt(const QModelIndex& idx) const;
+    QString accountIdAt(const QModelIndex& idx) const;
 
 private:
     struct Node;
     using NodePtr = std::unique_ptr<Node>;
     Node* root_;
     QString accountId_;
+    QList<AccountDescriptor> accounts_;
 
     bool                syncing_ = false;
     QHash<QString, int> shadowUnread_;   // by fullName, survives reload()
@@ -72,9 +99,21 @@ private:
     // refreshCountsInPlace updates aggUnread/aggTotal on the existing
     // nodes and emits dataChanged on their Display/Unread/Total roles
     // — no structural reset, no collapsed branches, no dropped
-    // selection. sameLabelSet does the cheap pre-check.
-    bool sameLabelSet(const std::vector<fc::cache::LabelRow>& rows) const;
-    void refreshCountsInPlace(const std::vector<fc::cache::LabelRow>& rows);
+    // selection. sameLabelSet does the cheap pre-check. The per-
+    // account row list is what reload() collected up front; pass it
+    // through so neither helper re-queries the cache.
+    using PerAccountRows = std::vector<
+        std::pair<QString, std::vector<fc::cache::LabelRow>>>;
+    bool sameLabelSet(const PerAccountRows& perAccount) const;
+    void refreshCountsInPlace(const PerAccountRows& perAccount);
+
+    // Build the two section nodes (Folders + Labels) for one account
+    // under `parent`. Called by reload() for both legacy single-
+    // account mode (parent = root_, accountId empty) and multi-
+    // account mode (parent = an account node).
+    void appendAccountSections(Node* parent,
+                                const QString& accountId,
+                                const std::vector<fc::cache::LabelRow>& rows);
 };
 
 }  // namespace fc

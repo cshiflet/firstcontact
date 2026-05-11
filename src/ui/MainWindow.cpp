@@ -248,6 +248,9 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         reloadSidebar();
         currentLabelId_ = QStringLiteral("INBOX");
         reloadCurrentLabel();
+        if (sidebar_ && !currentAccountId_.isEmpty()) {
+            sidebar_->selectLabel(currentAccountId_, currentLabelId_);
+        }
     }
 
     // Snooze wake-up scheduler. Snooze is FirstContact-local — Gmail's
@@ -298,12 +301,13 @@ void MainWindow::buildLayout() {
 
     sidebar_ = new SidebarWidget(splitter_);
     sidebar_->setMaximumWidth(260);
-    // Seed the tree model with the active account so it queries the
-    // right account on startup. Without this, the model defaults to
-    // an empty accountId, draws zero labels, and only fills in if
-    // the user manually toggles accounts (because the
-    // currentAccountChanged signal fires on mutation, not on the
-    // already-set initial value).
+    // Wire the sidebar to AccountManager so it can build the multi-
+    // account tree (one branch per signed-in account, "All Inboxes"
+    // at the top). It listens to accountsChanged + currentAccountChanged
+    // and pushes the live list into LabelTreeModel::setAccounts.
+    if (accounts_) sidebar_->setAccountManager(accounts_);
+    // Also mark the active account as the "focus" so the tree's
+    // syncing-ellipsis hint targets the right branch from launch.
     if (sidebar_->model() && !currentAccountId_.isEmpty()) {
         sidebar_->model()->setAccountId(currentAccountId_);
     }
@@ -2045,7 +2049,7 @@ void MainWindow::onRefresh() {
     }
 }
 
-void MainWindow::onLabelSelected(const QString& id) {
+void MainWindow::onLabelSelected(const QString& accountId, const QString& id) {
     if (id.isEmpty()) return;
     // v2 unified inbox: clicking "__all_inboxes" flips to cross-
     // account view. Any other label flips back to per-account.
@@ -2058,10 +2062,22 @@ void MainWindow::onLabelSelected(const QString& id) {
         crossAccountView_ = false;
         resolvedId        = id;
     }
+    // Switch the active account when the user clicked a label that
+    // lives under a different account branch. accountId is empty for
+    // the cross-account synthetic; leave the current account alone in
+    // that case (the cross-account view doesn't care which is active).
+    if (!accountId.isEmpty() && accountId != currentAccountId_) {
+        if (accounts_) accounts_->setCurrentAccountId(accountId);
+        // setCurrentAccountId fires currentAccountChanged, which has
+        // its own handler that does the model retargeting + sidebar
+        // ellipsis hint update. We fall through here to actually
+        // navigate to the chosen label.
+    }
     // Bail if neither the cross-account flip nor the underlying
     // label changed — repeated clicks on the same row should be a
     // no-op rather than a full reload.
-    if (!wasCross && !crossAccountView_ && resolvedId == currentLabelId_) return;
+    if (!wasCross && !crossAccountView_ && resolvedId == currentLabelId_
+        && accountId == currentAccountId_) return;
     // Save the outgoing label's scroll position before swapping the
     // model out from under us; we'll try to restore it the next time
     // the user comes back to that label.
@@ -2742,20 +2758,31 @@ void MainWindow::onSnoozeMessage(const QString& messageId) {
     reloadCurrentLabel();
 }
 
-void MainWindow::onCreateLabel(const QString& parentLabelId) {
+void MainWindow::onCreateLabel(const QString& accountIdArg,
+                                const QString& parentLabelId) {
     bool ok = false;
     QString name = QInputDialog::getText(this, tr("New label"),
         tr("Label name:"), QLineEdit::Normal, QString(), &ok);
     if (!ok || name.isEmpty()) return;
 
-    const auto parent = fc::cache::LabelRepository::byId(currentAccountId_,
+    // Per-account create: route to whichever account branch the user
+    // right-clicked in. Falls back to currentAccountId_ for legacy
+    // call sites (e.g. cross-account "__all_inboxes" with no aid).
+    const QString targetAccount = accountIdArg.isEmpty()
+        ? currentAccountId_ : accountIdArg;
+    const auto parent = fc::cache::LabelRepository::byId(targetAccount,
                                                          parentLabelId);
     if (!parent.id.isEmpty() && parent.type == QLatin1String("user")) {
         name = parent.name + QLatin1Char('/') + name;
     }
     QPointer<MainWindow> self(this);
-    const QString accountForCreate = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    const QString accountForCreate = targetAccount;
+    fc::api::GmailClient* gmail = nullptr;
+    if (auto* ctx = accounts_ ? accounts_->contextFor(targetAccount)
+                              : nullptr) {
+        gmail = ctx->gmail();
+    }
+    if (!gmail) gmail = activeGmail();   // legacy fallback
     // gmail lives on the sync thread; bounce the createLabel and
     // marshal UI work back to the UI thread once the API call lands.
     postToObject(gmail, [gmail, name, self, accountForCreate] {
@@ -2784,13 +2811,16 @@ void MainWindow::onCreateLabel(const QString& parentLabelId) {
     });
 }
 
-void MainWindow::onRenameLabel(const QString& labelId) {
+void MainWindow::onRenameLabel(const QString& accountIdArg,
+                                const QString& labelId) {
     if (fc::util::DryRun::block(QStringLiteral("rename-label"))) {
         statusBar()->showMessage(
             tr("Dry-run mode: label rename blocked."), 4000);
         return;
     }
-    const auto current = fc::cache::LabelRepository::byId(currentAccountId_,
+    const QString targetAccount = accountIdArg.isEmpty()
+        ? currentAccountId_ : accountIdArg;
+    const auto current = fc::cache::LabelRepository::byId(targetAccount,
                                                           labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
 
@@ -2800,8 +2830,13 @@ void MainWindow::onRenameLabel(const QString& labelId) {
     if (!ok || newName.isEmpty() || newName == current.name) return;
 
     QPointer<MainWindow> self(this);
-    const QString accountForRename = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    const QString accountForRename = targetAccount;
+    fc::api::GmailClient* gmail = nullptr;
+    if (auto* ctx = accounts_ ? accounts_->contextFor(targetAccount)
+                              : nullptr) {
+        gmail = ctx->gmail();
+    }
+    if (!gmail) gmail = activeGmail();
     postToObject(gmail, [gmail, labelId, newName, self, accountForRename] {
         gmail->updateLabel(labelId, newName,
             [self, labelId, newName, accountForRename]
@@ -2826,13 +2861,16 @@ void MainWindow::onRenameLabel(const QString& labelId) {
     });
 }
 
-void MainWindow::onDeleteLabel(const QString& labelId) {
+void MainWindow::onDeleteLabel(const QString& accountIdArg,
+                                const QString& labelId) {
     if (fc::util::DryRun::block(QStringLiteral("delete-label"))) {
         statusBar()->showMessage(
             tr("Dry-run mode: label deletion blocked."), 4000);
         return;
     }
-    const auto current = fc::cache::LabelRepository::byId(currentAccountId_,
+    const QString targetAccount = accountIdArg.isEmpty()
+        ? currentAccountId_ : accountIdArg;
+    const auto current = fc::cache::LabelRepository::byId(targetAccount,
                                                           labelId);
     if (current.id.isEmpty() || current.type != QLatin1String("user")) return;
     if (QMessageBox::question(this, tr("Delete label"),
@@ -2840,8 +2878,13 @@ void MainWindow::onDeleteLabel(const QString& labelId) {
               .arg(current.name)) != QMessageBox::Yes) return;
 
     QPointer<MainWindow> self(this);
-    const QString accountForDelete = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    const QString accountForDelete = targetAccount;
+    fc::api::GmailClient* gmail = nullptr;
+    if (auto* ctx = accounts_ ? accounts_->contextFor(targetAccount)
+                              : nullptr) {
+        gmail = ctx->gmail();
+    }
+    if (!gmail) gmail = activeGmail();
     postToObject(gmail, [gmail, labelId, self, accountForDelete] {
         gmail->deleteLabel(labelId,
             [self, labelId, accountForDelete](fc::api::ApiError err) {
@@ -3396,7 +3439,7 @@ void MainWindow::onMarkNotImportant() {
 
 void MainWindow::onGoToLabel(const QString& labelId) {
     if (!sidebar_) return;
-    sidebar_->selectLabel(labelId);
+    sidebar_->selectLabel(currentAccountId_, labelId);
 }
 
 void MainWindow::onToggleLinkDisplay() {

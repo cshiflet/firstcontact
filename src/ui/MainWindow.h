@@ -63,7 +63,7 @@ private slots:
     // resumes without re-syncing); cancel aborts the whole flow.
     void onSignOutAccount(const QString& accountId);
     void onRefresh();
-    void onLabelSelected(const QString& id);
+    void onLabelSelected(const QString& accountId, const QString& labelId);
     void onMessageActivated(const QString& messageId, int row);
     void onSearchChanged();
     void onSearchSubmit();
@@ -71,9 +71,9 @@ private slots:
     void onReplyCurrent();
     void onReplyAllCurrent();
     void onForwardCurrent();
-    void onCreateLabel(const QString& parentLabelId);
-    void onRenameLabel(const QString& labelId);
-    void onDeleteLabel(const QString& labelId);
+    void onCreateLabel(const QString& accountId, const QString& parentLabelId);
+    void onRenameLabel(const QString& accountId, const QString& labelId);
+    void onDeleteLabel(const QString& accountId, const QString& labelId);
     void onOpenSettings();
     void onToggleStar();
     void onToggleStarFor(const QString& messageId);

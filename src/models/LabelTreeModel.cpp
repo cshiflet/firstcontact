@@ -9,9 +9,10 @@ namespace fc {
 
 struct LabelTreeModel::Node {
     QString id;
+    QString accountId;       // empty for cross-account synthetic + section rows
     QString name;            // pretty label segment ("Booking" not "Travel/Booking")
-    QString fullName;        // full Gmail label name
-    QString type;            // "system" | "user" | "section"
+    QString fullName;        // full Gmail label name (or "__account/<aid>", "__section/<aid>/folders", ...)
+    QString type;            // "system" | "user" | "section" | "synthetic" | "account"
     QString colorBg;         // Gmail-assigned background hex (may be empty)
     QString colorFg;         // Gmail-assigned text hex (may be empty)
     int unreadCount = 0;     // self only — what the API reported for this id
@@ -51,78 +52,52 @@ LabelTreeModel::~LabelTreeModel() { delete root_; }
 void LabelTreeModel::setAccountId(const QString& accountId) {
     if (accountId_ == accountId) return;
     accountId_ = accountId;
+    // In multi-account mode (accounts_ non-empty), the tree contains
+    // every account already — just nudge a dataChanged on the visible
+    // rows in case any display hinges on "is this the active account"
+    // (today nothing does; this is future-proofing).
+    if (!accounts_.isEmpty()) return;
     reload();
 }
 
 QString LabelTreeModel::accountId() const { return accountId_; }
 
-void LabelTreeModel::reload() {
-    auto rows = accountId_.isEmpty()
-        ? std::vector<fc::cache::LabelRow>{}
-        : fc::cache::LabelRepository::all(accountId_);
+void LabelTreeModel::setAccounts(const QList<AccountDescriptor>& accounts) {
+    accounts_ = accounts;
+    reload();
+}
 
-    // Fast path: if the label set is identical to what's already in
-    // the tree, just refresh counts in place (dataChanged on each
-    // touched node) and skip the beginResetModel reset. The
-    // structural reset collapses every expanded branch and drops the
-    // current selection, both of which Qt+SidebarWidget then have to
-    // recover via signal handlers — and the reset itself rebuilds 144
-    // nodes, allocates Node owners, and re-runs the aggregate pass.
-    // For top-up bursts on a busy account this used to fire 30+ times
-    // per scroll, each a no-op structural reset just to land a few
-    // tweaked unread counts.
-    if (sameLabelSet(rows)) {
-        refreshCountsInPlace(rows);
-        return;
-    }
-
-    captureShadow();
-    beginResetModel();
-    root_->children.clear();
-
-    qInfo("LabelTreeModel::reload: accountId='%s' rows=%zu (structural)",
-          qUtf8Printable(accountId_), rows.size());
-
-    // v2: a synthetic "All Inboxes" node at the top of the tree.
-    // Clicking it asks MainWindow to switch to the cross-account view.
-    {
-        auto allInboxes = std::make_unique<Node>();
-        allInboxes->id       = QStringLiteral("__all_inboxes");
-        allInboxes->name     = QStringLiteral("All Inboxes");
-        allInboxes->fullName = QStringLiteral("__all_inboxes");
-        allInboxes->type     = QStringLiteral("synthetic");
-        allInboxes->parent   = root_;
-        root_->children.push_back(std::move(allInboxes));
-    }
-
-    // Two synthetic section nodes at the top — "Folders" wraps the
-    // canonical Gmail system labels, "Labels" wraps everything the user
-    // created. Modeling them as real tree nodes (instead of painting
-    // banner rows) means QTreeView's built-in expand / collapse plus
-    // the click handler in SidebarWidget can toggle entire sections,
-    // and the aggregateCounts pass naturally rolls each section's
-    // unread / total counts up to the synthetic parent.
+void LabelTreeModel::appendAccountSections(
+        Node* parent,
+        const QString& accountId,
+        const std::vector<fc::cache::LabelRow>& rows) {
     auto folders = std::make_unique<Node>();
-    folders->name     = QStringLiteral("Folders");
-    folders->fullName = QStringLiteral("__folders");
-    folders->type     = QStringLiteral("section");
-    folders->parent   = root_;
+    folders->accountId = accountId;
+    folders->name      = QStringLiteral("Folders");
+    folders->fullName  = accountId.isEmpty()
+        ? QStringLiteral("__folders")
+        : QStringLiteral("__section/") + accountId + QStringLiteral("/folders");
+    folders->type      = QStringLiteral("section");
+    folders->parent    = parent;
 
     auto labels = std::make_unique<Node>();
+    labels->accountId = accountId;
     labels->name      = QStringLiteral("Labels");
-    labels->fullName  = QStringLiteral("__labels");
+    labels->fullName  = accountId.isEmpty()
+        ? QStringLiteral("__labels")
+        : QStringLiteral("__section/") + accountId + QStringLiteral("/labels");
     labels->type      = QStringLiteral("section");
-    labels->parent    = root_;
+    labels->parent    = parent;
 
-    // System labels first, in canonical order, parented under "Folders".
-    QHash<QString, fc::cache::LabelRow*> byId;
-    for (auto& r : rows) byId.insert(r.id, &r);
+    QHash<QString, const fc::cache::LabelRow*> byId;
+    for (const auto& r : rows) byId.insert(r.id, &r);
 
     for (const auto& s : kSystem) {
         const QString id = QString::fromLatin1(s.id);
         if (auto it = byId.constFind(id); it != byId.constEnd()) {
             auto n = std::make_unique<Node>();
             n->id          = id;
+            n->accountId   = accountId;
             n->name        = QString::fromLatin1(s.display);
             n->fullName    = id;
             n->type        = QStringLiteral("system");
@@ -133,16 +108,10 @@ void LabelTreeModel::reload() {
         }
     }
 
-    // Synthetic "All Mail" entry under Folders — Gmail's All Mail is
-    // a virtual view (not a real label), so we surface it as a
-    // synthetic node here. MainWindow handles the "__all_mail" id by
-    // routing through MessageListModel's all-mail source +
-    // SyncService::topUpLabel("__all_mail") for server-side
-    // pagination. No server-reported counts available, so unread /
-    // total stay at the model's defaults (0).
     {
         auto allMail = std::make_unique<Node>();
         allMail->id        = QStringLiteral("__all_mail");
+        allMail->accountId = accountId;
         allMail->name      = QStringLiteral("All Mail");
         allMail->fullName  = QStringLiteral("__all_mail");
         allMail->type      = QStringLiteral("system");
@@ -150,9 +119,8 @@ void LabelTreeModel::reload() {
         folders->children.push_back(std::move(allMail));
     }
 
-    // User labels: build tree by splitting on '/', parented under "Labels".
-    QHash<QString, Node*> pathIndex;  // fullName -> Node
-    for (auto& r : rows) {
+    QHash<QString, Node*> pathIndex;
+    for (const auto& r : rows) {
         if (r.type != QLatin1String("user")) continue;
         QStringList parts = r.name.split('/', Qt::SkipEmptyParts);
         QString accum;
@@ -166,13 +134,10 @@ void LabelTreeModel::reload() {
 
             auto n = std::make_unique<Node>();
             n->name      = parts[i];
+            n->accountId = accountId;
             n->fullName  = accum;
             n->type      = QStringLiteral("user");
             n->parent    = parentNode;
-            // Only the leaf carries a real id + counts + colours. The
-            // synthetic intermediate nodes (e.g. "Travel" when the user
-            // only created "Travel/Booking") have no Gmail-side identity
-            // so there's nothing to colour.
             const bool isLeaf = (i == parts.size() - 1);
             if (isLeaf) {
                 n->id          = r.id;
@@ -188,8 +153,78 @@ void LabelTreeModel::reload() {
         }
     }
 
-    root_->children.push_back(std::move(folders));
-    root_->children.push_back(std::move(labels));
+    parent->children.push_back(std::move(folders));
+    parent->children.push_back(std::move(labels));
+}
+
+void LabelTreeModel::reload() {
+    // Collect fresh label rows up front — used by sameLabelSet for
+    // the fast-path decision AND by the structural rebuild below.
+    // Multi-account mode (accounts_ non-empty) queries every account;
+    // legacy mode queries just accountId_.
+    std::vector<std::pair<QString, std::vector<fc::cache::LabelRow>>> perAccount;
+    if (!accounts_.isEmpty()) {
+        perAccount.reserve(accounts_.size());
+        for (const auto& acc : accounts_) {
+            perAccount.emplace_back(acc.id,
+                fc::cache::LabelRepository::all(acc.id));
+        }
+    } else if (!accountId_.isEmpty()) {
+        perAccount.emplace_back(accountId_,
+            fc::cache::LabelRepository::all(accountId_));
+    }
+
+    // Fast path: same label set as currently in the tree means counts
+    // can be refreshed in place (no beginResetModel, no collapsed
+    // branches, no dropped selection). Big win during top-up bursts
+    // where labelsUpdated fires per batch but the set never changes.
+    if (sameLabelSet(perAccount)) {
+        refreshCountsInPlace(perAccount);
+        return;
+    }
+
+    captureShadow();
+    beginResetModel();
+    root_->children.clear();
+
+    qInfo("LabelTreeModel::reload: accounts=%zu activeFocus='%s' (structural)",
+          perAccount.size(), qUtf8Printable(accountId_));
+
+    // Cross-account "All Inboxes" stays at the very top of the tree.
+    {
+        auto allInboxes = std::make_unique<Node>();
+        allInboxes->id       = QStringLiteral("__all_inboxes");
+        allInboxes->name     = QStringLiteral("All Inboxes");
+        allInboxes->fullName = QStringLiteral("__all_inboxes");
+        allInboxes->type     = QStringLiteral("synthetic");
+        allInboxes->parent   = root_;
+        root_->children.push_back(std::move(allInboxes));
+    }
+
+    if (!accounts_.isEmpty()) {
+        // Multi-account: one expandable branch per signed-in account.
+        // Each branch contains its own Folders + Labels sections.
+        for (qsizetype i = 0; i < accounts_.size(); ++i) {
+            const auto& acc = accounts_[i];
+            const auto& rows = perAccount[i].second;
+
+            auto accountNode = std::make_unique<Node>();
+            accountNode->accountId = acc.id;
+            accountNode->name      = acc.displayName.isEmpty()
+                ? acc.email : acc.displayName;
+            accountNode->fullName  = QStringLiteral("__account/") + acc.id;
+            accountNode->type      = QStringLiteral("account");
+            accountNode->parent    = root_;
+
+            appendAccountSections(accountNode.get(), acc.id, rows);
+            root_->children.push_back(std::move(accountNode));
+        }
+    } else if (!perAccount.empty()) {
+        // Legacy single-account fallback (used during the brief startup
+        // window before AccountManager populates, plus unit tests that
+        // drive setAccountId directly).
+        appendAccountSections(root_, /*accountId=*/QString(), perAccount.front().second);
+    }
 
     // DFS that rolls each leaf's count up to its ancestors. Mirrors Gmail
     // web: a parent label like "Travel" shows self + every descendant's
@@ -271,23 +306,30 @@ QVariant LabelTreeModel::data(const QModelIndex& idx, int role) const {
         case TotalRole:     return n->aggTotal;
         case ColorBgRole:   return n->colorBg;
         case ColorFgRole:   return n->colorFg;
+        case AccountIdRole: return n->accountId;
         default:            return {};
     }
 }
 
 QHash<int, QByteArray> LabelTreeModel::roleNames() const {
     return {
-        {IdRole,     "id"},
-        {NameRole,   "name"},
-        {TypeRole,   "type"},
-        {UnreadRole, "unread"},
-        {TotalRole,  "total"},
+        {IdRole,        "id"},
+        {NameRole,      "name"},
+        {TypeRole,      "type"},
+        {UnreadRole,    "unread"},
+        {TotalRole,     "total"},
+        {AccountIdRole, "accountId"},
     };
 }
 
 QString LabelTreeModel::labelIdAt(const QModelIndex& idx) const {
     if (!idx.isValid()) return {};
     return static_cast<Node*>(idx.internalPointer())->id;
+}
+
+QString LabelTreeModel::accountIdAt(const QModelIndex& idx) const {
+    if (!idx.isValid()) return {};
+    return static_cast<Node*>(idx.internalPointer())->accountId;
 }
 
 void LabelTreeModel::setSyncing(bool on) {
@@ -316,46 +358,64 @@ void LabelTreeModel::setSyncing(bool on) {
 }
 
 bool LabelTreeModel::sameLabelSet(
-        const std::vector<fc::cache::LabelRow>& rows) const {
-    // Compare the set of label ids in the incoming rows to the set
-    // already in the tree. Walks the tree once and collects every
-    // leaf with a non-empty id (system rows under "Folders" + each
-    // user-label leaf under "Labels"). Synthetic intermediate user
-    // nodes (the "Travel" in "Travel/Booking") have empty ids, so
-    // they don't participate.
-    QSet<QString> treeIds;
+        const std::vector<std::pair<QString, std::vector<fc::cache::LabelRow>>>& perAccount) const {
+    // Compare (accountId, labelId) pairs between the current tree and
+    // the fresh rows. The same id (e.g. "INBOX") exists in every
+    // account, so the comparison must be account-scoped or we'd
+    // falsely accept "moved INBOX between accounts" as no change.
+    QSet<QString> treeKeys;
     std::function<void(Node*)> collect = [&](Node* n) {
         if (!n) return;
-        if (!n->id.isEmpty()) treeIds.insert(n->id);
+        if (!n->id.isEmpty()) {
+            treeKeys.insert(n->accountId + QLatin1Char('\0') + n->id);
+        }
         for (auto& c : n->children) collect(c.get());
     };
     collect(root_);
 
-    // "__all_mail" is a synthetic id we add unconditionally — exclude
-    // it from the comparison so it doesn't cause spurious mismatches
-    // (it's never in `rows`).
-    treeIds.remove(QStringLiteral("__all_mail"));
-    treeIds.remove(QStringLiteral("__all_inboxes"));
+    // Strip synthetic ids ("__all_mail" / "__all_inboxes") — they're
+    // injected unconditionally during the structural build and never
+    // appear in LabelRepository::all output.
+    for (auto it = treeKeys.begin(); it != treeKeys.end();) {
+        if (it->endsWith(QStringLiteral("\0__all_mail"))
+            || it->endsWith(QStringLiteral("\0__all_inboxes"))
+            || *it == QStringLiteral("\0__all_inboxes")) {
+            it = treeKeys.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
-    QSet<QString> rowIds;
-    for (const auto& r : rows) rowIds.insert(r.id);
+    QSet<QString> rowKeys;
+    for (const auto& [aid, rows] : perAccount) {
+        for (const auto& r : rows) {
+            rowKeys.insert(aid + QLatin1Char('\0') + r.id);
+        }
+    }
 
-    return treeIds == rowIds;
+    return treeKeys == rowKeys;
 }
 
 void LabelTreeModel::refreshCountsInPlace(
-        const std::vector<fc::cache::LabelRow>& rows) {
+        const std::vector<std::pair<QString, std::vector<fc::cache::LabelRow>>>& perAccount) {
     // Update self-counts on each leaf node from the fresh rows, then
     // rebuild the aggregate (parent = self + recursive descendants)
-    // pass, then emit dataChanged on every node so the QTreeView
-    // repaints the "(N)" suffix and any colour-tracked role.
-    QHash<QString, const fc::cache::LabelRow*> byId;
-    for (const auto& r : rows) byId.insert(r.id, &r);
+    // pass, then emit dataChanged so the QTreeView repaints visible
+    // nodes' "(N)" suffix and any colour-tracked roles. Per-account
+    // index keyed on accountId+id so the same Gmail id (INBOX) in two
+    // accounts doesn't cross-contaminate.
+    QHash<QString, const fc::cache::LabelRow*> byKey;
+    for (const auto& [aid, rows] : perAccount) {
+        for (const auto& r : rows) {
+            byKey.insert(aid + QLatin1Char('\0') + r.id, &r);
+        }
+    }
 
     std::function<void(Node*)> applyLeaf = [&](Node* n) {
         if (!n) return;
         if (!n->id.isEmpty()) {
-            if (auto it = byId.constFind(n->id); it != byId.constEnd()) {
+            const QString key = n->accountId + QLatin1Char('\0') + n->id;
+            if (auto it = byKey.constFind(key); it != byKey.constEnd()) {
                 n->unreadCount = (*it)->unreadCount;
                 n->totalCount  = (*it)->totalCount;
                 n->colorBg     = (*it)->colorBg;

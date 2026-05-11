@@ -1,5 +1,6 @@
 #include "SidebarWidget.h"
 
+#include "account/AccountManager.h"
 #include "models/LabelTreeModel.h"
 #include "ui/common/Preferences.h"
 
@@ -8,6 +9,8 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
+#include <QScopedValueRollback>
+#include <QSettings>
 #include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -128,21 +131,44 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
     tree_->setExpandsOnDoubleClick(true);
     tree_->setAnimated(true);
     tree_->setItemDelegate(new SidebarDelegate(tree_));
-    // Expand everything by default so users see the full label hierarchy
-    // on first run; the QTreeView remembers per-node expansion state for
-    // the lifetime of the model instance, so collapsing a branch sticks
-    // until the next reload().
-    tree_->expandAll();
 
-    // Re-expand on reload — beginResetModel/endResetModel collapses the
-    // tree back to its default state. Same handler also re-applies the
-    // cached selection because Qt drops the QTreeView's currentIndex
-    // through a model reset; without this the highlighted label
-    // disappears every time a sync brings new label data back.
+    // Load persisted expand state. Initial reload() in the model
+    // constructor ran with the default (empty) state; restoreExpandState
+    // applies the QSettings snapshot once we have it. New nodes that
+    // aren't in the set stay collapsed by default, which matches the
+    // user's "collapsed except for the selected folder path" intent.
+    {
+        QSettings s;
+        const auto list = s.value(QStringLiteral("sidebar/expandedKeys"))
+                              .toStringList();
+        for (const auto& k : list) expanded_.insert(k);
+    }
+
+    // Re-apply the cached selection AND the persisted expand state on
+    // every modelReset. Without this the selected row and any open
+    // branches disappear every time the model reloads.
     connect(model_, &QAbstractItemModel::modelReset, tree_,
             [this] {
-                tree_->expandAll();
-                if (!selectedId_.isEmpty()) selectLabel(selectedId_);
+                restoreExpandState();
+                if (!selectedLabelId_.isEmpty()) {
+                    selectLabel(selectedAccountId_, selectedLabelId_);
+                }
+            });
+
+    // Persist expand state every time the user opens or closes a node.
+    // restoringExpand_ guards the writes that happen during our own
+    // restoreExpandState pass.
+    connect(tree_, &QTreeView::expanded, this,
+            [this](const QModelIndex& idx) {
+                if (restoringExpand_) return;
+                expanded_.insert(expandKey(idx));
+                saveExpandState();
+            });
+    connect(tree_, &QTreeView::collapsed, this,
+            [this](const QModelIndex& idx) {
+                if (restoringExpand_) return;
+                expanded_.remove(expandKey(idx));
+                saveExpandState();
             });
 
     layout->addWidget(tree_);
@@ -151,8 +177,105 @@ SidebarWidget::SidebarWidget(QWidget* parent) : QWidget(parent) {
             this,  &SidebarWidget::onClicked);
     connect(tree_, &QWidget::customContextMenuRequested,
             this,  &SidebarWidget::onContextMenu);
+}
 
-    selectLabel(QStringLiteral("INBOX"));
+void SidebarWidget::setAccountManager(fc::account::AccountManager* accounts) {
+    if (accounts_ == accounts) return;
+    accounts_ = accounts;
+    if (!accounts_) return;
+    pushAccountsToModel();
+    connect(accounts_, &fc::account::AccountManager::accountsChanged,
+            this, [this] { pushAccountsToModel(); });
+    connect(accounts_,
+            &fc::account::AccountManager::currentAccountChanged,
+            this, [this](const QString& aid) {
+                if (model_) model_->setAccountId(aid);
+            });
+}
+
+void SidebarWidget::pushAccountsToModel() {
+    if (!accounts_ || !model_) return;
+    QList<fc::LabelTreeModel::AccountDescriptor> descriptors;
+    for (const auto& a : accounts_->accounts()) {
+        descriptors.append({a.id, a.email, a.displayName});
+    }
+    model_->setAccounts(descriptors);
+}
+
+QString SidebarWidget::expandKey(const QModelIndex& idx) const {
+    if (!idx.isValid() || !model_) return {};
+    const QString aid = model_->data(idx, fc::LabelTreeModel::AccountIdRole)
+                              .toString();
+    const QString full = model_->data(idx, fc::LabelTreeModel::NameRole)
+                              .toString();
+    // fullName already disambiguates section nodes (they carry the
+    // accountId in their path) and account/synthetic nodes. For label
+    // leaves we still prepend accountId so the same Gmail id (e.g.
+    // INBOX) in two accounts doesn't share a single expand entry.
+    if (full.startsWith(QStringLiteral("__"))) return full;
+    return aid + QLatin1Char('\t') + full;
+}
+
+void SidebarWidget::saveExpandState() {
+    QSettings s;
+    QStringList list;
+    list.reserve(expanded_.size());
+    for (const auto& k : expanded_) list.append(k);
+    list.sort();   // deterministic file order, eases diffing
+    s.setValue(QStringLiteral("sidebar/expandedKeys"), list);
+}
+
+void SidebarWidget::restoreExpandState() {
+    if (!tree_ || !model_) return;
+    QScopedValueRollback<bool> guard(restoringExpand_, true);
+    std::function<void(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
+        const int n = model_->rowCount(parent);
+        for (int i = 0; i < n; ++i) {
+            const auto idx = model_->index(i, 0, parent);
+            const QString key = expandKey(idx);
+            if (expanded_.contains(key)) {
+                tree_->setExpanded(idx, true);
+            } else {
+                tree_->setExpanded(idx, false);
+            }
+            walk(idx);
+        }
+    };
+    walk({});
+    if (!selectedLabelId_.isEmpty()) {
+        expandPathTo(selectedAccountId_, selectedLabelId_);
+    }
+}
+
+void SidebarWidget::expandPathTo(const QString& accountId, const QString& labelId) {
+    if (!tree_ || !model_) return;
+    QScopedValueRollback<bool> guard(restoringExpand_, true);
+    // DFS for the (accountId, labelId) leaf; on the way back, expand
+    // every ancestor. Both the persisted set AND the live tree-view
+    // state get the ancestors flipped on so the persisted snapshot
+    // captures the "always expand selection path" rule.
+    std::function<bool(const QModelIndex&)> walk = [&](const QModelIndex& parent) -> bool {
+        const int n = model_->rowCount(parent);
+        for (int i = 0; i < n; ++i) {
+            const auto idx = model_->index(i, 0, parent);
+            const QString aid = model_->data(idx, fc::LabelTreeModel::AccountIdRole)
+                                      .toString();
+            const QString id  = model_->data(idx, fc::LabelTreeModel::IdRole)
+                                      .toString();
+            if (id == labelId && (accountId.isEmpty() || aid == accountId)) {
+                // Found the leaf — expand each ancestor on the way out.
+                return true;
+            }
+            if (walk(idx)) {
+                tree_->setExpanded(idx, true);
+                expanded_.insert(expandKey(idx));
+                return true;
+            }
+        }
+        return false;
+    };
+    walk({});
+    saveExpandState();
 }
 
 fc::LabelTreeModel* SidebarWidget::model() const { return model_; }
@@ -161,20 +284,26 @@ void SidebarWidget::refreshAppearance() {
     if (tree_) tree_->viewport()->update();
 }
 
-void SidebarWidget::selectLabel(const QString& id) {
+void SidebarWidget::selectLabel(const QString& accountId, const QString& labelId) {
     // Always remember what the caller asked for, even if the model
-    // doesn't yet have the row — the modelReset handler will retry
-    // once the labels load.
-    selectedId_ = id;
+    // doesn't yet have the row — the modelReset handler retries once
+    // the labels load.
+    selectedAccountId_ = accountId;
+    selectedLabelId_   = labelId;
 
-    // Walk the tree; depth is small.
+    // Make sure the path is expanded so the leaf is visible. (No-op
+    // when the parents are already expanded.)
+    expandPathTo(accountId, labelId);
+
     std::function<bool(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
         const int n = model_->rowCount(parent);
         for (int i = 0; i < n; ++i) {
             const auto idx = model_->index(i, 0, parent);
-            if (model_->data(idx, fc::LabelTreeModel::IdRole).toString() == id) {
+            const QString aid = model_->data(idx, fc::LabelTreeModel::AccountIdRole).toString();
+            const QString id  = model_->data(idx, fc::LabelTreeModel::IdRole).toString();
+            if (id == labelId && (accountId.isEmpty() || aid == accountId)) {
                 tree_->setCurrentIndex(idx);
-                emit labelSelected(id);
+                emit labelSelected(aid, id);
                 return true;
             }
             if (walk(idx)) return true;
@@ -185,18 +314,20 @@ void SidebarWidget::selectLabel(const QString& id) {
 }
 
 void SidebarWidget::onClicked(const QModelIndex& idx) {
-    // Section banners ("Folders" / "Labels") collapse / expand on click,
-    // anywhere in the row — not just on the small disclosure triangle.
-    // Their TypeRole is "section" and they have no real label id.
-    if (idx.data(fc::LabelTreeModel::TypeRole).toString()
-            == QLatin1String("section")) {
+    const QString type = idx.data(fc::LabelTreeModel::TypeRole).toString();
+    // Section banners ("Folders" / "Labels") and account headers
+    // toggle expand on row click anywhere — easier target than the
+    // narrow disclosure triangle. They carry no real label id.
+    if (type == QLatin1String("section") || type == QLatin1String("account")) {
         tree_->setExpanded(idx, !tree_->isExpanded(idx));
         return;
     }
-    const QString id = idx.data(fc::LabelTreeModel::IdRole).toString();
+    const QString id  = idx.data(fc::LabelTreeModel::IdRole).toString();
+    const QString aid = idx.data(fc::LabelTreeModel::AccountIdRole).toString();
     if (!id.isEmpty()) {
-        selectedId_ = id;
-        emit labelSelected(id);
+        selectedAccountId_ = aid;
+        selectedLabelId_   = id;
+        emit labelSelected(aid, id);
     }
 }
 
@@ -207,9 +338,11 @@ void SidebarWidget::onContextMenu(const QPoint& p) {
     QAction* renameAct = nullptr;
     QAction* deleteAct = nullptr;
     QString id;
+    QString aid;
     QString type;
     if (idx.isValid()) {
         id   = idx.data(fc::LabelTreeModel::IdRole).toString();
+        aid  = idx.data(fc::LabelTreeModel::AccountIdRole).toString();
         type = idx.data(fc::LabelTreeModel::TypeRole).toString();
         if (type == QLatin1String("user")) {
             menu.addSeparator();
@@ -220,11 +353,11 @@ void SidebarWidget::onContextMenu(const QPoint& p) {
     QAction* chosen = menu.exec(tree_->viewport()->mapToGlobal(p));
     if (!chosen) return;
     if (chosen == createAct) {
-        emit requestCreateLabel(idx.isValid() ? id : QString());
+        emit requestCreateLabel(aid, idx.isValid() ? id : QString());
     } else if (chosen == renameAct) {
-        emit requestRenameLabel(id);
+        emit requestRenameLabel(aid, id);
     } else if (chosen == deleteAct) {
-        emit requestDeleteLabel(id);
+        emit requestDeleteLabel(aid, id);
     }
 }
 
