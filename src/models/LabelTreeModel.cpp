@@ -57,19 +57,30 @@ void LabelTreeModel::setAccountId(const QString& accountId) {
 QString LabelTreeModel::accountId() const { return accountId_; }
 
 void LabelTreeModel::reload() {
-    // Capture the current per-label unread counts BEFORE we wipe the
-    // tree. If the cache hasn't been rewritten yet (sync still in
-    // flight), the post-reset rebuild will see aggUnread=0 for some
-    // nodes; the shadow lets the display fall through to the last
-    // known-good count + ellipsis instead of flashing empty.
+    auto rows = accountId_.isEmpty()
+        ? std::vector<fc::cache::LabelRow>{}
+        : fc::cache::LabelRepository::all(accountId_);
+
+    // Fast path: if the label set is identical to what's already in
+    // the tree, just refresh counts in place (dataChanged on each
+    // touched node) and skip the beginResetModel reset. The
+    // structural reset collapses every expanded branch and drops the
+    // current selection, both of which Qt+SidebarWidget then have to
+    // recover via signal handlers — and the reset itself rebuilds 144
+    // nodes, allocates Node owners, and re-runs the aggregate pass.
+    // For top-up bursts on a busy account this used to fire 30+ times
+    // per scroll, each a no-op structural reset just to land a few
+    // tweaked unread counts.
+    if (sameLabelSet(rows)) {
+        refreshCountsInPlace(rows);
+        return;
+    }
+
     captureShadow();
     beginResetModel();
     root_->children.clear();
 
-    auto rows = accountId_.isEmpty()
-        ? std::vector<fc::cache::LabelRow>{}
-        : fc::cache::LabelRepository::all(accountId_);
-    qInfo("LabelTreeModel::reload: accountId='%s' rows=%zu",
+    qInfo("LabelTreeModel::reload: accountId='%s' rows=%zu (structural)",
           qUtf8Printable(accountId_), rows.size());
 
     // v2: a synthetic "All Inboxes" node at the top of the tree.
@@ -302,6 +313,94 @@ void LabelTreeModel::setSyncing(bool on) {
             }
         }
     }
+}
+
+bool LabelTreeModel::sameLabelSet(
+        const std::vector<fc::cache::LabelRow>& rows) const {
+    // Compare the set of label ids in the incoming rows to the set
+    // already in the tree. Walks the tree once and collects every
+    // leaf with a non-empty id (system rows under "Folders" + each
+    // user-label leaf under "Labels"). Synthetic intermediate user
+    // nodes (the "Travel" in "Travel/Booking") have empty ids, so
+    // they don't participate.
+    QSet<QString> treeIds;
+    std::function<void(Node*)> collect = [&](Node* n) {
+        if (!n) return;
+        if (!n->id.isEmpty()) treeIds.insert(n->id);
+        for (auto& c : n->children) collect(c.get());
+    };
+    collect(root_);
+
+    // "__all_mail" is a synthetic id we add unconditionally — exclude
+    // it from the comparison so it doesn't cause spurious mismatches
+    // (it's never in `rows`).
+    treeIds.remove(QStringLiteral("__all_mail"));
+    treeIds.remove(QStringLiteral("__all_inboxes"));
+
+    QSet<QString> rowIds;
+    for (const auto& r : rows) rowIds.insert(r.id);
+
+    return treeIds == rowIds;
+}
+
+void LabelTreeModel::refreshCountsInPlace(
+        const std::vector<fc::cache::LabelRow>& rows) {
+    // Update self-counts on each leaf node from the fresh rows, then
+    // rebuild the aggregate (parent = self + recursive descendants)
+    // pass, then emit dataChanged on every node so the QTreeView
+    // repaints the "(N)" suffix and any colour-tracked role.
+    QHash<QString, const fc::cache::LabelRow*> byId;
+    for (const auto& r : rows) byId.insert(r.id, &r);
+
+    std::function<void(Node*)> applyLeaf = [&](Node* n) {
+        if (!n) return;
+        if (!n->id.isEmpty()) {
+            if (auto it = byId.constFind(n->id); it != byId.constEnd()) {
+                n->unreadCount = (*it)->unreadCount;
+                n->totalCount  = (*it)->totalCount;
+                n->colorBg     = (*it)->colorBg;
+                n->colorFg     = (*it)->colorFg;
+            } else if (n->id == QLatin1String("__all_mail")
+                    || n->id == QLatin1String("__all_inboxes")) {
+                // synthetic — no server-reported counts
+            } else {
+                // Label disappeared from the row set. Shouldn't happen
+                // under sameLabelSet=true, but be defensive.
+                n->unreadCount = 0;
+                n->totalCount  = 0;
+            }
+        }
+        for (auto& c : n->children) applyLeaf(c.get());
+    };
+    applyLeaf(root_);
+
+    std::function<void(Node*)> aggregate = [&](Node* n) {
+        n->aggUnread = n->unreadCount;
+        n->aggTotal  = n->totalCount;
+        for (auto& c : n->children) {
+            aggregate(c.get());
+            n->aggUnread += c->aggUnread;
+            n->aggTotal  += c->aggTotal;
+        }
+    };
+    for (auto& top : root_->children) aggregate(top.get());
+
+    // dataChanged on every visible row. Sidebar trees are small (~150
+    // nodes total) and the roles we touch are all on column 0, so a
+    // single emit covering the full row range is cheaper than walking
+    // per-node emits. The view only repaints currently-visible items
+    // either way.
+    const int topN = int(root_->children.size());
+    if (topN == 0) return;
+    const QVector<int> roles{Qt::DisplayRole, UnreadRole, TotalRole,
+                              ColorBgRole, ColorFgRole};
+    std::function<void(const QModelIndex&)> emitFor = [&](const QModelIndex& parent) {
+        const int n = rowCount(parent);
+        if (n == 0) return;
+        emit dataChanged(index(0, 0, parent), index(n - 1, 0, parent), roles);
+        for (int i = 0; i < n; ++i) emitFor(index(i, 0, parent));
+    };
+    emitFor({});
 }
 
 void LabelTreeModel::captureShadow() {

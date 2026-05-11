@@ -66,6 +66,15 @@ private:
     bool                syncing_ = false;
     QHash<QString, int> shadowUnread_;   // by fullName, survives reload()
     void captureShadow();
+
+    // Fast-path helpers for reload(): if the freshly-queried label
+    // rows have the same id set as what's currently in the tree,
+    // refreshCountsInPlace updates aggUnread/aggTotal on the existing
+    // nodes and emits dataChanged on their Display/Unread/Total roles
+    // — no structural reset, no collapsed branches, no dropped
+    // selection. sameLabelSet does the cheap pre-check.
+    bool sameLabelSet(const std::vector<fc::cache::LabelRow>& rows) const;
+    void refreshCountsInPlace(const std::vector<fc::cache::LabelRow>& rows);
 };
 
 }  // namespace fc
