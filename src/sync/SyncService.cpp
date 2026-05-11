@@ -179,13 +179,21 @@ void SyncService::doInitialSync() {
                             setState(State::Idle);
                             return;
                         }
-                        // After fetches finish we'll commit the historyId.
-                        fetchAndStoreMessages(ids, ids.size(), /*isInitial=*/true);
-                        // Save profileHid via account_meta now; if we
-                        // crash mid-fetch the next run does an incremental
-                        // sync from this id (Gmail's history is stable).
-                        fc::cache::MetaRepository::setHistoryId(d_->accountId,
-                                                                profileHid);
+                        // Commit profileHid only once the seed bodies
+                        // are on disk. The previous "save now, fetch
+                        // later" pattern left the user stranded after
+                        // dropCache + premature exit: the next launch
+                        // saw a non-empty historyId, did an incremental
+                        // sync that found "no changes since profileHid",
+                        // and silently left the inbox empty. Now an
+                        // interrupted seed fetch means the next launch
+                        // restarts from doInitialSync.
+                        fetchAndStoreMessages(
+                            ids, ids.size(), /*isInitial=*/true,
+                            [accountId = d_->accountId, profileHid] {
+                                fc::cache::MetaRepository::setHistoryId(
+                                    accountId, profileHid);
+                            });
                     };
 
                     for (const auto& label : seedLabels()) {
