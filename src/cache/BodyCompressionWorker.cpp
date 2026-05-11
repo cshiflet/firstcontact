@@ -80,6 +80,12 @@ void BodyCompressionWorker::doWork() {
         return;
     }
 
+    // SQLite connections in Qt are per-thread; the worker's QThread
+    // has no connection until we register one. Database::initialize
+    // is idempotent — if this thread already has the connection
+    // (re-run after a thread reuse, etc.) it short-circuits.
+    fc::cache::Database::initialize();
+
     // 1. Sample bodies for training. ORDER BY RANDOM() across the
     //    whole table is O(N log N) but runs once and is bounded by
     //    LIMIT; on cache sizes of 100k messages it's milliseconds.
