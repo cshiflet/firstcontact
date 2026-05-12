@@ -104,6 +104,17 @@ QRadioButton::indicator:disabled {
     border-color: #cfcfcf;
     background-color: #f5f5f5;
 }
+/* QPalette::Disabled is masked by our other selectors; restore
+   the dimmed text explicitly so disabled-by-gate stays visible. */
+QCheckBox:disabled,
+QRadioButton:disabled,
+QLabel:disabled,
+QSpinBox:disabled {
+    color: #9aa0a6;
+}
+QSpinBox:disabled {
+    background-color: #f5f5f5;
+}
 
 QToolBar {
     background-color: #ffffff;

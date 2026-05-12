@@ -113,6 +113,16 @@ QRadioButton::indicator:disabled {
     border-color: #5f6368;
     background-color: #1a1a1a;
 }
+/* Mirrors the light theme; see notes there. */
+QCheckBox:disabled,
+QRadioButton:disabled,
+QLabel:disabled,
+QSpinBox:disabled {
+    color: #5f6368;
+}
+QSpinBox:disabled {
+    background-color: #1f1f1f;
+}
 
 QToolBar {
     background-color: #232323;

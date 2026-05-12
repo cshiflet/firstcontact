@@ -34,13 +34,22 @@ QLabel* makeSubheading(QWidget* parent, const QString& text) {
 }
 
 // Hint label below a form row. Styled smaller / dimmer via the QSS
-// rule on objectName="FormHint".
+// rule on objectName="FormHint". Pass wide=true when the hint sits
+// between a wide row (e.g. a checkbox) and a narrow row (e.g. a
+// label+spinbox+stretch HBox): QFormLayout sizes the field column
+// to the narrow row's sizeHint, collapsing the hint unless it
+// declares an Expanding policy + minimum width.
 QLabel* makeHint(QWidget* parent, const QString& text,
-                  Qt::TextFormat fmt = Qt::PlainText) {
+                  Qt::TextFormat fmt = Qt::PlainText,
+                  bool wide = false) {
     auto* l = new QLabel(text, parent);
     l->setObjectName(QStringLiteral("FormHint"));
     l->setWordWrap(true);
     l->setTextFormat(fmt);
+    if (wide) {
+        l->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        l->setMinimumWidth(360);
+    }
     return l;
 }
 
@@ -202,28 +211,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
             Preferences::setToolbarShowText(on);
         });
         convForm->addRow(QString(), toolbarBox);
-
-        // Messages-per-batch spinbox + caption. Packed into a single
-        // horizontal strip so the form's label column stays empty for
-        // every row — keeps the checkboxes flush-left.
-        auto* batchBox = new QSpinBox(content);
-        batchBox->setRange(10, 500);
-        batchBox->setSingleStep(10);
-        batchBox->setValue(Preferences::messagePageSize());
-        batchBox->setSuffix(tr(" messages"));
-        connect(batchBox, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [](int v) { Preferences::setMessagePageSize(v); });
-        auto* batchRow = new QHBoxLayout;
-        batchRow->setContentsMargins(0, 0, 0, 0);
-        batchRow->addWidget(new QLabel(tr("Messages per batch:"), content));
-        batchRow->addWidget(batchBox);
-        batchRow->addStretch(1);
-        convForm->addRow(QString(), batchRow);
-        convForm->addRow(QString(), makeHint(content, tr(
-            "How many messages to read from the local cache per page, "
-            "and how many to fetch from Gmail in one top-up request. "
-            "Range 10–500. Default 50. Applies to the next label "
-            "refresh.")));
         outer->addLayout(convForm);
 
         outer->addSpacing(8);
@@ -450,7 +437,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     }
 
     // ============================================================
-    // Tab: Sync  (Low-bandwidth mode, Background prefetch)
+    // Tab: Sync  (Low-bandwidth, Messages-per-batch, Background prefetch)
     // ============================================================
     auto sync = addTab(tr("Sync"));
     {
@@ -462,15 +449,38 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
             tr("Low-bandwidth mode (metadata only; fetch bodies on open)"),
             content);
         lowBwBox->setChecked(Preferences::lowBandwidthMode());
-        connect(lowBwBox, &QCheckBox::toggled, this, [](bool on) {
-            Preferences::setLowBandwidthMode(on);
-        });
         syncForm->addRow(QString(), lowBwBox);
         syncForm->addRow(QString(), makeHint(content, tr(
             "Sync pulls only message headers / labels. The full body "
             "is fetched the first time you open each message, with a "
             "brief \"Fetching message body…\" placeholder. Saves "
-            "bandwidth at the cost of a slower first open.")));
+            "bandwidth at the cost of a slower first open. While "
+            "enabled, background prefetch is suspended (its saved "
+            "setting is preserved).")));
+
+        // Messages-per-batch spinbox + caption. Packed into a single
+        // horizontal strip so the form's label column stays empty
+        // for every row — keeps the surrounding checkboxes flush-
+        // left. Lives on Sync (not General) because the value
+        // governs how many ids each top-up requests from Gmail.
+        auto* batchBox = new QSpinBox(content);
+        batchBox->setRange(10, 500);
+        batchBox->setSingleStep(10);
+        batchBox->setValue(Preferences::messagePageSize());
+        batchBox->setSuffix(tr(" messages"));
+        connect(batchBox, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [](int v) { Preferences::setMessagePageSize(v); });
+        auto* batchRow = new QHBoxLayout;
+        batchRow->setContentsMargins(0, 0, 0, 0);
+        batchRow->addWidget(new QLabel(tr("Messages per batch:"), content));
+        batchRow->addWidget(batchBox);
+        batchRow->addStretch(1);
+        syncForm->addRow(QString(), batchRow);
+        syncForm->addRow(QString(), makeHint(content, tr(
+            "How many messages to read from the local cache per page, "
+            "and how many to fetch from Gmail in one top-up request. "
+            "Range 10–500. Default 50. Applies to the next label "
+            "refresh.")));
 
         auto* crawlBox = new QCheckBox(
             tr("Background prefetch: slowly fill the cache for every label"),
@@ -478,27 +488,36 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         crawlBox->setChecked(Preferences::backgroundCrawl());
         syncForm->addRow(QString(), crawlBox);
 
+        // Visible only while low-bandwidth mode is gating prefetch
+        // off. Wide hint — the tick-interval row below would collapse
+        // its column otherwise.
+        auto* prefetchGatedHint = makeHint(content, tr(
+            "(Disable Low-bandwidth mode to use background prefetch)"),
+            Qt::PlainText, /*wide=*/true);
+        syncForm->addRow(QString(), prefetchGatedHint);
+
         // Tick interval: label + spinbox packed into a single field-
         // column row so the form's label column stays empty and the
         // surrounding checkboxes stay flush-left.
-        auto* crawlIntervalSpin = new QSpinBox(content);
+        auto* crawlIntervalLabel = new QLabel(tr("Tick interval"), content);
+        auto* crawlIntervalSpin  = new QSpinBox(content);
         crawlIntervalSpin->setRange(1, 600);
         crawlIntervalSpin->setSuffix(tr(" sec"));
         crawlIntervalSpin->setValue(Preferences::backgroundCrawlIntervalSec());
-        crawlIntervalSpin->setEnabled(crawlBox->isChecked());
         auto* crawlIntervalRow = new QHBoxLayout;
         crawlIntervalRow->setContentsMargins(0, 0, 0, 0);
-        crawlIntervalRow->addWidget(new QLabel(tr("Tick interval"), content));
+        crawlIntervalRow->addWidget(crawlIntervalLabel);
         crawlIntervalRow->addWidget(crawlIntervalSpin);
         crawlIntervalRow->addStretch(1);
         syncForm->addRow(QString(), crawlIntervalRow);
 
-        syncForm->addRow(QString(), makeHint(content, tr(
+        auto* crawlHint = makeHint(content, tr(
             "When enabled, one un-exhausted label advances by a "
             "single page each tick. Foreground sync and user-"
             "requested top-ups always preempt — the crawler never "
             "races with interactive work. Use Reset progress to "
-            "revisit labels that have already been walked end-to-end.")));
+            "revisit labels that have already been walked end-to-end."));
+        syncForm->addRow(QString(), crawlHint);
 
         auto* crawlResetBtn = new QPushButton(
             tr("Reset crawl progress"), content);
@@ -508,10 +527,40 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         crawlResetRow->addStretch(1);
         syncForm->addRow(QString(), crawlResetRow);
 
+        // The prefetch widget tree is enabled only when (a) the
+        // user's prefetch preference is on AND (b) low-bandwidth
+        // mode is off. Low-bandwidth turning the trio off must
+        // NOT clobber the user's saved preference — only the live
+        // enabled state. SyncService::tickBackgroundCrawl applies
+        // the same gate at runtime so the timer simply no-ops
+        // until low-bandwidth flips back off.
+        auto applyPrefetchGate =
+            [crawlBox, crawlIntervalLabel, crawlIntervalSpin, crawlResetBtn,
+             crawlHint, prefetchGatedHint, lowBwBox]() {
+                const bool gatedByLowBw = lowBwBox->isChecked();
+                crawlBox->setEnabled(!gatedByLowBw);
+                const bool live = !gatedByLowBw && crawlBox->isChecked();
+                crawlIntervalLabel->setEnabled(live);
+                crawlIntervalSpin->setEnabled(live);
+                crawlResetBtn->setEnabled(!gatedByLowBw);
+                crawlHint->setEnabled(!gatedByLowBw);
+                prefetchGatedHint->setVisible(gatedByLowBw);
+            };
+        applyPrefetchGate();
+
+        connect(lowBwBox, &QCheckBox::toggled, this,
+            [this, applyPrefetchGate](bool on) {
+                Preferences::setLowBandwidthMode(on);
+                applyPrefetchGate();
+                // Re-push to SyncService too: even though the saved
+                // preference is unchanged, the live gate flipped and
+                // any running tick should observe it next pulse.
+                emit backgroundCrawlSettingsChanged();
+            });
         connect(crawlBox, &QCheckBox::toggled, this,
-            [this, crawlIntervalSpin](bool on) {
+            [this, applyPrefetchGate](bool on) {
                 Preferences::setBackgroundCrawl(on);
-                crawlIntervalSpin->setEnabled(on);
+                applyPrefetchGate();
                 emit backgroundCrawlSettingsChanged();
             });
         connect(crawlIntervalSpin, qOverload<int>(&QSpinBox::valueChanged),

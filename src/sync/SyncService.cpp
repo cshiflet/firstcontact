@@ -753,6 +753,10 @@ void SyncService::cancelCacheLabel() {
 
 void SyncService::tickBackgroundCrawl() {
     if (d_->accountId.isEmpty()) return;
+    // Low-bandwidth mode suspends prefetch in operation but does NOT
+    // change the user's saved preference. The timer keeps pulsing so
+    // prefetch resumes the next tick after low-bandwidth flips off.
+    if (lowBandwidthModeEnabled()) return;
     // Never race with foreground work. busy covers active sync /
     // top-up; cacheLabelTarget covers an in-flight user-requested
     // walk. Either way, defer until the next tick.
