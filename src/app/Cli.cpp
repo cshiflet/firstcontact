@@ -7,11 +7,13 @@
 #include "cache/Migrations.h"   // databaseHandle()
 #include "util/BodyCodec.h"
 #include "util/Format.h"
+#include "util/Paths.h"
 
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QFile>
 #include <QLocale>
+#include <QLockFile>
 #include <QPointer>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -74,6 +76,26 @@ void printHelp() {
 }
 
 using fc::util::humanBytes;
+
+// Try to acquire the GUI's single-instance lock for the duration of
+// a destructive CLI command. Returns nullptr (caller bails out) when
+// the GUI is already running — concurrent dict-trained compression
+// is a recipe for "row written with dict X, recompress sees dict Y"
+// races that even the worker's dual-dict fallback can't disentangle.
+// Caller owns the returned lock; releasing it on scope exit unblocks
+// the GUI again.
+std::unique_ptr<QLockFile> acquireExclusiveOrWarn(const char* cmd) {
+    auto lock = std::make_unique<QLockFile>(fc::util::singleInstanceLockPath());
+    lock->setStaleLockTime(30'000);
+    if (lock->tryLock(0)) return lock;
+    std::fprintf(stderr,
+        "%s: another FirstContact instance is running — quit the GUI "
+        "first. (Concurrent writes from the GUI would race the "
+        "dictionary training and could leave the cache with bodies "
+        "compressed under a dict that this process never sees.)\n",
+        cmd);
+    return nullptr;
+}
 
 // Resolve `email-or-id` to an accounts row, or return an empty AccountInfo
 // when the target isn't found. Empty input → first signed-in account
@@ -176,6 +198,8 @@ int runClearCache(fc::account::AccountManager& accounts,
             qUtf8Printable(token));
         return 2;
     }
+    auto lock = acquireExclusiveOrWarn("clear-cache");
+    if (!lock) return 3;
     int failed = 0;
     for (const auto& a : targets) {
         const QString display = a.email.isEmpty() ? a.id : a.email;
@@ -211,6 +235,8 @@ int runCompressDb(fc::account::AccountManager& accounts,
             qUtf8Printable(token));
         return 2;
     }
+    auto lock = acquireExclusiveOrWarn("compress-db");
+    if (!lock) return 3;
     int exitCode = 0;
     for (const auto& a : targets) {
         const QString display = a.email.isEmpty() ? a.id : a.email;
@@ -399,6 +425,8 @@ int runCompressionStats(fc::account::AccountManager& accounts,
 // the source of truth across wipes; AccountManager rehydrates from
 // it automatically the next time the DB is opened empty.
 int runResetDb() {
+    auto lock = acquireExclusiveOrWarn("reset-db");
+    if (!lock) return 3;
     const QString dbPath = fc::cache::Database::filePath();
     const QStringList paths = {
         dbPath,

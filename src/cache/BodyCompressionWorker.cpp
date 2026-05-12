@@ -274,30 +274,38 @@ void BodyCompressionWorker::doWork() {
             const qint64 beforeBytes = bt.size() + bh.size();
 
             // Decompress with the OLD dict snapshot — the rows on
-            // disk were written against it. Compress below with the
-            // NEW dict. A decompress that returns empty bytes for
-            // non-empty input means dict mismatch; aborting here
-            // prevents the worker from silently nulling out body
-            // content across the rest of the cache.
+            // disk were typically written against it. Compress
+            // below with the NEW dict. As a fallback, try the NEW
+            // dict for decompression too: a concurrent sync write
+            // (e.g. the GUI process re-fetching bodies while
+            // compress-db runs from the CLI) may have stored rows
+            // with the dict we JUST trained, so they need the new
+            // dict to decode. An empty result from BOTH dicts is a
+            // genuine mismatch; abort there rather than silently
+            // null out body content across the rest of the cache.
             auto decompressOrAbort = [&](QByteArray& field,
                                           const char* which) -> bool {
                 if (!fc::util::BodyCodec::isCompressed(field)) return true;
-                if (oldDict.isEmpty()) {
-                    qWarning("BodyCompression: compressed %s but no "
-                             "old dict; aborting to preserve data.",
-                             which);
-                    return false;
+                if (!oldDict.isEmpty()) {
+                    QByteArray decoded =
+                        fc::util::BodyCodec::decompress(field, oldDict);
+                    if (!decoded.isEmpty()) {
+                        field = std::move(decoded);
+                        return true;
+                    }
                 }
+                // Old dict missing or wrong — try the newly-trained
+                // dict (handles the concurrent-sync race).
                 QByteArray decoded =
-                    fc::util::BodyCodec::decompress(field, oldDict);
-                if (decoded.isEmpty()) {
-                    qWarning("BodyCompression: %s decompress failed for "
-                             "%s; aborting.",
-                             which, qUtf8Printable(id));
-                    return false;
+                    fc::util::BodyCodec::decompress(field, dict);
+                if (!decoded.isEmpty()) {
+                    field = std::move(decoded);
+                    return true;
                 }
-                field = std::move(decoded);
-                return true;
+                qWarning("BodyCompression: %s decompress failed for "
+                         "%s under both old and new dicts; aborting.",
+                         which, qUtf8Printable(id));
+                return false;
             };
             if (!decompressOrAbort(bt, "body_text")
                 || !decompressOrAbort(bh, "body_html")) {
