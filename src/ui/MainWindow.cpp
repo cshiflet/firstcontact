@@ -1931,13 +1931,10 @@ void MainWindow::refreshAccountMenu() {
         dlg.exec();
     });
 
-    // v4 — cache manager dialog. Lists every account's cached size +
-    // orphan accounts; per-row drop / drop > N days actions.
-    auto* cacheAct = accountMenu_->addAction(tr("Cache storage…"));
-    connect(cacheAct, &QAction::triggered, this, [this] {
-        CacheManagerDialog dlg(accounts_, this);
-        dlg.exec();
-    });
+    // Cache manager used to have a second entry point in this menu;
+    // removed to consolidate cache management under
+    // Settings → Storage → Manage cache… so the user has exactly
+    // one path to find it (and one place to maintain).
 }
 
 void MainWindow::onSignIn() {
