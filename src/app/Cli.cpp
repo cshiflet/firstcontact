@@ -4,6 +4,8 @@
 #include "cache/BodyCompressionWorker.h"
 #include "cache/Database.h"
 #include "cache/MessageRepository.h"
+#include "cache/Migrations.h"   // databaseHandle()
+#include "util/BodyCodec.h"
 #include "util/Format.h"
 
 #include <QCoreApplication>
@@ -11,6 +13,8 @@
 #include <QFile>
 #include <QLocale>
 #include <QPointer>
+#include <QSqlError>
+#include <QSqlQuery>
 
 #include <cstdio>
 
@@ -18,10 +22,11 @@ namespace fc::app {
 
 namespace {
 
-constexpr const char* kCmdDbStats     = "db-stats";
-constexpr const char* kCmdClearCache  = "clear-cache";
-constexpr const char* kCmdCompressDb  = "compress-db";
-constexpr const char* kCmdResetDb     = "reset-db";
+constexpr const char* kCmdDbStats          = "db-stats";
+constexpr const char* kCmdClearCache       = "clear-cache";
+constexpr const char* kCmdCompressDb       = "compress-db";
+constexpr const char* kCmdCompressionStats = "compression-stats";
+constexpr const char* kCmdResetDb          = "reset-db";
 
 void printHelp() {
     std::printf(
@@ -46,6 +51,13 @@ void printHelp() {
         "      cached bodies, then recompress every body row with the\n"
         "      new dict. Slow, memory-frugal, single-threaded.\n"
         "      No argument = every signed-in account, sequentially.\n"
+        "\n"
+        "  compression-stats [email-or-account-id]\n"
+        "      Walk every cached message body, decompress it, and\n"
+        "      report the compressed-vs-plaintext byte counts and\n"
+        "      resulting ratio. Read-only; takes a second or two per\n"
+        "      thousand messages. No argument = every signed-in\n"
+        "      account.\n"
         "\n"
         "  reset-db\n"
         "      Delete the cache database file (and its -wal / -shm\n"
@@ -237,6 +249,150 @@ int runCompressDb(fc::account::AccountManager& accounts,
     return exitCode;
 }
 
+// compression-stats — walk every cached body and tally compressed-vs-
+// plaintext bytes per account. Reports the resulting ratio. Read-only.
+//
+// For each row we get the on-disk byte count for free (length(body_*));
+// the plaintext byte count requires BodyCodec::decompress on rows with
+// body_compression=1 (rows with body_compression=0 are stored plaintext
+// so on-disk == plaintext for them).
+int runCompressionStats(fc::account::AccountManager& accounts,
+                         const QString& token) {
+    const auto targets = resolveTargets(accounts, token);
+    if (targets.isEmpty()) {
+        std::printf("compression-stats: no matching account for '%s'.\n",
+                     qUtf8Printable(token));
+        return 1;
+    }
+
+    qint64 grandPlain      = 0;
+    qint64 grandCompressed = 0;
+    int    grandRows       = 0;
+
+    for (const auto& acc : targets) {
+        const QString display = acc.email.isEmpty() ? acc.id : acc.email;
+        std::printf("Account: %s\n", qUtf8Printable(display));
+
+        const QByteArray dict =
+            fc::cache::MessageRepository::dictionaryFor(acc.id);
+
+        auto db = fc::cache::databaseHandle();
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT body_compression, body_text, body_html "
+            "FROM messages WHERE account_id = :a "
+            "  AND ( (body_text IS NOT NULL AND length(body_text) > 0) "
+            "     OR (body_html IS NOT NULL AND length(body_html) > 0) )"));
+        q.bindValue(QStringLiteral(":a"), acc.id);
+        if (!q.exec()) {
+            std::printf("  query failed: %s\n",
+                         qUtf8Printable(q.lastError().text()));
+            continue;
+        }
+
+        qint64 plainBytes      = 0;
+        qint64 compressedBytes = 0;
+        qint64 compressedPlain = 0;   // plaintext-equivalent of the compressed slice
+        int    rowsCompressed  = 0;
+        int    rowsPlaintext   = 0;
+        int    failedDecompress = 0;
+
+        while (q.next()) {
+            const int compFlag = q.value(0).toInt();
+            const QByteArray bt = q.value(1).toByteArray();
+            const QByteArray bh = q.value(2).toByteArray();
+
+            const qint64 onDisk = bt.size() + bh.size();
+
+            if (compFlag == 0) {
+                // Stored plaintext.
+                plainBytes      += onDisk;
+                compressedBytes += onDisk;
+                ++rowsPlaintext;
+                continue;
+            }
+
+            // Compressed row. Decompress each field with the account dict.
+            auto restoreSize = [&](const QByteArray& field) -> qint64 {
+                if (field.isEmpty()) return 0;
+                if (!fc::util::BodyCodec::isCompressed(field)) {
+                    return field.size();
+                }
+                const QByteArray d =
+                    fc::util::BodyCodec::decompress(field, dict);
+                if (d.isEmpty()) { ++failedDecompress; return 0; }
+                return d.size();
+            };
+            const qint64 plain = restoreSize(bt) + restoreSize(bh);
+
+            plainBytes      += plain;
+            compressedBytes += onDisk;
+            compressedPlain += plain;
+            ++rowsCompressed;
+        }
+
+        const qint64 rows = rowsCompressed + rowsPlaintext;
+        std::printf("  rows with body:    %s "
+                     "(%s compressed, %s plaintext)\n",
+                     qUtf8Printable(QLocale::system().toString(rows)),
+                     qUtf8Printable(QLocale::system().toString(rowsCompressed)),
+                     qUtf8Printable(QLocale::system().toString(rowsPlaintext)));
+        std::printf("  on-disk total:     %s\n",
+                     qUtf8Printable(humanBytes(compressedBytes)));
+        std::printf("  plaintext total:   %s\n",
+                     qUtf8Printable(humanBytes(plainBytes)));
+        if (compressedBytes > 0) {
+            const double ratio = double(plainBytes) / double(compressedBytes);
+            std::printf("  overall ratio:     %.2fx "
+                         "(%.1f%% saved)\n",
+                         ratio,
+                         (1.0 - 1.0 / ratio) * 100.0);
+        }
+        if (rowsCompressed > 0) {
+            const qint64 compressedOnDisk = compressedBytes
+                                              - (plainBytes - compressedPlain);
+            // compressedOnDisk = the on-disk bytes contributed by
+            // compressed rows. (plainBytes - compressedPlain) is the
+            // bytes contributed by plaintext rows, which equals their
+            // on-disk size; subtracting leaves the compressed slice.
+            if (compressedOnDisk > 0 && compressedPlain > 0) {
+                const double r =
+                    double(compressedPlain) / double(compressedOnDisk);
+                std::printf("  compressed-only:   %.2fx "
+                             "(%s plaintext → %s on disk)\n",
+                             r,
+                             qUtf8Printable(humanBytes(compressedPlain)),
+                             qUtf8Printable(humanBytes(compressedOnDisk)));
+            }
+        }
+        if (failedDecompress > 0) {
+            std::printf("  WARN: %d field(s) failed to decompress "
+                         "(dict mismatch?); excluded from plaintext "
+                         "total.\n",
+                         failedDecompress);
+        }
+        std::printf("\n");
+
+        grandPlain      += plainBytes;
+        grandCompressed += compressedBytes;
+        grandRows       += rows;
+    }
+
+    if (targets.size() > 1 && grandCompressed > 0) {
+        const double ratio = double(grandPlain) / double(grandCompressed);
+        std::printf("Total across %d account(s): %s rows, "
+                     "%s on disk → %s plaintext, ratio %.2fx "
+                     "(%.1f%% saved)\n",
+                     int(targets.size()),
+                     qUtf8Printable(QLocale::system().toString(grandRows)),
+                     qUtf8Printable(humanBytes(grandCompressed)),
+                     qUtf8Printable(humanBytes(grandPlain)),
+                     ratio,
+                     (1.0 - 1.0 / ratio) * 100.0);
+    }
+    return 0;
+}
+
 // reset-db — wipe cached message/thread/label data while preserving
 // the accounts list (and therefore the QtKeychain tokens keyed by
 // account_id). The accounts mirror in QSettings (~/.config/...) is
@@ -286,6 +442,7 @@ bool argsLookLikeCliSubcommand(int argc, char** argv) {
     return a1 == kCmdDbStats
         || a1 == kCmdClearCache
         || a1 == kCmdCompressDb
+        || a1 == kCmdCompressionStats
         || a1 == kCmdResetDb
         || a1 == "help" || a1 == "--help" || a1 == "-h";
 }
@@ -301,7 +458,8 @@ int tryRunCli(int argc, char** argv, const QStringList& args) {
     }
 
     if (cmd != kCmdDbStats && cmd != kCmdClearCache
-        && cmd != kCmdCompressDb && cmd != kCmdResetDb) {
+        && cmd != kCmdCompressDb && cmd != kCmdCompressionStats
+        && cmd != kCmdResetDb) {
         return -1;
     }
 
@@ -321,9 +479,10 @@ int tryRunCli(int argc, char** argv, const QStringList& args) {
     fc::account::AccountManager accounts;
 
     const QString target = args.size() > 2 ? args[2] : QString();
-    if (cmd == kCmdDbStats)    return runDbStats(accounts);
-    if (cmd == kCmdClearCache) return runClearCache(accounts, target);
-    if (cmd == kCmdCompressDb) return runCompressDb(accounts, target);
+    if (cmd == kCmdDbStats)          return runDbStats(accounts);
+    if (cmd == kCmdClearCache)       return runClearCache(accounts, target);
+    if (cmd == kCmdCompressDb)       return runCompressDb(accounts, target);
+    if (cmd == kCmdCompressionStats) return runCompressionStats(accounts, target);
     return -1;   // unreachable
 }
 
