@@ -123,8 +123,8 @@ $(LINUXDEPLOY_DIR)/linuxdeploy-plugin-qt:
 configure: ## Configure CMake into $(BUILD_DIR). Uses BUILD_TYPE / SANITIZERS.
 	cmake -S . -B $(BUILD_DIR) -G $(GENERATOR) $(CMAKE_FLAGS)
 
-build: configure ## Compile (defaults to Debug; override with BUILD_TYPE=Release).
-	cmake --build $(BUILD_DIR)
+build: configure ## Compile just the firstcontact app (skips test binaries).
+	cmake --build $(BUILD_DIR) --target firstcontact
 
 run: build ## Launch firstcontact from the build tree.
 	$(BUILD_DIR)/src/app/firstcontact
@@ -143,7 +143,8 @@ smoke: build ## Headless smoke launch — boots the GUI under offscreen for 4s.
 	            echo "✗ smoke FAILED: exited $$rc within 4s"; exit 1; \
 	          fi'
 
-test: build ## Build and run the unit tests under ctest.
+test: configure ## Build everything (app + tests) and run the unit tests under ctest.
+	cmake --build $(BUILD_DIR)
 	QT_QPA_PLATFORM=offscreen ctest --test-dir $(BUILD_DIR) --output-on-failure
 
 # ---- Release + AppImage ---------------------------------------------------
