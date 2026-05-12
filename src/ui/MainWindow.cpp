@@ -80,6 +80,7 @@ namespace fc::cache { QSqlDatabase databaseHandle(); }
 #include <QSize>
 #include <QMenu>
 #include <QResizeEvent>
+#include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSet>
 #include <QSplitter>
@@ -247,11 +248,7 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     };
     if (anyContextAuthorized()) {
         reloadSidebar();
-        currentLabelId_ = QStringLiteral("INBOX");
-        reloadCurrentLabel();
-        if (sidebar_ && !currentAccountId_.isEmpty()) {
-            sidebar_->selectLabel(currentAccountId_, currentLabelId_);
-        }
+        restoreStartupSelection();
     }
 
     // Snooze wake-up scheduler. Snooze is FirstContact-local — Gmail's
@@ -1190,6 +1187,13 @@ void MainWindow::wireSignals() {
                     reloadSidebar();
                 }
                 refreshAccountIndicator();
+                // Async-hydration path: the synchronous-auth branch in
+                // the constructor saw no authorized context yet and
+                // skipped restoreStartupSelection. Now that a context
+                // finished hydrating, retry — the function self-gates
+                // via startupSelectionApplied_ so it only takes effect
+                // on the first eligible invocation.
+                restoreStartupSelection();
             });
     connect(sync_, &fc::sync::SyncService::labelsUpdated,
             this,  &MainWindow::reloadSidebar);
@@ -1232,9 +1236,15 @@ void MainWindow::wireSignals() {
                 reader_->showEmpty();
                 currentMessage_ = {};
                 currentRow_ = -1;
-                currentLabelId_ = QStringLiteral("INBOX");
+                if (!startupSelectionInProgress_) {
+                    currentLabelId_ = QStringLiteral("INBOX");
+                }
                 reloadCurrentLabel();
                 refreshAccountIndicator();
+                // Skip persistence until restoreStartupSelection has
+                // finished reading the saved tuple. Normal user-driven
+                // switches persist after that.
+                if (startupSelectionApplied_) persistLastViewedLabel();
             });
     connect(accounts_, &fc::account::AccountManager::labelsUpdated, this,
             [this](const QString& aid) {
@@ -2204,10 +2214,80 @@ void MainWindow::onLabelSelected(const QString& accountId, const QString& id) {
         }
     }
     refreshListFooter();
+    persistLastViewedLabel();
 }
 
 void MainWindow::reloadSidebar() {
     sidebar_->model()->reload();
+}
+
+void MainWindow::persistLastViewedLabel() {
+    if (currentLabelId_.isEmpty()) return;
+    Preferences::setLastViewedSelection({
+        crossAccountView_ ? QString() : currentAccountId_,
+        currentLabelId_,
+        crossAccountView_});
+}
+
+void MainWindow::restoreStartupSelection() {
+    if (startupSelectionApplied_) return;
+    if (!accounts_) return;
+
+    auto isAuthorized = [this](const QString& id) -> bool {
+        auto* c = id.isEmpty() ? nullptr : accounts_->contextFor(id);
+        return c && c->auth() && c->auth()->isAuthorized();
+    };
+    bool anyAuth = false;
+    for (auto* c : accounts_->allContexts()) {
+        if (c && c->auth() && c->auth()->isAuthorized()) { anyAuth = true; break; }
+    }
+    if (!anyAuth) return;
+
+    // Saved tuple is "valid" if the saved account still exists in
+    // the accounts list — authorization may lag (per-account keychain
+    // hydration is async) and the label cache loads regardless.
+    auto saved = Preferences::lastViewedSelection();
+    bool valid = saved.crossAccountView ? !saved.labelId.isEmpty()
+                                         : !saved.accountId.isEmpty()
+                                             && !saved.labelId.isEmpty()
+                                             && accounts_->accountById(saved.accountId).id
+                                                  == saved.accountId;
+    if (!valid) {
+        saved.crossAccountView = false;
+        saved.labelId          = QStringLiteral("INBOX");
+        saved.accountId.clear();
+        for (const auto& a : accounts_->accounts()) {
+            if (isAuthorized(a.id)) { saved.accountId = a.id; break; }
+        }
+        if (saved.accountId.isEmpty()) return;
+    }
+
+    startupSelectionApplied_ = true;
+
+    if (saved.crossAccountView) {
+        crossAccountView_ = true;
+        currentLabelId_   = saved.labelId;
+        reloadCurrentLabel();
+        reloadSidebar();
+        if (sidebar_) {
+            sidebar_->selectLabel(QString(), QStringLiteral("__all_inboxes"));
+        }
+    } else {
+        crossAccountView_ = false;
+        currentLabelId_   = saved.labelId;
+        // Switch first so the currentAccountChanged handler does the
+        // sole reloadCurrentLabel — gated by startupSelectionInProgress_
+        // so the handler doesn't clobber currentLabelId_ back to INBOX.
+        if (saved.accountId != currentAccountId_) {
+            QScopedValueRollback<bool> guard(startupSelectionInProgress_, true);
+            accounts_->setCurrentAccountId(saved.accountId);
+        } else {
+            reloadCurrentLabel();
+        }
+        reloadSidebar();
+        if (sidebar_) sidebar_->selectLabel(saved.accountId, saved.labelId);
+    }
+    persistLastViewedLabel();
 }
 
 QString MainWindow::labelScrollKey(const QString& labelId,

@@ -189,6 +189,16 @@ private slots:
     void reloadCurrentLabel();
     void reloadSidebar();
 
+    // Navigate to Preferences::lastViewedSelection() on launch, or
+    // fall back to the first authorized account's INBOX. Idempotent
+    // via startupSelectionApplied_ — safe to call from both the
+    // synchronous-auth branch and the async tokensLoaded relay.
+    void restoreStartupSelection();
+
+    // Persist (account, label, crossAccountView_) to Preferences.
+    // Called whenever the user navigates or switches accounts.
+    void persistLastViewedLabel();
+
     // Resets every cache-driven UI surface (message list, sidebar tree,
     // reader pane, error banner) so a signed-out window doesn't keep
     // rendering the previous account's data straight from cache.
@@ -423,6 +433,18 @@ private:
     // per-account label flips it back to per-account mode and pins
     // currentAccountId_.
     bool                     crossAccountView_ = false;
+
+    // True once restoreStartupSelection() has applied the saved (or
+    // default) selection. Self-gates retries from the tokensLoaded
+    // relay and tells the currentAccountChanged handler when normal
+    // persistence should resume.
+    bool                     startupSelectionApplied_ = false;
+
+    // True while restoreStartupSelection() is driving the active
+    // account switch. Gates the currentAccountChanged handler's
+    // "reset label to INBOX" line so the handler's single reload
+    // lands on the saved label, eliminating a redundant pass.
+    bool                     startupSelectionInProgress_ = false;
 };
 
 }  // namespace fc::ui

@@ -192,6 +192,19 @@ public:
     static int  backgroundCrawlIntervalSec();
     static void setBackgroundCrawlIntervalSec(int seconds);
 
+    // Last sidebar selection at quit time. Restored on launch so the
+    // app reopens to the same folder/label the user was reading.
+    // crossAccountView=true pins to the synthetic "All Inboxes" view;
+    // accountId is empty in that case. accountId/labelId both empty
+    // → never set (fresh install / migration), caller picks a default.
+    struct LastView {
+        QString accountId;
+        QString labelId;
+        bool    crossAccountView = false;
+    };
+    static LastView lastViewedSelection();
+    static void     setLastViewedSelection(const LastView& v);
+
     // ----------------------------------------------------------------
     // Database compression preferences
     //

@@ -250,6 +250,9 @@ namespace {
 constexpr char kLowBandwidthKey[]            = "sync/lowBandwidthMode";
 constexpr char kBackgroundCrawlKey[]         = "sync/backgroundCrawl";
 constexpr char kBackgroundCrawlIntervalKey[] = "sync/backgroundCrawlIntervalSec";
+constexpr char kLastViewAccountIdKey[]       = "view/lastAccountId";
+constexpr char kLastViewLabelIdKey[]         = "view/lastLabelId";
+constexpr char kLastViewCrossAccountKey[]    = "view/lastCrossAccount";
 }
 
 bool Preferences::lowBandwidthMode() {
@@ -284,6 +287,23 @@ void Preferences::setBackgroundCrawlIntervalSec(int seconds) {
     QSettings s;
     s.setValue(QLatin1String(kBackgroundCrawlIntervalKey), qMax(1, seconds));
     s.sync();
+}
+
+Preferences::LastView Preferences::lastViewedSelection() {
+    QSettings s;
+    LastView v;
+    v.accountId        = s.value(QLatin1String(kLastViewAccountIdKey)).toString();
+    v.labelId          = s.value(QLatin1String(kLastViewLabelIdKey)).toString();
+    v.crossAccountView = s.value(QLatin1String(kLastViewCrossAccountKey),
+                                   false).toBool();
+    return v;
+}
+
+void Preferences::setLastViewedSelection(const LastView& v) {
+    QSettings s;
+    s.setValue(QLatin1String(kLastViewAccountIdKey),    v.accountId);
+    s.setValue(QLatin1String(kLastViewLabelIdKey),      v.labelId);
+    s.setValue(QLatin1String(kLastViewCrossAccountKey), v.crossAccountView);
 }
 
 namespace {
