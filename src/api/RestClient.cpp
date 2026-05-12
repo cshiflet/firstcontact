@@ -283,36 +283,20 @@ void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
         (QByteArray respBody, ApiError err) {
             if (err) { cb({}, err); return; }
             // Need the outer Content-Type to find the response
-            // boundary. send() doesn't surface headers, so we use a
-            // tolerant scan: pull the boundary from the first part
-            // marker in the body itself. Gmail's actual responses
-            // begin with a CRLF before "--<boundary>", so we skip
-            // any leading whitespace before locating the marker.
-            // (The original tight check `startsWith("--")` rejected
-            // valid responses because it didn't tolerate the
-            // leading CRLF.)
+            // boundary. send() doesn't surface headers, so we
+            // extract the boundary from the body itself via the
+            // tolerant extractBatchBoundary helper — Gmail's
+            // actual responses prefix the body with a CRLF before
+            // the first "--<boundary>" marker, so a strict
+            // startsWith("--") check would reject valid payloads.
             //
             // Distinct from the REQUEST boundary captured in the
             // outer scope: Gmail picks its own boundary for the
             // response. Renamed so -Wshadow stays clean and so a
             // reader doesn't mistake the two values for the same
             // string.
-            QByteArray responseBoundary;
-            int scan = 0;
-            while (scan < respBody.size()
-                   && (respBody[scan] == '\r' || respBody[scan] == '\n'
-                       || respBody[scan] == ' '  || respBody[scan] == '\t')) {
-                ++scan;
-            }
-            if (scan + 2 < respBody.size()
-                && respBody[scan] == '-' && respBody[scan + 1] == '-') {
-                const int markerStart = scan + 2;
-                const int nlAfter = respBody.indexOf("\r\n", markerStart);
-                if (nlAfter > markerStart) {
-                    responseBoundary =
-                        respBody.mid(markerStart, nlAfter - markerStart);
-                }
-            }
+            const QByteArray responseBoundary =
+                RestClient::extractBatchBoundary(respBody);
             if (responseBoundary.isEmpty()) {
                 // Helpful diagnostic: include a short preview of what
                 // Gmail actually returned. Common cause is the server
@@ -332,6 +316,24 @@ void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
                                                 expected),
                 ApiError{});
         });
+}
+
+QByteArray RestClient::extractBatchBoundary(const QByteArray& body) {
+    // Skip leading whitespace / CRLF — Gmail prefixes its multipart
+    // bodies with "\r\n" before the first "--<boundary>" line.
+    int scan = 0;
+    while (scan < body.size()
+           && (body[scan] == '\r' || body[scan] == '\n'
+               || body[scan] == ' '  || body[scan] == '\t')) {
+        ++scan;
+    }
+    // Want "--", then boundary chars, then CRLF.
+    if (scan + 2 >= body.size()) return {};
+    if (body[scan] != '-' || body[scan + 1] != '-') return {};
+    const int markerStart = scan + 2;
+    const int nlAfter = body.indexOf("\r\n", markerStart);
+    if (nlAfter <= markerStart) return {};
+    return body.mid(markerStart, nlAfter - markerStart);
 }
 
 std::vector<RestClient::BatchSubResult>

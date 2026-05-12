@@ -97,6 +97,19 @@ public:
                         const QByteArray& boundary,
                         int expected);
 
+    // Pulls the multipart boundary out of a Gmail /batch response
+    // body. Tolerates leading CRLF / whitespace before the
+    // "--<boundary>\r\n" marker (Gmail's actual responses prefix
+    // them; the early version of this code's strict
+    // startsWith("--") check rejected valid payloads). Returns an
+    // empty QByteArray when nothing parseable is found — caller
+    // should treat that as a parse error and either fall back or
+    // surface the original response for diagnosis.
+    //
+    // Exposed as a static so tests can exercise it without spinning
+    // up a real network request through sendBatch.
+    static QByteArray extractBatchBoundary(const QByteArray& body);
+
 private:
     TokenGetter             getToken_;
     QNetworkAccessManager*  nam_;

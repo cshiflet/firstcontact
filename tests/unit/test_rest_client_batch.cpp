@@ -131,6 +131,36 @@ private slots:
         QVERIFY(results[2].body.isEmpty());
     }
 
+    // Regression for the silent failure in 57b3f8c: Gmail's actual
+    // /batch responses prefix the body with a leading CRLF before
+    // the first "--<boundary>\r\n" marker. The boundary extractor
+    // must skip that leading whitespace, not reject the whole
+    // response as malformed.
+    void extractsBoundaryDespiteLeadingCrlf() {
+        const QByteArray boundary = "batch_lead_crlf";
+        QByteArray body = "\r\n";   // leading CRLF Gmail actually emits
+        body += "--"; body += boundary; body += "\r\n";
+        body += "Content-Type: application/http\r\n";
+        body += "Content-ID: <response-item-0>\r\n\r\n";
+        body += "HTTP/1.1 200 OK\r\n\r\n";
+        body += "ok\r\n";
+        body += "--"; body += boundary; body += "--\r\n";
+
+        QCOMPARE(RestClient::extractBatchBoundary(body), boundary);
+    }
+
+    // Defensive: an empty / non-multipart response (e.g. Gmail
+    // returned a JSON error envelope) must yield an empty
+    // boundary so the caller's fallback path kicks in instead of
+    // misinterpreting random JSON as multipart.
+    void extractsEmptyBoundaryFromGarbage() {
+        QCOMPARE(RestClient::extractBatchBoundary(QByteArray()), QByteArray());
+        QCOMPARE(RestClient::extractBatchBoundary("{\"error\": \"bad\"}"),
+                 QByteArray());
+        // Only "--" with no boundary chars after, no CRLF terminator.
+        QCOMPARE(RestClient::extractBatchBoundary("--"), QByteArray());
+    }
+
     // Empty inner body: a 204 No Content sub-response should parse as
     // status=204 + empty body without crashing the parser.
     void parses204NoContent() {

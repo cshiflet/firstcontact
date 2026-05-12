@@ -24,7 +24,14 @@ namespace {
 
 constexpr int kInitialPerLabelCap = 200;       // first-run pages cap
 constexpr int kSerialGetBatch     = 25;        // concurrent in-flight gets
-constexpr int kBatchChunkSize     = 50;        // Gmail /batch sub-requests per chunk
+// Gmail /batch sub-requests per chunk. 20 is a sweet spot in
+// practice: small enough that a single rate-limited (429) sub-
+// response or transient failure only stalls a handful of ids
+// before the fallback kicks in, large enough that the per-batch
+// HTTP overhead is still amortized. Was 50, dropped after early
+// testing surfaced occasional 429s on individual sub-requests
+// inside a populated batch.
+constexpr int kBatchChunkSize     = 20;
 
 // Folders to seed on first sync.
 const QStringList& seedLabels() {
