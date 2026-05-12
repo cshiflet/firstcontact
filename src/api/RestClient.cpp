@@ -300,8 +300,17 @@ void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
                 responseBoundary = respBody.mid(2, firstNl - 2);
             }
             if (responseBoundary.isEmpty()) {
+                // Helpful diagnostic: include a short preview of what
+                // Gmail actually returned. Common cause is the server
+                // sending a JSON error envelope (e.g. 400/401) instead
+                // of a multipart body, which the body-starts-with-"--"
+                // check rejects.
+                QByteArray preview = respBody.left(200);
+                preview.replace('\n', "\\n").replace('\r', "\\r");
                 cb({}, ApiError{ApiErrorKind::Parse, 0,
-                                QStringLiteral("batch: no boundary in response"),
+                                QStringLiteral("batch: no boundary in response "
+                                                "(first 200B: %1)")
+                                    .arg(QString::fromUtf8(preview)),
                                 {}});
                 return;
             }

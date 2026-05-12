@@ -580,6 +580,52 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         if (*doneSp) (*doneSp)();
     };
 
+    // Serial-getMessage dispatch helper. Used by:
+    //   - The legacy non-metadata path (fmt == "full").
+    //   - The /batch error fallback in the metadata path below.
+    // Pulls each id with its own getMessage(id, fmt, cb) round-trip
+    // up to kSerialGetBatch in flight at once. Wrapped in a
+    // shared_ptr<std::function> so the metadata-path closure can
+    // capture and invoke it.
+    auto dispatchSerial = std::make_shared<
+        std::function<void(QStringList, QString)>>();
+    *dispatchSerial = [self, pending, onDoneAll]
+        (QStringList serialIds, QString fmtArg) {
+        if (serialIds.isEmpty()) { onDoneAll(); return; }
+        auto remaining = std::make_shared<int>(serialIds.size());
+        auto onOne = [self, remaining, pending, onDoneAll]
+            (fc::Message m, fc::api::ApiError err) {
+            if (!err && !m.id.isEmpty() && self) {
+                m.accountId = self->d_->accountId;
+                pending->push_back(std::move(m));
+            }
+            if (--(*remaining) > 0) return;
+            onDoneAll();
+        };
+        auto queue = std::make_shared<QStringList>(std::move(serialIds));
+        auto inflight = std::make_shared<int>(0);
+        // weak_ptr → std::function cycle break. See the older
+        // legacy-path comment (pre-refactor) for the full rationale.
+        auto next = std::make_shared<std::function<void()>>();
+        std::weak_ptr<std::function<void()>> nextWeak = next;
+        *next = [self, queue, inflight, onOne, nextWeak, fmtArg]() {
+            if (!self) return;
+            while (*inflight < kSerialGetBatch && !queue->isEmpty()) {
+                const QString id = queue->takeFirst();
+                ++(*inflight);
+                auto strong = nextWeak.lock();
+                self->d_->gmail->getMessage(id, fmtArg,
+                    [inflight, strong, onOne]
+                    (fc::Message m, fc::api::ApiError err) {
+                        --(*inflight);
+                        onOne(m, err);
+                        if (strong) (*strong)();
+                    });
+            }
+        };
+        (*next)();
+    };
+
     if (fmt == QStringLiteral("metadata")) {
         // Batch path. Chunk ids into ≤kBatchChunkSize sub-requests per
         // /batch round-trip; chain chunks serially via a tail-call-
@@ -589,7 +635,8 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
 
         auto fireChunk = std::make_shared<std::function<void()>>();
         std::weak_ptr<std::function<void()>> chunkWeak = fireChunk;
-        *fireChunk = [self, queue, pending, onDoneAll, chunkWeak]() {
+        *fireChunk = [self, queue, pending, onDoneAll, chunkWeak,
+                      dispatchSerial]() {
             if (!self) { onDoneAll(); return; }
             if (queue->isEmpty()) { onDoneAll(); return; }
             QStringList chunk;
@@ -599,17 +646,32 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
             auto strong = chunkWeak.lock();
             self->d_->gmail->batchGetMessages(chunk,
                 QStringLiteral("metadata"),
-                [self, pending, onDoneAll, strong]
+                [self, pending, onDoneAll, strong, queue, chunk,
+                 dispatchSerial]
                 (std::vector<fc::api::GmailClient::BatchMessageResult> results,
                  fc::api::ApiError err) {
                     if (!self) { onDoneAll(); return; }
                     if (err) {
-                        // Whole-batch failure (network / boundary parse).
-                        // Bail out — keep whatever we accumulated so far
-                        // so the caller still sees progress.
-                        qWarning("fetchAndStoreMessages: batch failed: %s",
-                                 qUtf8Printable(err.message));
-                        onDoneAll();
+                        // Whole-batch failure (network / boundary
+                        // parse / Gmail returned a JSON error envelope
+                        // instead of multipart). Fall back to the
+                        // serial getMessage path for THIS chunk plus
+                        // every still-queued id. Slower (one HTTP
+                        // request per id instead of one per ~50) but
+                        // the user sees their messages instead of an
+                        // empty list while we figure out why /batch
+                        // didn't like our request.
+                        QStringList unfetched = chunk;
+                        while (!queue->isEmpty()) {
+                            unfetched << queue->takeFirst();
+                        }
+                        qWarning("fetchAndStoreMessages: batch failed "
+                                 "(%s) — falling back to serial "
+                                 "getMessage for %d id(s)",
+                                 qUtf8Printable(err.message),
+                                 int(unfetched.size()));
+                        (*dispatchSerial)(std::move(unfetched),
+                                          QStringLiteral("metadata"));
                         return;
                     }
                     for (auto& r : results) {
@@ -626,58 +688,9 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         return;
     }
 
-    // Legacy serial-get path (format=full). Pulls each id with its
-    // own getMessage round-trip up to kSerialGetBatch in flight at
-    // once.
-    auto remaining = std::make_shared<int>(ids.size());
-    auto onOne = [self, remaining, pending, onDoneAll]
-        (fc::Message m, fc::api::ApiError err) {
-        // We may have been destroyed mid-flight. If self is gone we
-        // skip the per-message work; the completion callback below
-        // still runs once all remaining counters hit 0 so the caller
-        // can settle its own state (topUpFinished, etc.).
-        if (!err && !m.id.isEmpty() && self) {
-            m.accountId = self->d_->accountId;
-            pending->push_back(std::move(m));
-        }
-        if (--(*remaining) > 0) return;
-        onDoneAll();
-    };
-
-    // Concurrency limiter: kick off kSerialGetBatch and queue the rest.
-    auto queue = std::make_shared<QStringList>(ids);
-    auto inflight = std::make_shared<int>(0);
-
-    // Function that pulls the next id and dispatches itself again
-    // when each callback fires. The original code captured `next`
-    // (the shared_ptr to the std::function) BY VALUE inside the
-    // outer lambda body itself, producing a reference cycle:
-    //   shared_ptr → std::function (lambda) → captures shared_ptr
-    // The outer lambda kept itself alive forever, leaking the chain
-    // even after all inflight callbacks completed. Fix:
-    //   - The outer lambda captures only a weak_ptr (no own ref).
-    //   - Each inner getMessage callback captures a strong shared
-    //     (via lock), anchoring the chain to the in-flight requests.
-    // Once every inner callback resolves and drops its strong copy,
-    // the std::function reaches refcount zero and is freed cleanly.
-    auto next = std::make_shared<std::function<void()>>();
-    std::weak_ptr<std::function<void()>> nextWeak = next;
-    *next = [self, queue, inflight, onOne, nextWeak]() {
-        if (!self) return;   // service died; abandon the queue
-        while (*inflight < kSerialGetBatch && !queue->isEmpty()) {
-            const QString id = queue->takeFirst();
-            ++(*inflight);
-            auto strong = nextWeak.lock();
-            self->d_->gmail->getMessage(id,
-                [inflight, strong, onOne]
-                (fc::Message m, fc::api::ApiError err) {
-                    --(*inflight);
-                    onOne(m, err);
-                    if (strong) (*strong)();
-                });
-        }
-    };
-    (*next)();
+    // Legacy serial-get path (fmt == "full" or any explicit
+    // bodyFormat). Same dispatcher; just enters here directly.
+    (*dispatchSerial)(ids, fmt);
 }
 
 void SyncService::fetchBodyOnDemand(const QString& messageId,
