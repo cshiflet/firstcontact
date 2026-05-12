@@ -285,19 +285,33 @@ void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
             // Need the outer Content-Type to find the response
             // boundary. send() doesn't surface headers, so we use a
             // tolerant scan: pull the boundary from the first part
-            // marker in the body itself. Every Gmail batch response
-            // starts with "--<boundary>\r\n", so the first non-empty
-            // line gives us what we need without depending on a
-            // header passthrough.
+            // marker in the body itself. Gmail's actual responses
+            // begin with a CRLF before "--<boundary>", so we skip
+            // any leading whitespace before locating the marker.
+            // (The original tight check `startsWith("--")` rejected
+            // valid responses because it didn't tolerate the
+            // leading CRLF.)
+            //
             // Distinct from the REQUEST boundary captured in the
             // outer scope: Gmail picks its own boundary for the
             // response. Renamed so -Wshadow stays clean and so a
             // reader doesn't mistake the two values for the same
             // string.
             QByteArray responseBoundary;
-            const int firstNl = respBody.indexOf("\r\n");
-            if (firstNl > 2 && respBody.startsWith("--")) {
-                responseBoundary = respBody.mid(2, firstNl - 2);
+            int scan = 0;
+            while (scan < respBody.size()
+                   && (respBody[scan] == '\r' || respBody[scan] == '\n'
+                       || respBody[scan] == ' '  || respBody[scan] == '\t')) {
+                ++scan;
+            }
+            if (scan + 2 < respBody.size()
+                && respBody[scan] == '-' && respBody[scan + 1] == '-') {
+                const int markerStart = scan + 2;
+                const int nlAfter = respBody.indexOf("\r\n", markerStart);
+                if (nlAfter > markerStart) {
+                    responseBoundary =
+                        respBody.mid(markerStart, nlAfter - markerStart);
+                }
             }
             if (responseBoundary.isEmpty()) {
                 // Helpful diagnostic: include a short preview of what
