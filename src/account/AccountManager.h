@@ -175,6 +175,7 @@ public:
     struct AccountCacheStats {
         qint64 sizeBytes        = 0;
         int    messageCount     = 0;
+        int    bodyCount        = 0;   // subset of messageCount with cached body
         int    threadCount      = 0;
         int    labelCount       = 0;
         int    attachmentCount  = 0;

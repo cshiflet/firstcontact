@@ -656,6 +656,7 @@ AccountManager::AccountCacheStats AccountManager::statsFor(
         return 0;
     };
     s.messageCount    = countOf("messages");
+    s.bodyCount       = fc::cache::MessageRepository::bodyCountFor(id);
     s.threadCount     = countOf("threads");
     s.labelCount      = countOf("labels");
     s.attachmentCount = countOf("attachments");

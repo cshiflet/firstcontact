@@ -463,7 +463,15 @@ static qint64 upsertOneNoTxn(QSqlDatabase& db, const QString& accountId,
         "      THEN messages.body_compression "
         "    ELSE excluded.body_compression "
         "  END, "
-        "  fetched_format = excluded.fetched_format"));
+        "  fetched_format = excluded.fetched_format, "
+        // Must follow the same COALESCE/NULLIF merge as body_text /
+        // body_html so a metadata-only resync doesn't drop bytes_cached
+        // to 0 while the bodies stay preserved.
+        "  bytes_cached = "
+        "    IFNULL(length(COALESCE(NULLIF(excluded.body_text, X''), "
+        "                            messages.body_text)), 0) + "
+        "    IFNULL(length(COALESCE(NULLIF(excluded.body_html, X''), "
+        "                            messages.body_html)), 0)"));
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     q.bindValue(QStringLiteral(":a"),                 accountId);
@@ -676,7 +684,14 @@ qint64 MessageRepository::upsertOldBody(const QString& accountId, const fc::Mess
         "  body_text      = COALESCE(NULLIF(excluded.body_text, ''), messages.body_text), "
         "  body_html      = COALESCE(NULLIF(excluded.body_html, ''), messages.body_html), "
         "  body_html_present = excluded.body_html_present, "
-        "  fetched_format = excluded.fetched_format"));
+        "  fetched_format = excluded.fetched_format, "
+        // Mirror the COALESCE/NULLIF merge on body_text / body_html
+        // so bytes_cached stays consistent with the preserved bodies.
+        "  bytes_cached = "
+        "    IFNULL(length(COALESCE(NULLIF(excluded.body_text, ''), "
+        "                            messages.body_text)), 0) + "
+        "    IFNULL(length(COALESCE(NULLIF(excluded.body_html, ''), "
+        "                            messages.body_html)), 0)"));
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
@@ -1329,8 +1344,8 @@ int MessageRepository::bodyCountFor(const QString& accountId) {
     q.prepare(QStringLiteral(
         "SELECT COUNT(*) FROM messages "
         "WHERE account_id = :a "
-        "  AND body_text IS NOT NULL "
-        "  AND length(body_text) > 0"));
+        "  AND ( (body_text IS NOT NULL AND length(body_text) > 0) "
+        "     OR (body_html IS NOT NULL AND length(body_html) > 0) )"));
     q.bindValue(QStringLiteral(":a"), accountId);
     if (!q.exec() || !q.next()) return 0;
     return q.value(0).toInt();

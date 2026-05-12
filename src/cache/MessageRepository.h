@@ -115,9 +115,10 @@ public:
     // the user runs the "Recompress" workflow, after dropCache, etc.
     static void       invalidateDictionaryCache(const QString& accountId);
 
-    // Number of messages on this account that have a non-empty
-    // body_text. Drives the "we have enough bodies to train" check
-    // for the auto-train trigger.
+    // Number of messages on this account that have any cached body
+    // content (body_text or body_html non-empty). Drives both the
+    // auto-train threshold in SyncService and the "Bodies" stat in
+    // the Cache Manager dialog.
     static int        bodyCountFor(const QString& accountId);
 
     // ---------- FTS5 maintenance ----------

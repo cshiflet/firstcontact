@@ -64,10 +64,11 @@ CacheManagerDialog::CacheManagerDialog(
     table_ = new QTableWidget(this);
     table_->setSelectionMode(QAbstractItemView::NoSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table_->setColumnCount(5);
+    table_->setColumnCount(6);
     table_->setHorizontalHeaderLabels({
         tr("Account"),
-        tr("Messages"),
+        tr("Headers"),
+        tr("Bodies"),
         tr("Folders"),
         tr("Cached size"),
         tr("Actions")});
@@ -78,6 +79,7 @@ CacheManagerDialog::CacheManagerDialog(
     hdr->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     hdr->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     hdr->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    hdr->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     table_->verticalHeader()->setVisible(false);
     root->addWidget(table_, /*stretch=*/1);
 
@@ -180,7 +182,7 @@ void CacheManagerDialog::rebuildTable() {
     table_->setRowCount(accs.size() + orphans.size());
 
     qint64 totalBytes = 0;
-    int totalMessages = 0, totalFolders = 0, totalThreads = 0;
+    int totalMessages = 0, totalBodies = 0, totalFolders = 0, totalThreads = 0;
     int totalAttachments = 0, totalDrafts = 0;
 
     auto setRow = [&](const QString& id,
@@ -189,6 +191,7 @@ void CacheManagerDialog::rebuildTable() {
         if (!isOrphan) {
             totalBytes      += stats.sizeBytes;
             totalMessages   += stats.messageCount;
+            totalBodies     += stats.bodyCount;
             totalFolders    += stats.labelCount;
             totalThreads    += stats.threadCount;
             totalAttachments+= stats.attachmentCount;
@@ -206,9 +209,10 @@ void CacheManagerDialog::rebuildTable() {
             nameItem->setFont(f);
         }
         nameItem->setToolTip(tr(
-            "Messages: %1\nThreads: %2\nFolders: %3\nAttachments: %4\n"
-            "Drafts: %5\nOutbox: %6\nPending ops: %7")
+            "Headers: %1\nBodies cached: %2\nThreads: %3\nFolders: %4\n"
+            "Attachments: %5\nDrafts: %6\nOutbox: %7\nPending ops: %8")
             .arg(stats.messageCount)
+            .arg(stats.bodyCount)
             .arg(stats.threadCount)
             .arg(stats.labelCount)
             .arg(stats.attachmentCount)
@@ -222,14 +226,19 @@ void CacheManagerDialog::rebuildTable() {
         msgItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         table_->setItem(row, 1, msgItem);
 
+        auto* bodyItem = new QTableWidgetItem(
+            QLocale::system().toString(stats.bodyCount));
+        bodyItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        table_->setItem(row, 2, bodyItem);
+
         auto* lblItem = new QTableWidgetItem(
             QLocale::system().toString(stats.labelCount));
         lblItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        table_->setItem(row, 2, lblItem);
+        table_->setItem(row, 3, lblItem);
 
         auto* sizeItem = new QTableWidgetItem(humanBytes(stats.sizeBytes));
         sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        table_->setItem(row, 3, sizeItem);
+        table_->setItem(row, 4, sizeItem);
 
         // Column 4: a single "Manage…" button that drops a menu of
         // every per-account action. Saves horizontal space and lets
@@ -332,7 +341,7 @@ void CacheManagerDialog::rebuildTable() {
         });
 
         manageBtn->setMenu(menu);
-        table_->setCellWidget(row, 4, manageBtn);
+        table_->setCellWidget(row, 5, manageBtn);
 
         ++row;
     };
@@ -351,10 +360,11 @@ void CacheManagerDialog::rebuildTable() {
     if (totalLabel_) {
         totalLabel_->setText(tr(
             "<b>Totals (signed-in accounts):</b> "
-            "%1 — %2 messages • %3 threads • %4 folders • "
-            "%5 attachments • %6 drafts")
+            "%1 — %2 headers • %3 bodies • %4 threads • %5 folders • "
+            "%6 attachments • %7 drafts")
             .arg(humanBytes(totalBytes))
             .arg(QLocale::system().toString(totalMessages))
+            .arg(QLocale::system().toString(totalBodies))
             .arg(QLocale::system().toString(totalThreads))
             .arg(QLocale::system().toString(totalFolders))
             .arg(QLocale::system().toString(totalAttachments))
