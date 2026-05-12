@@ -50,69 +50,69 @@ AccountManager::~AccountManager() {
     contexts_.clear();
 }
 
+void AccountManager::wireContextForwarding(AccountContext* ctx,
+                                              const QString& aid) {
+    if (!ctx) return;
+    if (auto* s = ctx->sync()) {
+        connect(s, &fc::sync::SyncService::labelsUpdated, this,
+                [this, aid] { emit labelsUpdated(aid); });
+        connect(s, &fc::sync::SyncService::messagesUpdated, this,
+                [this, aid] { emit messagesUpdated(aid); });
+        connect(s, &fc::sync::SyncService::newMessages, this,
+                [this, aid](int count) { emit newMessages(aid, count); });
+        connect(s, &fc::sync::SyncService::failed, this,
+                [this, aid](const QString& reason) {
+                    emit syncFailed(aid, reason);
+                });
+        connect(s, &fc::sync::SyncService::topUpStarted, this,
+                [this, aid](const QString& labelId) {
+                    emit topUpStarted(aid, labelId);
+                });
+        connect(s, &fc::sync::SyncService::topUpFinished, this,
+                [this, aid](const QString& labelId, int newRows,
+                            bool serverExhausted) {
+                    emit topUpFinished(aid, labelId, newRows,
+                                       serverExhausted);
+                });
+        // Coarse-grained syncStarted/syncFinished: fires on every
+        // Idle ↔ non-Idle transition so the UI can show "Syncing…"
+        // feedback for initial / incremental syncs (not just
+        // top-ups, which only fire for explicit topUpLabel calls).
+        connect(s, &fc::sync::SyncService::stateChanged, this,
+                [this, aid](fc::sync::SyncService::State st) {
+                    if (st == fc::sync::SyncService::State::Idle)
+                        emit syncFinished(aid);
+                    else
+                        emit syncStarted(aid);
+                });
+        connect(s, &fc::sync::SyncService::compressionPromptDue, this,
+                [this, aid](int bodyCount) {
+                    emit compressionPromptDue(aid, bodyCount);
+                });
+        connect(s, &fc::sync::SyncService::cacheLabelProgress, this,
+                [this, aid](const QString& lbl, int total) {
+                    emit cacheLabelProgress(aid, lbl, total);
+                });
+        connect(s, &fc::sync::SyncService::cacheLabelFinished, this,
+                [this, aid](const QString& lbl, int total, bool cancelled) {
+                    emit cacheLabelFinished(aid, lbl, total, cancelled);
+                });
+    }
+    if (auto* a_oauth = ctx->auth()) {
+        connect(a_oauth, &fc::auth::OAuthClient::tokensLoaded, this,
+                [this, aid] { emit tokensLoaded(aid); });
+        connect(a_oauth, &fc::auth::OAuthClient::signedOut, this,
+                [this, aid] { emit accountSignedOut(aid); });
+    }
+}
+
 void AccountManager::buildContextsForAllAccounts() {
     if (!config_ || !tokenStore_) return;
     for (const auto& a : accounts_) {
         if (contexts_.contains(a.id)) continue;
         auto* ctx = new AccountContext(a.id, config_, tokenStore_, this);
         contexts_.insert(a.id, ctx);
-        // Re-emit each context's per-account sync signals tagged with
-        // the account id so a single connection point in MainWindow
-        // reaches every account.
-        if (auto* s = ctx->sync()) {
-            const QString aid = a.id;
-            connect(s, &fc::sync::SyncService::labelsUpdated, this,
-                    [this, aid] { emit labelsUpdated(aid); });
-            connect(s, &fc::sync::SyncService::messagesUpdated, this,
-                    [this, aid] { emit messagesUpdated(aid); });
-            connect(s, &fc::sync::SyncService::newMessages, this,
-                    [this, aid](int count) { emit newMessages(aid, count); });
-            connect(s, &fc::sync::SyncService::failed, this,
-                    [this, aid](const QString& reason) {
-                        emit syncFailed(aid, reason);
-                    });
-            connect(s, &fc::sync::SyncService::topUpStarted, this,
-                    [this, aid](const QString& labelId) {
-                        emit topUpStarted(aid, labelId);
-                    });
-            connect(s, &fc::sync::SyncService::topUpFinished, this,
-                    [this, aid](const QString& labelId, int newRows,
-                                bool serverExhausted) {
-                        emit topUpFinished(aid, labelId, newRows,
-                                           serverExhausted);
-                    });
-            // Coarse-grained syncStarted/syncFinished: fires on
-            // every Idle ↔ non-Idle transition so the UI can show
-            // "Syncing…" feedback for initial / incremental syncs
-            // (not just top-ups, which only fire for explicit
-            // topUpLabel calls).
-            connect(s, &fc::sync::SyncService::stateChanged, this,
-                    [this, aid](fc::sync::SyncService::State st) {
-                        if (st == fc::sync::SyncService::State::Idle)
-                            emit syncFinished(aid);
-                        else
-                            emit syncStarted(aid);
-                    });
-            connect(s, &fc::sync::SyncService::compressionPromptDue, this,
-                    [this, aid](int bodyCount) {
-                        emit compressionPromptDue(aid, bodyCount);
-                    });
-            connect(s, &fc::sync::SyncService::cacheLabelProgress, this,
-                    [this, aid](const QString& lbl, int total) {
-                        emit cacheLabelProgress(aid, lbl, total);
-                    });
-            connect(s, &fc::sync::SyncService::cacheLabelFinished, this,
-                    [this, aid](const QString& lbl, int total, bool cancelled) {
-                        emit cacheLabelFinished(aid, lbl, total, cancelled);
-                    });
-        }
-        if (auto* a_oauth = ctx->auth()) {
-            const QString aid = a.id;
-            connect(a_oauth, &fc::auth::OAuthClient::tokensLoaded, this,
-                    [this, aid] { emit tokensLoaded(aid); });
-            connect(a_oauth, &fc::auth::OAuthClient::signedOut, this,
-                    [this, aid] { emit accountSignedOut(aid); });
-        }
+        wireContextForwarding(ctx, a.id);
     }
 }
 
@@ -141,52 +141,7 @@ AccountContext* AccountManager::ensureContext(const QString& id) {
     // (Add-account flow) would never propagate sync / token events out
     // through AccountManager — the toolbar / sidebar would go quiet
     // until the next launch.
-    if (auto* s = ctx->sync()) {
-        connect(s, &fc::sync::SyncService::labelsUpdated, this,
-                [this, id] { emit labelsUpdated(id); });
-        connect(s, &fc::sync::SyncService::messagesUpdated, this,
-                [this, id] { emit messagesUpdated(id); });
-        connect(s, &fc::sync::SyncService::newMessages, this,
-                [this, id](int count) { emit newMessages(id, count); });
-        connect(s, &fc::sync::SyncService::failed, this,
-                [this, id](const QString& reason) {
-                    emit syncFailed(id, reason);
-                });
-        connect(s, &fc::sync::SyncService::topUpStarted, this,
-                [this, id](const QString& labelId) {
-                    emit topUpStarted(id, labelId);
-                });
-        connect(s, &fc::sync::SyncService::topUpFinished, this,
-                [this, id](const QString& labelId, int newRows,
-                            bool serverExhausted) {
-                    emit topUpFinished(id, labelId, newRows, serverExhausted);
-                });
-        connect(s, &fc::sync::SyncService::stateChanged, this,
-                [this, id](fc::sync::SyncService::State st) {
-                    if (st == fc::sync::SyncService::State::Idle)
-                        emit syncFinished(id);
-                    else
-                        emit syncStarted(id);
-                });
-        connect(s, &fc::sync::SyncService::compressionPromptDue, this,
-                [this, id](int bodyCount) {
-                    emit compressionPromptDue(id, bodyCount);
-                });
-        connect(s, &fc::sync::SyncService::cacheLabelProgress, this,
-                [this, id](const QString& lbl, int total) {
-                    emit cacheLabelProgress(id, lbl, total);
-                });
-        connect(s, &fc::sync::SyncService::cacheLabelFinished, this,
-                [this, id](const QString& lbl, int total, bool cancelled) {
-                    emit cacheLabelFinished(id, lbl, total, cancelled);
-                });
-    }
-    if (auto* a_oauth = ctx->auth()) {
-        connect(a_oauth, &fc::auth::OAuthClient::tokensLoaded, this,
-                [this, id] { emit tokensLoaded(id); });
-        connect(a_oauth, &fc::auth::OAuthClient::signedOut, this,
-                [this, id] { emit accountSignedOut(id); });
-    }
+    wireContextForwarding(ctx, id);
     return ctx;
 }
 
@@ -512,7 +467,8 @@ int AccountManager::dropOrphanedCache() {
     return dropped;
 }
 
-int AccountManager::clearMessagesOlderThan(const QString& id, int days) {
+int AccountManager::clearMessagesOlderThan(const QString& id, int days,
+                                             bool reconcileFts) {
     if (id.isEmpty() || days <= 0) return 0;
     const qint64 cutoff = QDateTime::currentMSecsSinceEpoch()
                         - qint64(days) * 24 * 60 * 60 * 1000LL;
@@ -529,12 +485,15 @@ int AccountManager::clearMessagesOlderThan(const QString& id, int days) {
         return 0;
     }
     const int n = q.numRowsAffected();
-    if (n > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    if (n > 0 && reconcileFts) {
+        fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    }
     return n;
 }
 
 int AccountManager::clearMessagesToTargetSize(const QString& id,
-                                                qint64 targetBytes) {
+                                                qint64 targetBytes,
+                                                bool reconcileFts) {
     if (id.isEmpty() || targetBytes < 0) return 0;
     const qint64 currentBytes = cacheSizeFor(id);
     if (currentBytes <= targetBytes) return 0;
@@ -591,12 +550,15 @@ int AccountManager::clearMessagesToTargetSize(const QString& id,
         }
         deleted += del.numRowsAffected();
     }
-    if (deleted > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    if (deleted > 0 && reconcileFts) {
+        fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    }
     return deleted;
 }
 
 int AccountManager::clearMessagesToTargetCount(const QString& id,
-                                                 int targetCount) {
+                                                 int targetCount,
+                                                 bool reconcileFts) {
     if (id.isEmpty() || targetCount < 0) return 0;
     auto db = fc::cache::databaseHandle();
     // Count current rows.
@@ -628,7 +590,9 @@ int AccountManager::clearMessagesToTargetCount(const QString& id,
         return 0;
     }
     const int n = del.numRowsAffected();
-    if (n > 0) fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    if (n > 0 && reconcileFts) {
+        fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    }
     return n;
 }
 
@@ -638,14 +602,24 @@ int AccountManager::applyAutoPruneFor(const QString& id,
                                          int maxCacheMb) {
     if (id.isEmpty()) return 0;
 
+    // Each per-axis call would normally rebuild the FTS5 index after
+    // its DELETE — three full-table scans per messagesUpdated tick on
+    // a multi-axis cap config. Defer the rebuild to the end and run
+    // it once.
     int total = 0;
-    if (maxAgeDays > 0) total += clearMessagesOlderThan(id, maxAgeDays);
-    if (maxMessages > 0) total += clearMessagesToTargetCount(id, maxMessages);
+    if (maxAgeDays > 0) {
+        total += clearMessagesOlderThan(id, maxAgeDays, /*reconcileFts=*/false);
+    }
+    if (maxMessages > 0) {
+        total += clearMessagesToTargetCount(id, maxMessages, /*reconcileFts=*/false);
+    }
     if (maxCacheMb > 0) {
         total += clearMessagesToTargetSize(id,
-            static_cast<qint64>(maxCacheMb) * 1024 * 1024);
+            static_cast<qint64>(maxCacheMb) * 1024 * 1024,
+            /*reconcileFts=*/false);
     }
     if (total > 0) {
+        fc::cache::MessageRepository::reconcileFtsForAccount(id);
         qInfo("AccountManager::applyAutoPruneFor(%s): pruned %d row(s) "
               "(maxAge=%d, maxMsgs=%d, maxMb=%d)",
               qUtf8Printable(id), total, maxAgeDays, maxMessages, maxCacheMb);

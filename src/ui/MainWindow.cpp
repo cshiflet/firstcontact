@@ -1221,16 +1221,25 @@ void MainWindow::wireSignals() {
             [this](const QString& aid) {
                 // Auto-prune: any account that just synced should be
                 // re-checked against its bounds. Reads Preferences
-                // here (where it's available) and hands the bound
-                // values into AccountManager — fc_account stays
-                // Preferences-free to avoid the circular dep.
+                // here (UI thread, where they're available) and posts
+                // the prune onto the account's sync thread so the
+                // DELETE + FTS-rebuild work doesn't block paint.
+                // applyAutoPruneFor short-circuits internally when
+                // all three caps are zero, so we skip the pre-gating
+                // OR-check the previous shape had.
                 if (Preferences::cacheAutoPrune() && accounts_
                     && !aid.isEmpty()) {
                     const int days = Preferences::cacheMaxAgeDays(aid);
                     const int msgs = Preferences::cacheMaxMessages(aid);
                     const int mb   = Preferences::cacheMaxCacheMb(aid);
-                    if (days > 0 || msgs > 0 || mb > 0) {
-                        accounts_->applyAutoPruneFor(aid, days, msgs, mb);
+                    if (auto* ctx = accounts_->contextFor(aid);
+                            ctx && ctx->sync()) {
+                        auto* accounts = accounts_;
+                        postToObject(ctx->sync(),
+                            [accounts, aid, days, msgs, mb] {
+                                accounts->applyAutoPruneFor(
+                                    aid, days, msgs, mb);
+                            });
                     }
                 }
                 if (aid != currentAccountId_) return;
@@ -3574,7 +3583,8 @@ void MainWindow::onCompressionPromptDue(const QString& accountId,
     auto* chosen = box.clickedButton();
     Preferences::setDbCompressionPromptShown(accountId, true);
     if (chosen == compressBtn) {
-        startCompressionWorker(accountId, /*Recompress=*/0);
+        startCompressionWorker(accountId,
+            fc::cache::BodyCompressionWorker::Mode::InitialTrain);
     } else if (chosen == disableBtn) {
         Preferences::setDbCompression(false);
     }
@@ -3608,13 +3618,13 @@ void MainWindow::onRecompressRequested(const QString& accountId) {
     box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
     box.setDefaultButton(QMessageBox::No);
     if (box.exec() != QMessageBox::Yes) return;
-    startCompressionWorker(accountId, /*Recompress=*/1);
+    startCompressionWorker(accountId,
+        fc::cache::BodyCompressionWorker::Mode::Recompress);
 }
 
-void MainWindow::startCompressionWorker(const QString& accountId,
-                                          int modeInt) {
-    using Mode = fc::cache::BodyCompressionWorker::Mode;
-    const Mode mode = (modeInt == 1) ? Mode::Recompress : Mode::InitialTrain;
+void MainWindow::startCompressionWorker(
+        const QString& accountId,
+        fc::cache::BodyCompressionWorker::Mode mode) {
     auto* w = new fc::cache::BodyCompressionWorker(accountId, mode);
     compressionWorkers_.insert(accountId, w);
     QPointer<MainWindow> self(this);

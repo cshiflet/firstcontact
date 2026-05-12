@@ -130,19 +130,27 @@ public:
     // body+metadata for old messages is purged. Useful for users who
     // want to free disk without losing label structure. Returns the
     // number of deleted message rows.
-    int clearMessagesOlderThan(const QString& id, int days);
+    //
+    // reconcileFts = true (default) rebuilds the FTS5 index after
+    // the delete so search results catch up. Auto-prune passes
+    // false on the per-axis calls and rebuilds once at the end —
+    // saves two redundant full-table rebuilds per messagesUpdated.
+    int clearMessagesOlderThan(const QString& id, int days,
+                                 bool reconcileFts = true);
 
     // Deletes oldest-first messages in the named account until the
     // approximate cache size (cacheSizeFor) drops to `targetBytes`.
     // Returns the number of messages deleted. Useful for the cache
     // manager's "Reduce to <N> MB" action.
-    int clearMessagesToTargetSize(const QString& id, qint64 targetBytes);
+    int clearMessagesToTargetSize(const QString& id, qint64 targetBytes,
+                                    bool reconcileFts = true);
 
     // Deletes oldest-first messages until the total cached message
     // count for `id` drops to `targetCount`. Returns the number of
     // deleted rows. Used by the auto-prune workflow when the user
     // has set a per-account message-count cap.
-    int clearMessagesToTargetCount(const QString& id, int targetCount);
+    int clearMessagesToTargetCount(const QString& id, int targetCount,
+                                     bool reconcileFts = true);
 
     // Runs all three caps in order (age → count → size). A zero
     // value on any axis means "no cap, skip." Cheap when the cache
@@ -259,6 +267,12 @@ signals:
 private:
     void selectInitialCurrent();
     void buildContextsForAllAccounts();
+    // Re-emits every per-account SyncService + OAuthClient signal
+    // through this manager, tagged with `aid`. Called from
+    // buildContextsForAllAccounts (startup) and ensureContext
+    // (Add-account flow) — keeping the forwarding in one helper so
+    // a new per-account signal doesn't need to land in two places.
+    void wireContextForwarding(AccountContext* ctx, const QString& aid);
 
     QList<AccountInfo> accounts_;
     QString            currentId_;

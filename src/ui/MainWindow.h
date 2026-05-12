@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cache/BodyCompressionWorker.h"
 #include "models/Message.h"
 
 #include <QHash>
@@ -136,7 +137,8 @@ private slots:
     // progress, and stash the QPointer in compressionWorkers_ so a
     // duplicate trigger is gated out. Mode controls whether existing
     // compressed rows are also rewritten.
-    void startCompressionWorker(const QString& accountId, int modeInt);
+    void startCompressionWorker(const QString& accountId,
+                                  fc::cache::BodyCompressionWorker::Mode mode);
     // Shift+L — flip Preferences::linkDisplayMode and re-render the
     // active reader content so the change is immediately visible.
     void onToggleLinkDisplay();

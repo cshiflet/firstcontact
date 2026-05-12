@@ -151,12 +151,15 @@ void BodyCompressionWorker::doWork() {
         thread_->quit();
         return;
     }
+    // Capture the count before freeing — saveDictionary needs the
+    // pre-clear size for its sample_count telemetry column. The
+    // previous order had us writing 0 to that column on every run.
+    const int sampleCountForSave = static_cast<int>(samples.size());
     samples.clear();   // free the training corpus before backfill
     samples.shrink_to_fit();
 
     MessageRepository::saveDictionary(accountId_, dict,
-        static_cast<int>(samples.size()),
-        sampleBytesTotal);
+        sampleCountForSave, sampleBytesTotal);
     // saveDictionary refreshes the in-memory cache for this account.
 
     // 3. Backfill. Walk rows in chunked transactions. Filter mode-
