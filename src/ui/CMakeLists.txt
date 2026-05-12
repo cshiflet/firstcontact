@@ -16,6 +16,7 @@ qt_add_library(fc_ui STATIC
     common/Preferences.h common/Preferences.cpp
     common/AccountManagerDialog.h common/AccountManagerDialog.cpp
     common/CacheManagerDialog.h common/CacheManagerDialog.cpp
+    common/CompressionProgressDialog.h common/CompressionProgressDialog.cpp
     common/LabelChooserDialog.h common/LabelChooserDialog.cpp
     common/LabelStyleCache.h common/LabelStyleCache.cpp
     common/SpinningToolButton.h common/SpinningToolButton.cpp

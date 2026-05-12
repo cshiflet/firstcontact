@@ -18,6 +18,7 @@
 #include "cache/PendingOpsRepository.h"
 #include "common/AccountManagerDialog.h"
 #include "common/CacheManagerDialog.h"
+#include "common/CompressionProgressDialog.h"
 #include "common/IconLoader.h"
 #include "common/LabelChooserDialog.h"
 #include "common/LabelStyleCache.h"
@@ -3740,16 +3741,18 @@ void MainWindow::startCompressionWorker(
         fc::cache::BodyCompressionWorker::Mode mode) {
     auto* w = new fc::cache::BodyCompressionWorker(accountId, mode);
     compressionWorkers_.insert(accountId, w);
+
+    // The progress dialog is the user-visible surface: it sits on top
+    // of whatever dialog kicked off the compress (Settings/Storage)
+    // so errors aren't swallowed behind another modal window. Status
+    // bar still gets a single "Started/Done" line for the running
+    // record, but every step also lands in the dialog.
+    auto* dlg = new fc::ui::CompressionProgressDialog(accounts_,
+                                                       accountId, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->attachWorker(w);
+
     QPointer<MainWindow> self(this);
-    connect(w, &fc::cache::BodyCompressionWorker::progress, this,
-            [self, accountId](const QString&, int done, int total) {
-                if (!self) return;
-                if (total > 0) {
-                    self->statusBar()->showMessage(
-                        tr("Compressing database: %1 / %2").arg(done).arg(total),
-                        5000);
-                }
-            });
     connect(w, &fc::cache::BodyCompressionWorker::finished, this,
             [self, accountId](const QString&, int rewroteCount,
                                qint64 savedBytes) {
@@ -3771,8 +3774,10 @@ void MainWindow::startCompressionWorker(
                 self->statusBar()->showMessage(
                     tr("Compression failed: %1").arg(reason), 15000);
             });
+
     w->start();
     statusBar()->showMessage(tr("Starting database compression…"), 5000);
+    dlg->show();
 }
 
 void MainWindow::onToggleLinkDisplay() {
