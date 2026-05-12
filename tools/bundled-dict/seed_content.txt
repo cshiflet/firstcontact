@@ -1,0 +1,423 @@
+--- BUNDLED DICT SEED v1 ---
+This file is fed to ZDICT_finalizeDictionary as the dictContent
+buffer. It becomes the raw content tail of the trained dictionary.
+zstd packs the most-profitable bytes at the end, so high-frequency
+patterns are placed lower in this file. Edits here change the bundled
+dict; bump the bundled-bodies-vN version when content moves.
+
+Section markers below use a `## ` prefix. The trainer strips those
+lines before passing the seed to ZDICT_finalizeDictionary (so the
+markers don't occupy dict slots), and seed_coverage.py uses them to
+group patterns for the coverage report.
+
+## Calendar / iCalendar fragments
+When:
+Where:
+Organizer:
+Required attendees:
+Optional attendees:
+Add to calendar
+Add to Google Calendar
+Add to Outlook
+View on Google Calendar
+You have been invited to:
+This invitation has been updated.
+This event has been cancelled.
+Time zone:
+Conference:
+Join with Google Meet
+Join with Zoom
+Join with Microsoft Teams
+Meeting ID:
+Passcode:
+Dial in:
+RSVP
+Yes, I'll attend.
+No, I won't attend.
+Maybe.
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:
+BEGIN:VEVENT
+END:VEVENT
+END:VCALENDAR
+
+## Account security / authentication
+We noticed a new sign-in to your account.
+We detected unusual activity on your account.
+Two-factor authentication
+Reset your password
+Verify your email address
+Confirm your email address
+Click the button below to verify your email
+If you did not request this, you can safely ignore this email.
+If you did not make this request, please contact us immediately.
+This link will expire in 24 hours.
+This link will expire in 1 hour.
+For your security, this link can only be used once.
+Your verification code is:
+Your one-time password is:
+Two-step verification code:
+Do not share this code with anyone.
+We will never ask you for your password.
+Your password has been changed.
+Your account has been updated.
+A new device has signed in to your account.
+Sign-in attempt from a new location
+Was this you?
+Yes, this was me.
+No, secure my account.
+
+## Transactional commerce
+Your order has been received.
+Thank you for your order!
+Order confirmation
+Order #
+Order number:
+Order date:
+Order total:
+Subtotal:
+Shipping:
+Tax:
+Discount:
+Grand total:
+Estimated total:
+Items in this order:
+Quantity:
+Price:
+Unit price:
+SKU:
+Order status:
+Pending
+Processing
+Shipped
+Delivered
+Cancelled
+Refunded
+Your refund has been processed.
+A refund of
+has been credited to your original payment method.
+Please allow 5-10 business days for the refund to appear.
+Your receipt
+Receipt for your order
+Payment method:
+Visa ending in
+Mastercard ending in
+American Express ending in
+Discover ending in
+PayPal
+Apple Pay
+Google Pay
+
+## Shipping notifications
+Your package has shipped!
+Your order has shipped.
+Your order is on its way.
+Your shipment is on the way.
+Tracking number:
+Tracking number: 1Z
+UPS Tracking Number: 1Z
+USPS Tracking #:
+USPS Informed Delivery
+FedEx tracking number:
+DHL Express tracking number:
+Carrier:
+USPS
+UPS
+FedEx
+DHL
+OnTrac
+Lasership
+Estimated delivery:
+Estimated delivery date:
+Expected delivery:
+Delivery window:
+Track your package
+Track shipment
+View shipment details
+Ship to:
+Shipping address:
+Billing address:
+Same as shipping
+Out for delivery
+Delivered
+A package addressed to you is arriving today.
+Your package is arriving today.
+Your package was delivered.
+Your package was delivered at the front door.
+Your package was delivered to:
+Could not be delivered
+Delivery exception
+Held at facility
+Awaiting carrier pickup
+Label created
+
+## Newsletter / marketing chrome (high-frequency)
+View this email in your browser
+View in browser
+View as a webpage
+View online
+Trouble viewing this email?
+Forward to a friend
+Forward this email
+Share on Facebook
+Share on Twitter
+Share on LinkedIn
+Update your preferences
+Update your email preferences
+Manage subscriptions
+Manage your subscription
+Manage your email preferences
+You are receiving this email because
+You are receiving this because you signed up at
+You are receiving this email because you subscribed to
+You received this email because
+Unsubscribe
+Unsubscribe from this list
+Unsubscribe from all emails
+Click here to unsubscribe
+If you no longer want to receive these emails
+If you would like to stop receiving these emails
+Privacy Policy
+Terms of Service
+Contact us
+Customer support
+Copyright ©
+All rights reserved.
+
+## Mail-client and reply chrome
+Sent from my iPhone
+Sent from my iPad
+Sent from my Android
+Sent from Mail for Windows
+Get Outlook for iOS
+Get Outlook for Android
+Sent from BlackBerry
+Sent from Yahoo Mail on Android
+Sent from my Galaxy
+
+## Quoted reply structure
+On Mon,
+On Tue,
+On Wed,
+On Thu,
+On Fri,
+On Sat,
+On Sun,
+On Mon, Jan
+On Tue, Feb
+On Wed, Mar
+On Thu, Apr
+On Fri, May
+On Sat, Jun
+On Sun, Jul
+On Mon, Aug
+On Tue, Sep
+On Wed, Oct
+On Thu, Nov
+On Fri, Dec
+at 9:00 AM,
+at 10:00 AM,
+at 11:00 AM,
+at 12:00 PM,
+at 1:00 PM,
+at 2:00 PM,
+at 3:00 PM,
+at 4:00 PM,
+at 5:00 PM,
+ wrote:
+ wrote:>
+> wrote:
+---------- Forwarded message ---------
+---------- Forwarded message ----------
+Begin forwarded message:
+From:
+Date:
+Subject:
+To:
+Cc:
+Reply-To:
+-----Original Message-----
+
+## GitHub notification chrome
+You can view, comment on, or merge this pull request online at:
+Reply to this email directly, view it on GitHub, or unsubscribe.
+You are receiving this because you were mentioned.
+You are receiving this because you authored the thread.
+You are receiving this because you are subscribed to this thread.
+view it on GitHub
+Triage notifications on the go with GitHub Mobile for iOS or Android.
+Message ID: <
+Reply to this email directly or view it on GitHub:
+
+## MIME content fragments (sometimes appear in body text)
+Content-Type: text/plain; charset="UTF-8"
+Content-Type: text/plain; charset=UTF-8
+Content-Type: text/html; charset="UTF-8"
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Content-Transfer-Encoding: base64
+Content-Transfer-Encoding: 7bit
+Content-Transfer-Encoding: 8bit
+Content-Disposition: inline
+Content-Disposition: attachment; filename=
+boundary="
+multipart/alternative;
+multipart/mixed;
+multipart/related;
+MIME-Version: 1.0
+=?UTF-8?Q?
+=?UTF-8?B?
+=?utf-8?q?
+=?utf-8?b?
+?=
+
+## ESP wrapper classes and table chrome (very high frequency in HTML mail)
+class="mceContentBody"
+class="mc_email_text"
+class="mcnTextContent"
+class="mcnButton"
+class="mcnDivider"
+class="mcnImage"
+class="mcnButtonContentContainer"
+class="bodyContent"
+class="email-body"
+class="email-container"
+class="email-wrapper"
+class="email-content"
+class="email-footer"
+class="email-header"
+class="email-section"
+class="header"
+class="footer"
+class="container"
+class="content"
+class="button"
+class="cta"
+class="btn"
+data-style-customizations
+data-block-id="
+data-mc-edit="
+data-emergence="
+data-link-id="
+sendgrid.com
+mailchimp.com
+constantcontact.com
+campaign-archive
+list-manage.com
+
+## Common HTML email preamble (very high frequency)
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta charset="UTF-8">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="format-detection" content="telephone=no">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>
+</title>
+</head>
+<body>
+</body>
+</html>
+
+## Style and inline-table boilerplate (extremely high frequency in HTML mail)
+style="margin:0; padding:0;"
+style="margin:0;padding:0;"
+style="background-color: #ffffff;"
+style="background-color:#ffffff"
+style="background:#ffffff"
+style="font-family: Arial, Helvetica, sans-serif;"
+style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;"
+style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;"
+style="font-size: 14px; line-height: 1.5; color: #333333;"
+style="font-size: 16px; line-height: 24px; color: #333333;"
+style="color: #ffffff; text-decoration: none;"
+style="color: #000000; text-decoration: none;"
+style="text-align: center;"
+style="text-align: left;"
+style="border-collapse: collapse;"
+style="border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;"
+style="width: 100%; max-width: 600px;"
+style="display: block; width: 100%;"
+style="padding: 20px;"
+style="padding: 0 20px;"
+style="padding-top: 20px; padding-bottom: 20px;"
+<table cellpadding="0" cellspacing="0" border="0" align="center" width="100%">
+<table cellpadding="0" cellspacing="0" border="0" align="center" width="600">
+<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse: collapse;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<table border="0" cellpadding="0" cellspacing="0">
+<tr><td>
+</td></tr>
+<tr><td align="center">
+<tr><td style="padding:0;">
+<td valign="top">
+<td valign="middle">
+<td align="center" valign="top">
+<a href="https://" style="color: #
+<a href="https://www.
+<a href="http://
+<a target="_blank" href="
+<img src="https://" alt="" width="
+<img src="https://" alt="" border="0" style="display:block;"
+<img src="https://" width="1" height="1" border="0" alt="" style="height:1px!important;width:1px!important;border-width:0!important;margin:0!important;padding:0!important;display:block;" />
+<img src="https://" width="1" height="1" alt="" border="0" />
+<br>
+<br />
+&nbsp;
+&copy;
+&reg;
+&mdash;
+&ndash;
+&hellip;
+&rsquo;
+&lsquo;
+&ldquo;
+&rdquo;
+&amp;
+&lt;
+&gt;
+&quot;
+&#39;
+
+## Universal closers (placed last for maximum back-reference reuse)
+. Thanks,
+. Best,
+. Best regards,
+. Regards,
+. Cheers,
+. Thanks!
+. Thanks!\n
+. Thanks in advance,
+. Best,\n
+. Cheers,\n
+. Regards,\n
+. Sincerely,
+. Sincerely,\n
+. Talk soon,
+. Take care,
+Best,\n
+Regards,\n
+Cheers,\n
+Thanks,\n
+Thank you,
+Thank you for your business.
+Thank you for choosing
+Thank you for being a customer.
+Please do not reply to this email.
+This is an automated message.
+This is an automated email — please do not reply.
+Replies to this email are not monitored.
+Need help? Visit our help center at
+Need help? Contact us at
+If you have any questions, reply to this email or contact us at

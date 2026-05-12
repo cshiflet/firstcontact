@@ -1,0 +1,27 @@
+# Newsletter RSS/Atom feed URLs for the bundled-dict trainer to fetch.
+# One URL per line. # comments allowed. Blank lines ignored.
+#
+# Politeness: fetch_newsletters.py uses a 2-second delay between
+# requests, identifies with a clear User-Agent, and checks robots.txt
+# before each fetch. Per-feed post count is capped at
+# --max-posts-per-feed (default 15) to keep the footprint small.
+#
+# The defaults below are platform-official blogs and well-known free
+# tech newsletters — chosen for stability, free public access, and
+# welcoming programmatic consumption (they all advertise their feeds
+# publicly). Add or replace as you like; the only requirement is that
+# the URL returns an RSS 2.0 or Atom feed whose items contain HTML
+# bodies in <content:encoded> or <atom:content>.
+#
+# Don't add feeds whose terms forbid this kind of use — the trained
+# dict is statistical, but the politeness norms still apply.
+
+# Newsletter platform blogs (very stable, meta about newsletters → realistic chrome)
+https://on.substack.com/feed
+https://blog.beehiiv.com/rss.xml
+https://buttondown.com/blog/rss
+
+# Open-source / engineering blogs that publish like newsletters
+https://blog.cloudflare.com/rss/
+https://github.blog/feed/
+https://stackoverflow.blog/feed/

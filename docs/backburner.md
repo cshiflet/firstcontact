@@ -117,3 +117,80 @@ in the threadlist for bulk operations.
 **Trigger to revisit:** when triage-heavy use cases come up, or
 once the multi-select UI is wanted for any other reason (e.g.,
 "select all flagged → mark read").
+
+## Per-account dict training: seed with bundled dict's content tail
+
+**Status:** noted, deferred until after the bundled-dict pipeline
+ships.
+
+**Idea:** `BodyCompressionWorker` currently calls
+`ZDICT_trainFromBuffer` with no seed. Once the bundled dict
+(`:/compression/bundled-bodies-v1.zdict`) is in place, switch
+the worker to `ZDICT_finalizeDictionary` and pass two things as
+`dictContent`:
+
+1. The bundled dict's raw content tail (skip past the header via
+   `ZDICT_getDictHeaderSize`), so universal email patterns
+   carry forward.
+2. Optionally the same `seed_content.txt` we use for the
+   bundled dict, so hand-curated boilerplate stays guaranteed.
+
+Then run training over the user's mailbox samples to drive the
+entropy tables.
+
+**Why it's interesting:**
+- Small / brand-new mailboxes (a few hundred messages) can't
+  produce a meaningful dict from scratch; seeded training gives
+  them a floor that's at least as good as the bundled dict.
+- Universal patterns (HTML preamble, quoted-reply prefixes, ESP
+  chrome) are guaranteed coverage regardless of what landed in
+  the random sample.
+- No compression-time complexity: still one dict per frame.
+
+**What would it cost:**
+- Swap `trainFromBuffer` → `finalizeDictionary` in
+  `BodyCompressionWorker::doWork`.
+- Load the bundled dict resource (already cached in
+  `MessageRepository::dictionaryFor` fallback path), strip
+  its header bytes, pass as `dictContent`.
+- Pick a per-account `dictID` distinct from the bundled
+  `0x46430001` — e.g., `0x46438000 | accountSerial` so future
+  frame-header routing can tell them apart. (Schema already
+  pins dict to account by primary key, so this is only needed
+  if/when we add hybrid-cache support.)
+- Maybe 50 lines plus tests.
+
+**Trigger to revisit:** as soon as the bundled dict has shipped
+and we touch `BodyCompressionWorker` again.
+
+## Hybrid dict cache via per-frame dictID routing
+
+**Status:** pinned as an idea, complexity not currently justified.
+
+**Idea:** zstd writes the `dictID` into every frame header, and
+`ZSTD_getDictID_fromFrame` lets you read it before decompression.
+That makes it possible to maintain a pool of dicts (bundled +
+per-account) in memory and route each row to the right dict at
+decompress time. With per-account dicts assigned distinct IDs,
+you could compress new rows with the per-account dict the moment
+training finishes — without rewriting the existing bundled-
+compressed rows.
+
+**Why it's interesting:**
+- Avoids the full-cache `VACUUM`+rewrite that `Mode::Recompress`
+  currently does after per-account training. On a multi-GB
+  cache that's the longest step in the pipeline.
+- Opens the door to per-label or per-sender specialized dicts
+  if we ever wanted finer-grained compression tuning.
+
+**Why it's deferred:**
+- Real benefit is "skip a one-time rewrite", and the current
+  rewrite already runs in the background.
+- Adds dict-pool plumbing (lookup by ID, eviction, memory
+  accounting) and complicates the read path.
+- Cost/benefit doesn't pencil out today; only revisit if cache
+  rewrites become a UX problem.
+
+**Trigger to revisit:** if users complain about the
+`Recompress` backfill duration, or if a feature wants
+per-sender / per-label dicts.

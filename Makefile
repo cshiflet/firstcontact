@@ -38,6 +38,8 @@ CMAKE_FLAGS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
         setup setup-ubuntu setup-fedora setup-arch tools \
         configure build run smoke test \
         release-config release install appimage \
+        bundled-dict bundled-dict-fetch bundled-dict-newsletters \
+        bundled-dict-extract bundled-dict-train bundled-dict-coverage \
         clean distclean format
 
 # ---- Help -----------------------------------------------------------------
@@ -172,13 +174,58 @@ appimage: install tools ## Build the portable AppImage (single executable file).
 	  echo "→ Built $(APPIMAGE)" && \
 	  echo "  Run: ./$(APPIMAGE)"
 
+# ---- Bundled body-compression dictionary ----------------------------------
+# Trains the shared zstd dictionary at
+# resources/compression/bundled-bodies-v1.zdict from public email
+# corpora. See tools/bundled-dict/README.md for the corpus list,
+# licensing, and the per-account training follow-on roadmap.
+
+BUNDLED_DICT_DIR  := tools/bundled-dict
+BUNDLED_DICT_BUILD := build-bundled-dict
+BUNDLED_DICT_OUT  := resources/compression/bundled-bodies-v1.zdict
+
+bundled-dict-fetch: ## Download public corpora into tools/bundled-dict/corpus-cache/.
+	$(BUNDLED_DICT_DIR)/fetch_corpus.sh
+
+bundled-dict-newsletters: ## Opt-in: fetch modern newsletter web mirrors via RSS (politeness rules in the script).
+	python3 $(BUNDLED_DICT_DIR)/fetch_newsletters.py --verbose
+
+bundled-dict-extract: ## Decode MIME → tools/bundled-dict/samples/.
+	python3 $(BUNDLED_DICT_DIR)/extract_samples.py --verbose
+
+bundled-dict-coverage: ## Audit seed_content.txt — show per-pattern hit rate against samples.
+	python3 $(BUNDLED_DICT_DIR)/seed_coverage.py
+
+bundled-dict-train: ## Build trainer + write bundled-bodies-v1.zdict (sweep sizes).
+	cmake -S . -B $(BUNDLED_DICT_BUILD) -G $(GENERATOR) \
+	    -DCMAKE_BUILD_TYPE=Release \
+	    -DBUILD_BUNDLED_DICT_TRAINER=ON \
+	    -DFC_BUILD_TESTS=OFF
+	cmake --build $(BUNDLED_DICT_BUILD) --target train_bundled_dict
+	$(BUNDLED_DICT_BUILD)/tools/bundled-dict/train_bundled_dict \
+	    --samples-dir $(BUNDLED_DICT_DIR)/samples \
+	    --seed       $(BUNDLED_DICT_DIR)/seed_content.txt \
+	    --out        $(BUNDLED_DICT_OUT) \
+	    --dict-id    0x46430001 \
+	    --level      3 \
+	    --sweep \
+	    --verbose
+
+bundled-dict: bundled-dict-fetch bundled-dict-extract bundled-dict-train ## End-to-end: fetch → extract → train.
+	@echo
+	@ls -lh $(BUNDLED_DICT_OUT) 2>/dev/null && \
+	  echo "→ Wrote $(BUNDLED_DICT_OUT)"
+
 # ---- Cleanup --------------------------------------------------------------
 
 clean: ## Delete $(BUILD_DIR).
 	rm -rf $(BUILD_DIR)
 
-distclean: clean ## Delete every build artifact: $(BUILD_DIR), $(RELEASE_DIR), AppDir, *.AppImage.
-	rm -rf $(RELEASE_DIR) AppDir *.AppImage
+distclean: clean ## Delete every build artifact: $(BUILD_DIR), $(RELEASE_DIR), AppDir, *.AppImage, bundled-dict build/cache.
+	rm -rf $(RELEASE_DIR) AppDir *.AppImage \
+	       $(BUNDLED_DICT_BUILD) \
+	       $(BUNDLED_DICT_DIR)/corpus-cache \
+	       $(BUNDLED_DICT_DIR)/samples
 
 format: ## Run clang-format over src/ and tests/ in place (no-op if clang-format missing).
 	@command -v clang-format >/dev/null 2>&1 || { \

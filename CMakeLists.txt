@@ -15,8 +15,9 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-option(FC_BUILD_TESTS      "Build unit and integration tests"                    ON)
-option(FC_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds"                  OFF)
+option(FC_BUILD_TESTS              "Build unit and integration tests"            ON)
+option(FC_ENABLE_SANITIZERS        "Enable ASan/UBSan in Debug builds"           OFF)
+option(BUILD_BUNDLED_DICT_TRAINER  "Build tools/bundled-dict/train_bundled_dict" OFF)
 
 include(CompilerWarnings)
 include(Sanitizers)
@@ -34,6 +35,10 @@ add_subdirectory(src)
 if(FC_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(BUILD_BUNDLED_DICT_TRAINER)
+    add_subdirectory(tools/bundled-dict)
 endif()
 
 include(Packaging)
