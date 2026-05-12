@@ -16,6 +16,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QObject>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QtTest>
@@ -27,6 +28,10 @@ private slots:
         QStandardPaths::setTestModeEnabled(true);
         QCoreApplication::setOrganizationName(QStringLiteral("FirstContactTest"));
         QCoreApplication::setApplicationName(QStringLiteral("FirstContactTest"));
+        // Test mode redirects QSettings into a persistent temp area;
+        // wipe any state leaked in from a prior run so the QSettings-
+        // backed accounts mirror doesn't rehydrate stale entries.
+        { QSettings s; s.clear(); s.sync(); }
         QFile::remove(fc::cache::Database::filePath());
         fc::cache::Database::initialize();
     }

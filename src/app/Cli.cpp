@@ -4,9 +4,11 @@
 #include "cache/BodyCompressionWorker.h"
 #include "cache/Database.h"
 #include "cache/MessageRepository.h"
+#include "util/Format.h"
 
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QFile>
 #include <QLocale>
 #include <QPointer>
 
@@ -19,6 +21,7 @@ namespace {
 constexpr const char* kCmdDbStats     = "db-stats";
 constexpr const char* kCmdClearCache  = "clear-cache";
 constexpr const char* kCmdCompressDb  = "compress-db";
+constexpr const char* kCmdResetDb     = "reset-db";
 
 void printHelp() {
     std::printf(
@@ -44,19 +47,21 @@ void printHelp() {
         "      new dict. Slow, memory-frugal, single-threaded.\n"
         "      No argument = every signed-in account, sequentially.\n"
         "\n"
+        "  reset-db\n"
+        "      Delete the cache database file (and its -wal / -shm\n"
+        "      sidecars), recreate the schema fresh, and rehydrate the\n"
+        "      accounts table from the QSettings mirror at\n"
+        "      ~/.config/FirstContact/FirstContact.conf. Account UUIDs\n"
+        "      survive verbatim, so QtKeychain tokens keyed by them\n"
+        "      stay reachable — accounts remain signed in and re-sync\n"
+        "      on the next launch. Use this after a schema-version\n"
+        "      mismatch or to recover from a corrupted cache.\n"
+        "\n"
         "  help | --help | -h\n"
         "      Print this help text.\n");
 }
 
-QString humanBytes(qint64 b) {
-    if (b < 1024) return QStringLiteral("%1 B").arg(b);
-    double v = b / 1024.0;
-    if (v < 1024.0) return QStringLiteral("%1 KB").arg(v, 0, 'f', 1);
-    v /= 1024.0;
-    if (v < 1024.0) return QStringLiteral("%1 MB").arg(v, 0, 'f', 1);
-    v /= 1024.0;
-    return QStringLiteral("%1 GB").arg(v, 0, 'f', 2);
-}
+using fc::util::humanBytes;
 
 // Resolve `email-or-id` to an accounts row, or return an empty AccountInfo
 // when the target isn't found. Empty input → first signed-in account
@@ -232,6 +237,47 @@ int runCompressDb(fc::account::AccountManager& accounts,
     return exitCode;
 }
 
+// reset-db — wipe cached message/thread/label data while preserving
+// the accounts list (and therefore the QtKeychain tokens keyed by
+// account_id). The accounts mirror in QSettings (~/.config/...) is
+// the source of truth across wipes; AccountManager rehydrates from
+// it automatically the next time the DB is opened empty.
+int runResetDb() {
+    const QString dbPath = fc::cache::Database::filePath();
+    const QStringList paths = {
+        dbPath,
+        dbPath + QStringLiteral("-wal"),
+        dbPath + QStringLiteral("-shm"),
+    };
+    bool anyExisted = false;
+    for (const QString& p : paths) {
+        QFile f(p);
+        if (!f.exists()) continue;
+        anyExisted = true;
+        if (!f.remove()) {
+            std::printf("reset-db: failed to remove %s: %s\n",
+                         qUtf8Printable(p),
+                         qUtf8Printable(f.errorString()));
+            return 1;
+        }
+        std::printf("reset-db: removed %s\n", qUtf8Printable(p));
+    }
+    if (!anyExisted) {
+        std::printf("reset-db: nothing to remove (cache.db not present).\n");
+    }
+
+    // Initialize a fresh schema and let AccountManager's reload()
+    // rehydrate accounts from the QSettings mirror. Constructing the
+    // AccountManager is enough — its constructor calls reload(), and
+    // reload() handles the rehydration + re-mirror cycle.
+    fc::account::AccountManager accounts;
+    std::printf("reset-db: done. %d account(s) preserved; tokens in "
+                "QtKeychain remain reachable. Next launch re-syncs "
+                "from scratch.\n",
+                int(accounts.accounts().size()));
+    return 0;
+}
+
 }  // namespace
 
 bool argsLookLikeCliSubcommand(int argc, char** argv) {
@@ -240,6 +286,7 @@ bool argsLookLikeCliSubcommand(int argc, char** argv) {
     return a1 == kCmdDbStats
         || a1 == kCmdClearCache
         || a1 == kCmdCompressDb
+        || a1 == kCmdResetDb
         || a1 == "help" || a1 == "--help" || a1 == "-h";
 }
 
@@ -253,11 +300,17 @@ int tryRunCli(int argc, char** argv, const QStringList& args) {
         return 0;
     }
 
-    if (cmd != kCmdDbStats && cmd != kCmdClearCache && cmd != kCmdCompressDb) {
+    if (cmd != kCmdDbStats && cmd != kCmdClearCache
+        && cmd != kCmdCompressDb && cmd != kCmdResetDb) {
         return -1;
     }
 
-    // SQLite + migrations. Database::initialize is idempotent and
+    // reset-db deletes the DB file, so it must run BEFORE
+    // Database::initialize() (which would qFatal on a stale
+    // schema_version before we get a chance to clear anything).
+    if (cmd == kCmdResetDb) return runResetDb();
+
+    // SQLite + schema init. Database::initialize is idempotent and
     // safe to call from the main thread of a QCoreApplication-based
     // process.
     fc::cache::Database::initialize();

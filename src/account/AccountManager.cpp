@@ -11,6 +11,11 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QSettings>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -21,8 +26,58 @@ namespace fc::account {
 
 namespace {
 
+constexpr char kAccountsMirrorKey[] = "accounts/mirror";
+
 QString mintAccountId() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+// Read the QSettings-backed account mirror. The mirror lets accounts
+// survive a cache.db wipe (CLI `reset-db`, manual file delete, fresh
+// install with leftover keychain entries, etc.) — QtKeychain tokens
+// are keyed by account_id, so as long as the id list persists, the
+// tokens stay reachable.
+QList<AccountInfo> readAccountsFromConfig() {
+    QSettings s;
+    const QString raw = s.value(QLatin1String(kAccountsMirrorKey)).toString();
+    if (raw.isEmpty()) return {};
+    const auto doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (!doc.isArray()) return {};
+    QList<AccountInfo> out;
+    for (const auto& v : doc.array()) {
+        const auto o = v.toObject();
+        AccountInfo a;
+        a.id          = o.value(QStringLiteral("id")).toString();
+        a.email       = o.value(QStringLiteral("email")).toString();
+        a.displayName = o.value(QStringLiteral("displayName")).toString();
+        a.colorHint   = o.value(QStringLiteral("colorHint")).toString();
+        a.sortOrder   = o.value(QStringLiteral("sortOrder")).toInt();
+        a.createdAt   = qint64(o.value(QStringLiteral("createdAt")).toDouble());
+        a.lastUsedAt  = qint64(o.value(QStringLiteral("lastUsedAt")).toDouble());
+        a.isDefault   = o.value(QStringLiteral("isDefault")).toBool();
+        if (a.id.isEmpty() || a.email.isEmpty()) continue;
+        out.append(std::move(a));
+    }
+    return out;
+}
+
+void writeAccountsToConfig(const QList<AccountInfo>& accounts) {
+    QJsonArray arr;
+    for (const auto& a : accounts) {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"),          a.id);
+        o.insert(QStringLiteral("email"),       a.email);
+        o.insert(QStringLiteral("displayName"), a.displayName);
+        o.insert(QStringLiteral("colorHint"),   a.colorHint);
+        o.insert(QStringLiteral("sortOrder"),   a.sortOrder);
+        o.insert(QStringLiteral("createdAt"),   double(a.createdAt));
+        o.insert(QStringLiteral("lastUsedAt"),  double(a.lastUsedAt));
+        o.insert(QStringLiteral("isDefault"),   a.isDefault);
+        arr.append(o);
+    }
+    QSettings s;
+    s.setValue(QLatin1String(kAccountsMirrorKey),
+                QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
 }
 
 }  // namespace
@@ -148,27 +203,74 @@ AccountContext* AccountManager::ensureContext(const QString& id) {
 void AccountManager::reload() {
     auto db = fc::cache::databaseHandle();
     accounts_.clear();
-    QSqlQuery q(db);
-    if (!q.exec(QStringLiteral(
-            "SELECT id, email, display_name, color_hint, sort_order, "
-            "       created_at, last_used_at, is_default "
-            "FROM accounts ORDER BY sort_order, email"))) {
-        qWarning("AccountManager::reload: %s",
-                 qUtf8Printable(q.lastError().text()));
-        return;
+
+    auto selectAccounts = [&]() -> bool {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral(
+                "SELECT id, email, display_name, color_hint, sort_order, "
+                "       created_at, last_used_at, is_default "
+                "FROM accounts ORDER BY sort_order, email"))) {
+            qWarning("AccountManager::reload: %s",
+                     qUtf8Printable(q.lastError().text()));
+            return false;
+        }
+        accounts_.clear();
+        while (q.next()) {
+            AccountInfo a;
+            a.id          = q.value(0).toString();
+            a.email       = q.value(1).toString();
+            a.displayName = q.value(2).toString();
+            a.colorHint   = q.value(3).toString();
+            a.sortOrder   = q.value(4).toInt();
+            a.createdAt   = q.value(5).toLongLong();
+            a.lastUsedAt  = q.value(6).toLongLong();
+            a.isDefault   = q.value(7).toInt() != 0;
+            accounts_.append(std::move(a));
+        }
+        return true;
+    };
+
+    if (!selectAccounts()) return;
+
+    // Rehydrate from QSettings if the DB has no accounts but the
+    // mirror does — happens right after `firstcontact reset-db` (or
+    // any out-of-band cache.db wipe). Preserves QtKeychain linkage:
+    // tokens are keyed by account_id, so as long as the id round-
+    // trips, the tokens are reachable.
+    if (accounts_.isEmpty()) {
+        const auto saved = readAccountsFromConfig();
+        if (!saved.isEmpty()) {
+            QSqlQuery ins(db);
+            ins.prepare(QStringLiteral(
+                "INSERT OR IGNORE INTO accounts("
+                "  id, email, display_name, color_hint, sort_order, "
+                "  created_at, last_used_at, is_default) "
+                "VALUES(:id, :em, :dn, :ch, :so, :ca, :lu, :df)"));
+            for (const auto& a : saved) {
+                ins.bindValue(QStringLiteral(":id"), a.id);
+                ins.bindValue(QStringLiteral(":em"), a.email);
+                ins.bindValue(QStringLiteral(":dn"), a.displayName);
+                ins.bindValue(QStringLiteral(":ch"), a.colorHint);
+                ins.bindValue(QStringLiteral(":so"), a.sortOrder);
+                ins.bindValue(QStringLiteral(":ca"), a.createdAt);
+                ins.bindValue(QStringLiteral(":lu"), a.lastUsedAt);
+                ins.bindValue(QStringLiteral(":df"), a.isDefault ? 1 : 0);
+                if (!ins.exec()) {
+                    qWarning("AccountManager::reload rehydrate(%s): %s",
+                             qUtf8Printable(a.email),
+                             qUtf8Printable(ins.lastError().text()));
+                }
+            }
+            selectAccounts();   // re-read after the inserts
+            qInfo("AccountManager::reload: rehydrated %d account(s) "
+                  "from QSettings mirror.", int(accounts_.size()));
+        }
     }
-    while (q.next()) {
-        AccountInfo a;
-        a.id          = q.value(0).toString();
-        a.email       = q.value(1).toString();
-        a.displayName = q.value(2).toString();
-        a.colorHint   = q.value(3).toString();
-        a.sortOrder   = q.value(4).toInt();
-        a.createdAt   = q.value(5).toLongLong();
-        a.lastUsedAt  = q.value(6).toLongLong();
-        a.isDefault   = q.value(7).toInt() != 0;
-        accounts_.append(std::move(a));
-    }
+
+    // Write the current authoritative list back to the mirror so the
+    // file in ~/.config tracks add / remove / setDefault / etc.
+    writeAccountsToConfig(accounts_);
+
     emit accountsChanged();
 }
 
@@ -325,15 +427,20 @@ bool AccountManager::dropCache(const QString& id) {
     // composite-FK enforcement (foreign_keys = ON in Database::initialize)
     // doesn't reject any individual statement.
     const QStringList stmts = {
-        QStringLiteral("DELETE FROM message_labels WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM attachments    WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM messages       WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM threads        WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM labels         WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM drafts         WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM outbox         WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM pending_ops    WHERE account_id = :a"),
-        QStringLiteral("DELETE FROM account_meta   WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM message_labels        WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM attachments           WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM messages              WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM threads               WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM labels                WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM drafts                WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM outbox                WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM pending_ops           WHERE account_id = :a"),
+        QStringLiteral("DELETE FROM account_meta          WHERE account_id = :a"),
+        // The trained compression dictionary is bound to the bodies
+        // it learned from — wiping the bodies invalidates the dict.
+        // (The 0008 schema comment intended this to cascade on
+        // account removal; for dropCache we drop it explicitly.)
+        QStringLiteral("DELETE FROM body_compression_dict WHERE account_id = :a"),
     };
     for (const auto& sql : stmts) {
         QSqlQuery q(db);
