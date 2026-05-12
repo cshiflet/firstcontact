@@ -161,6 +161,38 @@ public:
     static void setMessagePageSize(int n);
 
     // ----------------------------------------------------------------
+    // Low-bandwidth mode (meta-first sync)
+    //
+    // When true, SyncService fetches metadata only during initial sync
+    // and label top-up — bodies arrive on demand the first time the
+    // user opens each message. Default off; users who hate the "first
+    // open is slow" feel keep the eager-body behaviour. Read by both
+    // SyncService (to choose between batched metadata fetch and the
+    // legacy serial-getMessage path) and the reader (which only
+    // triggers the on-demand fetch when this is on).
+    static bool lowBandwidthMode();
+    static void setLowBandwidthMode(bool on);
+
+    // ----------------------------------------------------------------
+    // Background crawler — opt-in slow walk of every label
+    //
+    // backgroundCrawl: master toggle. Default off. When on, the sync
+    // service runs a periodic "fill the cache slowly" tick: each
+    // tick top-ups one un-exhausted label by exactly one page. Walks
+    // are gated on the existing busy / user-triggered cacheLabelTarget
+    // state so they never race with foreground sync.
+    //
+    // backgroundCrawlIntervalSec: spacing between ticks. 5s default,
+    // clamped to >= 1s. Higher values trade fill speed for less
+    // network/CPU activity. Reset crawl progress (settings button)
+    // clears the per-label exhausted flags so the next round revisits
+    // labels that have already been walked end-to-end.
+    static bool backgroundCrawl();
+    static void setBackgroundCrawl(bool on);
+    static int  backgroundCrawlIntervalSec();
+    static void setBackgroundCrawlIntervalSec(int seconds);
+
+    // ----------------------------------------------------------------
     // Database compression preferences
     //
     // dbCompression: master toggle. Default on. Writes/reads still

@@ -186,6 +186,7 @@ fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     m.isStarred       = q.value(QStringLiteral("is_starred")).toBool();
     m.isImportant     = q.value(QStringLiteral("is_important")).toBool();
     m.hasAttachment   = q.value(QStringLiteral("has_attachment")).toBool();
+    m.fetchedFormat   = q.value(QStringLiteral("fetched_format")).toString();
     return m;
 }
 

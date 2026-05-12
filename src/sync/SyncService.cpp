@@ -5,11 +5,17 @@
 #include "cache/LabelRepository.h"
 #include "cache/MessageRepository.h"
 #include "cache/MetaRepository.h"
+#include "cache/Migrations.h"   // for fc::cache::databaseHandle()
 #include "util/PageSizePref.h"
 
 #include <QPointer>
 #include <QSet>
+#include <QSettings>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 namespace fc::sync {
@@ -18,6 +24,7 @@ namespace {
 
 constexpr int kInitialPerLabelCap = 200;       // first-run pages cap
 constexpr int kSerialGetBatch     = 25;        // concurrent in-flight gets
+constexpr int kBatchChunkSize     = 50;        // Gmail /batch sub-requests per chunk
 
 // Folders to seed on first sync.
 const QStringList& seedLabels() {
@@ -30,11 +37,29 @@ const QStringList& seedLabels() {
     return ls;
 }
 
+// QSettings-backed read of the low-bandwidth-mode preference. The pref
+// is defined in fc::ui::Preferences, but fc_sync sits below fc_ui in
+// the link graph, so we read the underlying QSettings key directly.
+// Key must stay in sync with Preferences::kLowBandwidthKey.
+bool lowBandwidthModeEnabled() {
+    QSettings s;
+    return s.value(QStringLiteral("sync/lowBandwidthMode"), false).toBool();
+}
+
+// Per-account, per-label "we've walked this label end-to-end at least
+// once" flag. Lives in account_meta so dropCache resets it. Key shape
+// matches what topUpTokenKey uses; the crawler skips labels whose
+// flag is "1".
+QString crawlExhaustedKey(const QString& labelId) {
+    return QStringLiteral("labelCrawl/%1/exhausted").arg(labelId);
+}
+
 }  // namespace
 
 struct SyncService::Impl {
     fc::api::GmailClient* gmail = nullptr;
     QTimer* timer = nullptr;
+    QTimer* crawlTimer = nullptr;
     State state = State::Idle;
     QString lastError;
     bool busy = false;
@@ -477,7 +502,8 @@ void SyncService::topUpLabelStep(const QString& labelId,
 void SyncService::fetchAndStoreMessages(const QStringList& ids,
                                         int newCount,
                                         bool isInitial,
-                                        std::function<void()> done) {
+                                        std::function<void()> done,
+                                        const QString& bodyFormat) {
     if (ids.isEmpty()) {
         d_->busy = false;
         setState(State::Idle);
@@ -486,6 +512,16 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
         return;
     }
 
+    // Resolve the effective body format. An explicit caller-supplied
+    // value wins; otherwise we honour the low-bandwidth pref. The
+    // metadata path uses /batch (one HTTP round-trip per chunk) and
+    // produces rows with empty body_text / body_html — bodies arrive
+    // later via fetchBodyOnDemand when the user opens a message.
+    const QString fmt = bodyFormat.isEmpty()
+        ? (lowBandwidthModeEnabled() ? QStringLiteral("metadata")
+                                      : QStringLiteral("full"))
+        : bodyFormat;
+
     // QPointer guard threaded through every async callback so a
     // SyncService destroyed mid-flight (shutdown, sign-out) doesn't
     // dereference a dead `d_->gmail` / `d_->busy` or emit signals
@@ -493,8 +529,6 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     // the inner onOne / next captured `this` raw — fixed here.
     QPointer<SyncService> self(this);
 
-    auto remaining = std::make_shared<int>(ids.size());
-    auto stored    = std::make_shared<int>(0);
     // Accumulate fetched messages and commit them in ONE SQLite
     // transaction at the end. The previous code did one
     // db.transaction()/commit() PER message, which fsyncs the WAL
@@ -507,28 +541,15 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     auto pending = std::make_shared<std::vector<fc::Message>>();
     pending->reserve(ids.size());
 
-    auto onOne = [self, remaining, stored, pending,
-                   newCount, isInitial,
-                   done = std::move(done)]
-        (fc::Message m, fc::api::ApiError err) {
-        // We may have been destroyed mid-flight. If self is gone we
-        // skip the per-message work; the completion callback below
-        // still runs once all remaining counters hit 0 so the caller
-        // can settle its own state (topUpFinished, etc.).
-        if (!err && !m.id.isEmpty() && self) {
-            m.accountId = self->d_->accountId;
-            pending->push_back(std::move(m));
-        }
-        if (--(*remaining) > 0) return;
+    auto doneSp = std::make_shared<std::function<void()>>(std::move(done));
+    auto onDoneAll = [self, pending, newCount, isInitial, doneSp]() {
         if (!self) {
-            if (done) done();
+            if (*doneSp) (*doneSp)();
             return;
         }
-        // All getMessage callbacks have returned. Commit the batch
-        // in a single transaction. upsertMany returns the number of
-        // rows successfully stored.
-        *stored = fc::cache::MessageRepository::upsertMany(
+        const int storedCount = fc::cache::MessageRepository::upsertMany(
             self->d_->accountId, *pending);
+        Q_UNUSED(storedCount);
         fc::cache::LabelRepository::recomputeCounts(self->d_->accountId);
         emit self->labelsUpdated();
         emit self->messagesUpdated();
@@ -556,7 +577,71 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
 
         self->d_->busy = false;
         self->setState(State::Idle);
-        if (done) done();
+        if (*doneSp) (*doneSp)();
+    };
+
+    if (fmt == QStringLiteral("metadata")) {
+        // Batch path. Chunk ids into ≤kBatchChunkSize sub-requests per
+        // /batch round-trip; chain chunks serially via a tail-call-
+        // style recursion to keep the cumulative pending vector
+        // intact across chunks. One upsertMany commit at the end.
+        auto queue = std::make_shared<QStringList>(ids);
+
+        auto fireChunk = std::make_shared<std::function<void()>>();
+        std::weak_ptr<std::function<void()>> chunkWeak = fireChunk;
+        *fireChunk = [self, queue, pending, onDoneAll, chunkWeak]() {
+            if (!self) { onDoneAll(); return; }
+            if (queue->isEmpty()) { onDoneAll(); return; }
+            QStringList chunk;
+            const int take = qMin(kBatchChunkSize, queue->size());
+            for (int i = 0; i < take; ++i) chunk << queue->takeFirst();
+
+            auto strong = chunkWeak.lock();
+            self->d_->gmail->batchGetMessages(chunk,
+                QStringLiteral("metadata"),
+                [self, pending, onDoneAll, strong]
+                (std::vector<fc::api::GmailClient::BatchMessageResult> results,
+                 fc::api::ApiError err) {
+                    if (!self) { onDoneAll(); return; }
+                    if (err) {
+                        // Whole-batch failure (network / boundary parse).
+                        // Bail out — keep whatever we accumulated so far
+                        // so the caller still sees progress.
+                        qWarning("fetchAndStoreMessages: batch failed: %s",
+                                 qUtf8Printable(err.message));
+                        onDoneAll();
+                        return;
+                    }
+                    for (auto& r : results) {
+                        if (!r.err && !r.msg.id.isEmpty()) {
+                            r.msg.accountId = self->d_->accountId;
+                            pending->push_back(std::move(r.msg));
+                        }
+                    }
+                    if (strong) (*strong)();
+                    else onDoneAll();
+                });
+        };
+        (*fireChunk)();
+        return;
+    }
+
+    // Legacy serial-get path (format=full). Pulls each id with its
+    // own getMessage round-trip up to kSerialGetBatch in flight at
+    // once.
+    auto remaining = std::make_shared<int>(ids.size());
+    auto onOne = [self, remaining, pending, onDoneAll]
+        (fc::Message m, fc::api::ApiError err) {
+        // We may have been destroyed mid-flight. If self is gone we
+        // skip the per-message work; the completion callback below
+        // still runs once all remaining counters hit 0 so the caller
+        // can settle its own state (topUpFinished, etc.).
+        if (!err && !m.id.isEmpty() && self) {
+            m.accountId = self->d_->accountId;
+            pending->push_back(std::move(m));
+        }
+        if (--(*remaining) > 0) return;
+        onDoneAll();
     };
 
     // Concurrency limiter: kick off kSerialGetBatch and queue the rest.
@@ -595,6 +680,28 @@ void SyncService::fetchAndStoreMessages(const QStringList& ids,
     (*next)();
 }
 
+void SyncService::fetchBodyOnDemand(const QString& messageId,
+                                     std::function<void(fc::api::ApiError)> cb) {
+    if (messageId.isEmpty() || d_->accountId.isEmpty()) {
+        if (cb) cb(fc::api::ApiError{
+            fc::api::ApiErrorKind::BadRequest, 0,
+            QStringLiteral("fetchBodyOnDemand: empty id or account"), {}});
+        return;
+    }
+    QPointer<SyncService> self(this);
+    const QString accountId = d_->accountId;
+    d_->gmail->getMessage(messageId, QStringLiteral("full"),
+        [self, accountId, cb = std::move(cb)]
+        (fc::Message m, fc::api::ApiError err) {
+            if (err) { if (cb) cb(err); return; }
+            if (!self) return;
+            m.accountId = accountId;
+            fc::cache::MessageRepository::upsert(accountId, m);
+            emit self->messagesUpdated();
+            if (cb) cb({});
+        });
+}
+
 void SyncService::cacheLabelComplete(const QString& labelId) {
     if (labelId.isEmpty()) return;
     if (!d_->cacheLabelTarget.isEmpty()) {
@@ -622,6 +729,107 @@ void SyncService::cancelCacheLabel() {
     // to completion. When it fires topUpFinished, the chain handler
     // sees the flag and finalizes with cancelled=true.
     d_->cacheLabelCancel = true;
+}
+
+void SyncService::tickBackgroundCrawl() {
+    if (d_->accountId.isEmpty()) return;
+    // Never race with foreground work. busy covers active sync /
+    // top-up; cacheLabelTarget covers an in-flight user-requested
+    // walk. Either way, defer until the next tick.
+    if (d_->busy) return;
+    if (!d_->cacheLabelTarget.isEmpty()) return;
+
+    // Pick the next label to advance. Strategy: walk every label in
+    // alphabetical id order (deterministic, no QHash randomness),
+    // skip those already exhausted, pick the first hit. When every
+    // label is exhausted we just no-op — the user has to hit "Reset
+    // crawl progress" to revisit.
+    QStringList labelIds;
+    {
+        auto db = fc::cache::databaseHandle();
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT id FROM labels WHERE account_id = :a ORDER BY id"));
+        q.bindValue(QStringLiteral(":a"), d_->accountId);
+        if (q.exec()) {
+            while (q.next()) labelIds << q.value(0).toString();
+        }
+    }
+    if (labelIds.isEmpty()) return;
+
+    QString pick;
+    for (const QString& id : labelIds) {
+        const QString flag = fc::cache::MetaRepository::get(
+            d_->accountId, crawlExhaustedKey(id));
+        if (flag == QStringLiteral("1")) continue;
+        pick = id;
+        break;
+    }
+    if (pick.isEmpty()) {
+        // Every label is marked exhausted. Don't auto-reset — the user
+        // either explicitly wants the cache to plateau (default) or
+        // pushes the reset button when they want another pass.
+        return;
+    }
+
+    // Self-mark "exhausted" by listening once for the next topUpFinished
+    // on this label. The handler also fires for foreground top-ups, but
+    // we only set the flag when the server actually returned no more
+    // pages (serverExhausted==true). A QPointer guards a destroyed
+    // service mid-flight.
+    QPointer<SyncService> self(this);
+    const QString lbl = pick;
+    auto* conn = new QMetaObject::Connection;
+    *conn = connect(this, &SyncService::topUpFinished, this,
+        [self, lbl, conn](const QString& labelId, int /*stored*/,
+                            bool serverExhausted) {
+            if (!self) { delete conn; return; }
+            if (labelId != lbl) return;
+            if (serverExhausted) {
+                fc::cache::MetaRepository::set(self->d_->accountId,
+                                                crawlExhaustedKey(lbl),
+                                                QStringLiteral("1"));
+            }
+            QObject::disconnect(*conn);
+            delete conn;
+        });
+
+    qInfo("SyncService::tickBackgroundCrawl: advancing label '%s' "
+          "(account='%s')",
+          qUtf8Printable(pick), qUtf8Printable(d_->accountId));
+    topUpLabel(pick);
+}
+
+void SyncService::configureBackgroundCrawl(bool enabled, int intervalSec) {
+    const int seconds = qMax(1, intervalSec);
+    if (!enabled) {
+        if (d_->crawlTimer) d_->crawlTimer->stop();
+        return;
+    }
+    if (!d_->crawlTimer) {
+        d_->crawlTimer = new QTimer(this);
+        connect(d_->crawlTimer, &QTimer::timeout, this,
+                &SyncService::tickBackgroundCrawl);
+    }
+    d_->crawlTimer->start(seconds * 1000);
+}
+
+void SyncService::resetBackgroundCrawlProgress() {
+    if (d_->accountId.isEmpty()) return;
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "DELETE FROM account_meta "
+        "WHERE account_id = :a AND key LIKE 'labelCrawl/%/exhausted'"));
+    q.bindValue(QStringLiteral(":a"), d_->accountId);
+    if (!q.exec()) {
+        qWarning("resetBackgroundCrawlProgress: DELETE failed: %s",
+                 qUtf8Printable(q.lastError().text()));
+    } else {
+        qInfo("SyncService::resetBackgroundCrawlProgress: cleared crawl "
+              "flags for account '%s'",
+              qUtf8Printable(d_->accountId));
+    }
 }
 
 }  // namespace fc::sync

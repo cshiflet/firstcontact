@@ -1,8 +1,12 @@
 #pragma once
 
+#include "api/Errors.h"
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
+
+#include <functional>
 
 namespace fc::api { class GmailClient; }
 
@@ -65,6 +69,35 @@ public:
     void cacheLabelComplete(const QString& labelId);
     void cancelCacheLabel();
 
+    // Fetches one message body in full (`format=full`) and upserts the
+    // row, then fires `cb` when complete. Used by the reader pane's
+    // on-demand body load: when low-bandwidth mode is on and a user
+    // opens a message whose cache row only carries metadata, this
+    // pulls the body in the background. cb runs on this object's
+    // thread (the sync thread); UI callers must marshal back via
+    // QMetaObject::invokeMethod.
+    void fetchBodyOnDemand(const QString& messageId,
+                            std::function<void(fc::api::ApiError)> cb);
+
+    // One tick of the opt-in background crawler. Picks an
+    // un-exhausted label and runs ONE topUpLabel page for it; bails
+    // when the user has signalled a foreground top-up is in flight.
+    // The MainWindow / Preferences layer drives a QTimer that calls
+    // this on a configurable interval.
+    void tickBackgroundCrawl();
+
+    // Starts / stops the per-service background-crawl timer. Re-
+    // applying with the same values is a no-op restart so the
+    // Settings dialog can call configure() unconditionally after
+    // any change. intervalSec is clamped to >= 1.
+    void configureBackgroundCrawl(bool enabled, int intervalSec);
+
+    // Drops the per-label crawl-exhausted flags so the next
+    // tickBackgroundCrawl revisits labels that have already been
+    // walked end-to-end. Used by the Settings "Reset crawl
+    // progress" button.
+    void resetBackgroundCrawlProgress();
+
 signals:
     void stateChanged(fc::sync::SyncService::State s);
     void labelsUpdated();
@@ -106,10 +139,19 @@ signals:
 private:
     void doInitialSync();
     void doIncrementalSync();
+    // `bodyFormat` is "full" (default) or "metadata". The metadata
+    // path issues a single Gmail /batch round-trip via
+    // GmailClient::batchGetMessages instead of N concurrent
+    // getMessage calls — N+1 → 1 HTTP request per page when low-
+    // bandwidth mode is on. Both paths funnel through the same
+    // MessageRepository::upsertMany commit, so storage looks
+    // identical except for the bodies being absent for metadata
+    // rows.
     void fetchAndStoreMessages(const QStringList& ids,
                                int newCount,
                                bool isInitial,
-                               std::function<void()> done = {});
+                               std::function<void()> done = {},
+                               const QString& bodyFormat = {});
     void setState(State s);
     // Internal step-walker for topUpLabel. Each invocation pulls one
     // server page; when every id on the page is already cached we

@@ -203,9 +203,77 @@ private slots:
         QCOMPARE(rows[0].id, QStringLiteral("msg-aaa"));
     }
 
+    // Meta-first sync upserts messages with empty body_text / body_html
+    // but populated metadata. The resulting row must have:
+    //   fetched_format = "metadata", body_text empty, body_html empty,
+    //   subject + from + labels populated.
+    // Subsequent on-demand body fetch overwrites body_* but preserves
+    // the row's identity (idempotent upsert).
+    void metadataModeUpsertProducesMetaRow() {
+        // Build a synthetic "metadata-only" Message — the shape
+        // MessageParser produces from format=metadata.
+        fc::Message m;
+        m.id            = QStringLiteral("msg-meta-1");
+        m.threadId      = QStringLiteral("thr-meta-1");
+        m.subject       = QStringLiteral("meta only subject");
+        m.fromName      = QStringLiteral("Eve");
+        m.fromAddr      = QStringLiteral("eve@example.com");
+        m.snippet       = QStringLiteral("preview snippet");
+        m.internalDate  = 1701000000000LL;
+        m.labelIds      << QStringLiteral("INBOX");
+        // body* deliberately empty — that's the whole point.
+
+        seedSystemLabels();
+        fc::cache::MessageRepository::upsert(testAccountId(), m);
+
+        // byId reads the row columns (incl. fetched_format) but does
+        // not hydrate labelIds from the edge table; for the label
+        // check we list by label, which does the join.
+        const auto row = fc::cache::MessageRepository::byId(
+            testAccountId(), QStringLiteral("msg-meta-1"));
+        QCOMPARE(row.id, QStringLiteral("msg-meta-1"));
+        QCOMPARE(row.subject, QStringLiteral("meta only subject"));
+        QCOMPARE(row.fromAddr, QStringLiteral("eve@example.com"));
+        QCOMPARE(row.fetchedFormat, QStringLiteral("metadata"));
+        QVERIFY(row.bodyText.isEmpty());
+        QVERIFY(row.bodyHtml.isEmpty());
+
+        bool foundInInbox = false;
+        for (const auto& r : fc::cache::MessageRepository::listByLabel(
+                 testAccountId(), QStringLiteral("INBOX"), 50, 0)) {
+            if (r.id == QStringLiteral("msg-meta-1")) {
+                foundInInbox = true;
+                QVERIFY(r.labelIds.contains(QStringLiteral("INBOX")));
+                break;
+            }
+        }
+        QVERIFY(foundInInbox);
+
+        // Now simulate the on-demand body fetch: a second upsert with
+        // a populated body should flip fetched_format to "full" and
+        // store the body. Metadata fields must survive the overwrite.
+        fc::Message full = m;
+        full.bodyText = QStringLiteral("hello full body");
+        fc::cache::MessageRepository::upsert(testAccountId(), full);
+
+        const auto row2 = fc::cache::MessageRepository::byId(
+            testAccountId(), QStringLiteral("msg-meta-1"));
+        QCOMPARE(row2.fetchedFormat, QStringLiteral("full"));
+        QCOMPARE(row2.bodyText, QStringLiteral("hello full body"));
+        QCOMPARE(row2.subject, QStringLiteral("meta only subject"));
+    }
+
     // Upsert is idempotent — re-applying the same fixture must not
     // duplicate rows in either messages or message_labels.
     void upsertIsIdempotent() {
+        // Snapshot the current row count before re-upserting kFixture
+        // so this test is order-independent w.r.t. other tests that
+        // added rows to INBOX (e.g. metadataModeUpsertProducesMetaRow).
+        const auto before = fc::cache::MessageRepository::listByLabel(
+            testAccountId(), QStringLiteral("INBOX"),
+            /*limit=*/50, /*offset=*/0);
+        const size_t beforeCount = before.size();
+
         const auto m = fc::api::MessageParser::parse(
             QJsonDocument::fromJson(QByteArray(kFixture)).object());
         fc::cache::MessageRepository::upsert(testAccountId(), m);   // again
@@ -213,9 +281,8 @@ private slots:
 
         const auto rows = fc::cache::MessageRepository::listByLabel(
             testAccountId(), QStringLiteral("INBOX"),
-            /*limit=*/10, /*offset=*/0);
-        // Still exactly the two messages from previous tests, no dupes.
-        QCOMPARE(rows.size(), size_t(2));
+            /*limit=*/50, /*offset=*/0);
+        QCOMPARE(rows.size(), beforeCount);
     }
 };
 

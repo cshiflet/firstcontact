@@ -23,6 +23,14 @@ signals:
     // owns the per-account picker (if there's more than one
     // signed-in account) and the BodyCompressionWorker lifecycle.
     void recompressRequested();
+    // Emitted when background-crawl settings change. MainWindow
+    // restarts the per-account crawler QTimers with the new
+    // enabled / interval values.
+    void backgroundCrawlSettingsChanged();
+    // Emitted when the user clicks "Reset crawl progress". Owner
+    // calls SyncService::resetBackgroundCrawlProgress() on every
+    // signed-in account.
+    void backgroundCrawlResetRequested();
 
 private slots:
     void onThemeChanged(int idx);

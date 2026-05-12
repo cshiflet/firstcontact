@@ -295,6 +295,25 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
         pending_->start();
         drafts_->start();
     }
+    applyBackgroundCrawlerSettings();
+}
+
+void MainWindow::applyBackgroundCrawlerSettings() {
+    if (!accounts_) return;
+    const bool enabled = Preferences::backgroundCrawl();
+    const int interval = Preferences::backgroundCrawlIntervalSec();
+    for (auto* ctx : accounts_->allContexts()) {
+        if (!ctx) continue;
+        if (auto* s = ctx->sync()) {
+            // SyncService::configureBackgroundCrawl owns a QTimer; it
+            // must be touched on the sync thread or QTimer warns
+            // about wrong-thread start. Use the standard postToObject
+            // dispatch so calls from the UI thread settle correctly.
+            postToObject(s, [s, enabled, interval] {
+                s->configureBackgroundCrawl(enabled, interval);
+            });
+        }
+    }
 }
 
 void MainWindow::buildLayout() {
@@ -596,6 +615,23 @@ void MainWindow::onOpenSettings() {
         if (currentAccountId_.isEmpty()) return;
         onRecompressRequested(currentAccountId_);
     });
+    connect(&dlg, &SettingsDialog::backgroundCrawlSettingsChanged, this,
+            [this] { applyBackgroundCrawlerSettings(); });
+    connect(&dlg, &SettingsDialog::backgroundCrawlResetRequested, this,
+            [this] {
+                if (!accounts_) return;
+                for (auto* ctx : accounts_->allContexts()) {
+                    if (!ctx) continue;
+                    if (auto* s = ctx->sync()) {
+                        postToObject(s, [s] {
+                            s->resetBackgroundCrawlProgress();
+                        });
+                    }
+                }
+                statusBar()->showMessage(
+                    tr("Background prefetch progress reset for every account."),
+                    4000);
+            });
     dlg.exec();
     // Settings can flip Preferences::conversationView() (changes the
     // grouping in the message list), the toolbar layout, attachment

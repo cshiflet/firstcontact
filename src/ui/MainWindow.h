@@ -139,6 +139,12 @@ private slots:
     // compressed rows are also rewritten.
     void startCompressionWorker(const QString& accountId,
                                   fc::cache::BodyCompressionWorker::Mode mode);
+
+    // Pushes the current Preferences::backgroundCrawl /
+    // backgroundCrawlIntervalSec values into every signed-in
+    // AccountContext's SyncService. Called at startup and again
+    // whenever Settings emits backgroundCrawlSettingsChanged.
+    void applyBackgroundCrawlerSettings();
     // Shift+L — flip Preferences::linkDisplayMode and re-render the
     // active reader content so the change is immediately visible.
     void onToggleLinkDisplay();

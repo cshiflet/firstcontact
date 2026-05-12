@@ -28,6 +28,7 @@ fc_add_test(test_pending_ops_repository unit/test_pending_ops_repository.cpp)
 fc_add_test(test_label_tree_model      unit/test_label_tree_model.cpp)
 fc_add_test(test_image_proxy           unit/test_image_proxy.cpp)
 fc_add_test(test_body_codec            unit/test_body_codec.cpp)
+fc_add_test(test_background_crawler    unit/test_background_crawler.cpp)
 
 # Integration tests — exercise multi-component round-trips against real
 # SQLite + Qt event loops. Slower than the unit tests, kept in the same

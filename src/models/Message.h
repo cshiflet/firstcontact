@@ -46,6 +46,15 @@ struct Message {
     bool isImportant = false;
     bool hasAttachment = false;
 
+    // Tracks whether the cached row has the FULL body or just metadata.
+    // Populated by rowToMessage from the messages.fetched_format column;
+    // stays empty for freshly-parsed wire responses (where the body
+    // presence on the Message itself drives downstream decisions).
+    // The ReaderPane and on-demand fetch path key off this to decide
+    // whether to issue a follow-up GET with format=full when the user
+    // opens a message that was only meta-synced.
+    QString fetchedFormat;
+
     QStringList labelIds;
     std::vector<Attachment> attachments;
 

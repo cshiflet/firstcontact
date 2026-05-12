@@ -94,6 +94,46 @@ private slots:
         QCOMPARE(m.toAddrs[1], QStringLiteral("b@y.test"));
     }
 
+    // format=metadata responses come back without any body data, just
+    // headers + labels + snippet. MessageParser must yield a Message
+    // with empty body fields but populated metadata. This is the
+    // shape the meta-first sync stores en masse.
+    void emptyPayloadYieldsMetadataOnlyMessage() {
+        QJsonArray headers;
+        auto h = [&](const QString& n, const QString& v) {
+            QJsonObject o;
+            o.insert(QStringLiteral("name"), n);
+            o.insert(QStringLiteral("value"), v);
+            headers.append(o);
+        };
+        h(QStringLiteral("From"),    QStringLiteral("Dana <dana@x.test>"));
+        h(QStringLiteral("Subject"), QStringLiteral("metadata only"));
+
+        QJsonObject payload;
+        // No mimeType, no body.data, no parts — mirrors what Gmail
+        // returns for messages.get?format=metadata.
+        payload.insert(QStringLiteral("headers"), headers);
+
+        QJsonObject g;
+        g.insert(QStringLiteral("id"),           QStringLiteral("m-meta"));
+        g.insert(QStringLiteral("threadId"),     QStringLiteral("t-meta"));
+        g.insert(QStringLiteral("internalDate"), QStringLiteral("1700000001000"));
+        g.insert(QStringLiteral("snippet"),      QStringLiteral("preview"));
+        g.insert(QStringLiteral("labelIds"),
+                 QJsonArray{QStringLiteral("INBOX")});
+        g.insert(QStringLiteral("payload"),      payload);
+
+        const auto m = fc::api::MessageParser::parse(g);
+        QCOMPARE(m.id, QStringLiteral("m-meta"));
+        QCOMPARE(m.subject, QStringLiteral("metadata only"));
+        QCOMPARE(m.fromAddr, QStringLiteral("dana@x.test"));
+        QCOMPARE(m.snippet, QStringLiteral("preview"));
+        QVERIFY(m.bodyText.isEmpty());
+        QVERIFY(m.bodyHtml.isEmpty());
+        QVERIFY(!m.bodyHtmlPresent);
+        QVERIFY(m.labelIds.contains(QStringLiteral("INBOX")));
+    }
+
     void splitAddressIgnoresAnglesInsideQuotes() {
         // Defensive: a display name that itself contains "< >" must
         // not steal the address slot. Without quote-aware parsing,

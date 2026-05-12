@@ -247,6 +247,46 @@ int  Preferences::messagePageSize()      { return fc::util::messagePageSize(); }
 void Preferences::setMessagePageSize(int n) { fc::util::setMessagePageSize(n); }
 
 namespace {
+constexpr char kLowBandwidthKey[]            = "sync/lowBandwidthMode";
+constexpr char kBackgroundCrawlKey[]         = "sync/backgroundCrawl";
+constexpr char kBackgroundCrawlIntervalKey[] = "sync/backgroundCrawlIntervalSec";
+}
+
+bool Preferences::lowBandwidthMode() {
+    QSettings s;
+    return s.value(QLatin1String(kLowBandwidthKey), false).toBool();
+}
+
+void Preferences::setLowBandwidthMode(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kLowBandwidthKey), on);
+    s.sync();
+}
+
+bool Preferences::backgroundCrawl() {
+    QSettings s;
+    return s.value(QLatin1String(kBackgroundCrawlKey), false).toBool();
+}
+
+void Preferences::setBackgroundCrawl(bool on) {
+    QSettings s;
+    s.setValue(QLatin1String(kBackgroundCrawlKey), on);
+    s.sync();
+}
+
+int Preferences::backgroundCrawlIntervalSec() {
+    QSettings s;
+    int v = s.value(QLatin1String(kBackgroundCrawlIntervalKey), 5).toInt();
+    return qMax(1, v);
+}
+
+void Preferences::setBackgroundCrawlIntervalSec(int seconds) {
+    QSettings s;
+    s.setValue(QLatin1String(kBackgroundCrawlIntervalKey), qMax(1, seconds));
+    s.sync();
+}
+
+namespace {
 constexpr char kDbCompressionKey[]            = "compression/enabled";
 constexpr char kDbCompressionPromptShownPfx[] = "compression/promptShown/";
 }

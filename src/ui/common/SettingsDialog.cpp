@@ -533,6 +533,79 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     autoPruneForm->addRow(QString(), autoPruneHint);
     contentLayout->addLayout(autoPruneForm);
 
+    // Low-bandwidth + background crawler. Both off by default; the
+    // user opts in. Low-bandwidth flips sync to metadata-only,
+    // bodies fetched on demand. Background crawler runs a periodic
+    // tick that top-ups one un-exhausted label per tick — designed
+    // to fill the cache slowly without competing with foreground
+    // interaction.
+    auto* syncForm = new QFormLayout;
+    syncForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    syncForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    auto* lowBwBox = new QCheckBox(
+        tr("Low-bandwidth mode (metadata only; fetch bodies on open)"),
+        content);
+    lowBwBox->setChecked(Preferences::lowBandwidthMode());
+    connect(lowBwBox, &QCheckBox::toggled, this, [](bool on) {
+        Preferences::setLowBandwidthMode(on);
+    });
+    syncForm->addRow(QString(), lowBwBox);
+    auto* lowBwHint = new QLabel(tr(
+        "Sync pulls only message headers / labels. The full body is "
+        "fetched the first time you open each message, with a brief "
+        "\"Fetching message body…\" placeholder. Saves bandwidth at "
+        "the cost of a slower first open."), content);
+    lowBwHint->setObjectName(QStringLiteral("FormHint"));
+    lowBwHint->setWordWrap(true);
+    syncForm->addRow(QString(), lowBwHint);
+
+    auto* crawlBox = new QCheckBox(
+        tr("Background prefetch: slowly fill the cache for every label"),
+        content);
+    crawlBox->setChecked(Preferences::backgroundCrawl());
+    syncForm->addRow(QString(), crawlBox);
+
+    auto* crawlIntervalSpin = new QSpinBox(content);
+    crawlIntervalSpin->setRange(1, 600);
+    crawlIntervalSpin->setSuffix(tr(" sec"));
+    crawlIntervalSpin->setValue(Preferences::backgroundCrawlIntervalSec());
+    crawlIntervalSpin->setEnabled(crawlBox->isChecked());
+    syncForm->addRow(tr("Tick interval"), crawlIntervalSpin);
+    auto* crawlHint = new QLabel(tr(
+        "When enabled, one un-exhausted label advances by a single "
+        "page each tick. Foreground sync and user-requested top-ups "
+        "always preempt — the crawler never races with interactive "
+        "work. Use Reset progress to revisit labels that have already "
+        "been walked end-to-end."), content);
+    crawlHint->setObjectName(QStringLiteral("FormHint"));
+    crawlHint->setWordWrap(true);
+    syncForm->addRow(QString(), crawlHint);
+
+    auto* crawlResetBtn = new QPushButton(tr("Reset crawl progress"), content);
+    crawlResetBtn->setCursor(Qt::PointingHandCursor);
+    auto* crawlResetRow = new QHBoxLayout;
+    crawlResetRow->addWidget(crawlResetBtn);
+    crawlResetRow->addStretch(1);
+    syncForm->addRow(QString(), crawlResetRow);
+
+    connect(crawlBox, &QCheckBox::toggled, this,
+        [this, crawlIntervalSpin](bool on) {
+            Preferences::setBackgroundCrawl(on);
+            crawlIntervalSpin->setEnabled(on);
+            emit backgroundCrawlSettingsChanged();
+        });
+    connect(crawlIntervalSpin, qOverload<int>(&QSpinBox::valueChanged), this,
+        [this](int v) {
+            Preferences::setBackgroundCrawlIntervalSec(v);
+            emit backgroundCrawlSettingsChanged();
+        });
+    connect(crawlResetBtn, &QPushButton::clicked, this, [this] {
+        emit backgroundCrawlResetRequested();
+    });
+
+    contentLayout->addLayout(syncForm);
+
     // Body compression: zstd-with-trained-dictionary. The toggle
     // gates the auto-train trigger (the SyncService side detects
     // 200+ bodies and emits compressionPromptDue, which MainWindow
