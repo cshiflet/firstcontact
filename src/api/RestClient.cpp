@@ -289,18 +289,24 @@ void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
             // starts with "--<boundary>\r\n", so the first non-empty
             // line gives us what we need without depending on a
             // header passthrough.
-            QByteArray boundary;
+            // Distinct from the REQUEST boundary captured in the
+            // outer scope: Gmail picks its own boundary for the
+            // response. Renamed so -Wshadow stays clean and so a
+            // reader doesn't mistake the two values for the same
+            // string.
+            QByteArray responseBoundary;
             const int firstNl = respBody.indexOf("\r\n");
             if (firstNl > 2 && respBody.startsWith("--")) {
-                boundary = respBody.mid(2, firstNl - 2);
+                responseBoundary = respBody.mid(2, firstNl - 2);
             }
-            if (boundary.isEmpty()) {
+            if (responseBoundary.isEmpty()) {
                 cb({}, ApiError{ApiErrorKind::Parse, 0,
                                 QStringLiteral("batch: no boundary in response"),
                                 {}});
                 return;
             }
-            cb(RestClient::parseBatchResponse(respBody, boundary, expected),
+            cb(RestClient::parseBatchResponse(respBody, responseBoundary,
+                                                expected),
                 ApiError{});
         });
 }
