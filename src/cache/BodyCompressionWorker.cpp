@@ -86,6 +86,15 @@ void BodyCompressionWorker::doWork() {
     // (re-run after a thread reuse, etc.) it short-circuits.
     fc::cache::Database::initialize();
 
+    // Snapshot the existing dictionary BEFORE training overwrites it.
+    // Recompress trains a fresh dict — but the bodies on disk were
+    // compressed with the old one, so we need both: old for decompress,
+    // new for recompress. Without this snapshot the old dict gets
+    // clobbered by saveDictionary, every decompress hits "Dictionary
+    // mismatch", and the worker silently writes empty bodies.
+    const QByteArray oldDict =
+        fc::cache::MessageRepository::dictionaryFor(accountId_);
+
     // 1. Sample bodies for training. ORDER BY RANDOM() across the
     //    whole table is O(N log N) but runs once and is bounded by
     //    LIMIT; on cache sizes of 100k messages it's milliseconds.
@@ -116,13 +125,28 @@ void BodyCompressionWorker::doWork() {
         samples.reserve(kTrainingSampleCount);
         while (q.next()) {
             QByteArray b = utf8OrBytes(q.value(0));
-            // If a row is already compressed (Recompress mode might
-            // see them), decompress first so the dict trains on
-            // plaintext like zstd expects.
+            // If a row is already compressed (Recompress mode), use
+            // the snapshotted oldDict — saveDictionary will replace
+            // the on-disk dict shortly, but these bytes were written
+            // against the old one.
             if (fc::util::BodyCodec::isCompressed(b)) {
-                const QByteArray dict =
-                    MessageRepository::dictionaryFor(accountId_);
-                b = fc::util::BodyCodec::decompress(b, dict);
+                if (oldDict.isEmpty()) {
+                    emit failed(accountId_, QStringLiteral(
+                        "compression: encountered compressed body but no "
+                        "existing dictionary — refusing to wipe bodies."));
+                    thread_->quit();
+                    return;
+                }
+                const QByteArray decoded =
+                    fc::util::BodyCodec::decompress(b, oldDict);
+                if (decoded.isEmpty()) {
+                    emit failed(accountId_, QStringLiteral(
+                        "compression: decompress failed during sampling "
+                        "(dictionary mismatch). Aborting to preserve bodies."));
+                    thread_->quit();
+                    return;
+                }
+                b = decoded;
             }
             if (b.size() > kTrainingPerSampleCap) {
                 b = b.left(kTrainingPerSampleCap);
@@ -249,14 +273,41 @@ void BodyCompressionWorker::doWork() {
 
             const qint64 beforeBytes = bt.size() + bh.size();
 
-            // If a row is already compressed (Recompress mode, or
-            // a sync write raced us), decompress with the OLD dict
-            // before recompressing with the new dict.
-            if (fc::util::BodyCodec::isCompressed(bt)) {
-                bt = fc::util::BodyCodec::decompress(bt, dict);
-            }
-            if (fc::util::BodyCodec::isCompressed(bh)) {
-                bh = fc::util::BodyCodec::decompress(bh, dict);
+            // Decompress with the OLD dict snapshot — the rows on
+            // disk were written against it. Compress below with the
+            // NEW dict. A decompress that returns empty bytes for
+            // non-empty input means dict mismatch; aborting here
+            // prevents the worker from silently nulling out body
+            // content across the rest of the cache.
+            auto decompressOrAbort = [&](QByteArray& field,
+                                          const char* which) -> bool {
+                if (!fc::util::BodyCodec::isCompressed(field)) return true;
+                if (oldDict.isEmpty()) {
+                    qWarning("BodyCompression: compressed %s but no "
+                             "old dict; aborting to preserve data.",
+                             which);
+                    return false;
+                }
+                QByteArray decoded =
+                    fc::util::BodyCodec::decompress(field, oldDict);
+                if (decoded.isEmpty()) {
+                    qWarning("BodyCompression: %s decompress failed for "
+                             "%s; aborting.",
+                             which, qUtf8Printable(id));
+                    return false;
+                }
+                field = std::move(decoded);
+                return true;
+            };
+            if (!decompressOrAbort(bt, "body_text")
+                || !decompressOrAbort(bh, "body_html")) {
+                db.rollback();
+                emit failed(accountId_, QStringLiteral(
+                    "compression: aborting to preserve cache — "
+                    "decompress failed mid-walk. Body content "
+                    "on disk is unchanged."));
+                thread_->quit();
+                return;
             }
 
             const QByteArray newBt = bt.isEmpty()
