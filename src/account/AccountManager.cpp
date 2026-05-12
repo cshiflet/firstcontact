@@ -313,6 +313,14 @@ bool AccountManager::dropCache(const QString& id) {
         return false;
     }
 
+    // Scoped FTS5 cleanup: drop just this account's index entries
+    // before the SQL DELETE that removes its messages. Runs inside
+    // the open transaction so the messages rows are still readable
+    // — FTS5's 'delete' command needs the original content to
+    // know which tokens to subtract. Empty account = 0 work, no
+    // log noise.
+    fc::cache::MessageRepository::removeFtsForAccount(id);
+
     // Order matters: delete child tables before parents so the
     // composite-FK enforcement (foreign_keys = ON in Database::initialize)
     // doesn't reject any individual statement.
@@ -346,10 +354,13 @@ bool AccountManager::dropCache(const QString& id) {
                  qUtf8Printable(db.lastError().text()));
         return false;
     }
-    // Bulk delete bypassed the per-row FTS5 maintenance in
-    // MessageRepository — sync the index now (rebuilds from the
-    // surviving messages, so dropped accounts' tokens vanish).
-    fc::cache::MessageRepository::reconcileFtsForAccount(id);
+    // FTS5 already handled inline above via removeFtsForAccount —
+    // no post-commit global rebuild needed. Other bulk-delete paths
+    // (clearMessagesOlderThan / clearMessagesToTargetSize /
+    // clearMessagesToTargetCount) still use reconcileFtsForAccount
+    // because their row sets are determined mid-DELETE by a WHERE
+    // clause we'd otherwise have to snapshot.
+    //
     // Drop the cached compression dictionary too — the dict was
     // trained against the now-deleted bodies.
     fc::cache::MessageRepository::invalidateDictionaryCache(id);

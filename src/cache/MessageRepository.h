@@ -128,7 +128,25 @@ public:
     // (dropCache / clearMessagesOlderThan / clearMessagesToTargetSize)
     // that drop rows wholesale; per-row upsert/delete paths keep FTS
     // in sync inline.
+    //
+    // This is a GLOBAL rebuild (FTS5's external-content tables don't
+    // support partial 'delete-all'). Prefer removeFtsForAccount when
+    // the deletes are account-scoped and the messages rows are still
+    // present to read.
     static void       reconcileFtsForAccount(const QString& accountId);
+
+    // Per-account scoped FTS cleanup. Walks every message currently
+    // in `messages` for accountId, issues an FTS5 'delete' for each
+    // row's index entries, returns the row count. Must run BEFORE
+    // the SQL DELETE that removes those rows — the FTS5 'delete'
+    // command needs the original content to know which tokens to
+    // subtract from the index.
+    //
+    // Empty account = 0 work, 0 log noise. Cheaper than
+    // reconcileFtsForAccount when only one of many accounts is
+    // being wiped (e.g. AccountManager::dropCache); doesn't touch
+    // surviving accounts' FTS data.
+    static int        removeFtsForAccount(const QString& accountId);
 };
 
 }  // namespace fc::cache

@@ -1411,8 +1411,50 @@ void MessageRepository::reconcileFtsForAccount(const QString& accountId) {
         }
         ++reinserted;
     }
-    qInfo("reconcileFtsForAccount: re-indexed %d row(s) (caller=%s)",
-          reinserted, qUtf8Printable(accountId));
+    if (reinserted > 0) {
+        qInfo("reconcileFtsForAccount: re-indexed %d row(s) (caller=%s)",
+              reinserted, qUtf8Printable(accountId));
+    }
+}
+
+int MessageRepository::removeFtsForAccount(const QString& accountId) {
+    if (accountId.isEmpty()) return 0;
+    auto db = databaseHandle();
+    QSqlQuery sel(db);
+    sel.prepare(QStringLiteral(
+        "SELECT rowid, "
+        "       COALESCE(subject, ''), "
+        "       COALESCE(from_name, ''), "
+        "       COALESCE(from_addr, ''), "
+        "       body_text, "
+        "       COALESCE(snippet, '') "
+        "FROM messages WHERE account_id = :a"));
+    sel.bindValue(QStringLiteral(":a"), accountId);
+    if (!sel.exec()) {
+        qWarning("removeFtsForAccount select: %s",
+                 qUtf8Printable(sel.lastError().text()));
+        return 0;
+    }
+    int removed = 0;
+    while (sel.next()) {
+        const qint64  rowid   = sel.value(0).toLongLong();
+        const QString subject = sel.value(1).toString();
+        const QString fromN   = sel.value(2).toString();
+        const QString fromA   = sel.value(3).toString();
+        const QString body    = decompressBody(accountId,
+                                    sel.value(4).toByteArray());
+        const QString snippet = sel.value(5).toString();
+        const QString fromText = fromN.isEmpty()
+            ? fromA : (fromN + QLatin1Char(' ') + fromA);
+        ftsDeleteByRowid(db, rowid, subject, fromText, body, snippet,
+                          accountId);
+        ++removed;
+    }
+    if (removed > 0) {
+        qInfo("removeFtsForAccount(%s): cleaned %d FTS row(s)",
+              qUtf8Printable(accountId), removed);
+    }
+    return removed;
 }
 
 }  // namespace fc::cache
