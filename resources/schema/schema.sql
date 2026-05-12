@@ -1,43 +1,40 @@
--- FirstContact schema migration 0006 — multi-account schema.
+-- FirstContact cache database — consolidated schema.
 --
--- Establishes the multi-account shape: every per-account cache table
--- carries a composite (account_id, …) primary key, an `accounts` table
--- holds the signed-in identities, and a separate `account_meta` table
--- replaces the per-account-scoped subset of the old global `meta` sheet.
+-- One file, applied once on a fresh database. No migration walk. If a
+-- pre-existing DB doesn't match this schema's version, Migrations::run
+-- aborts with a fatal error directing the user to `firstcontact
+-- reset-db`. This is a prototype; there are no other users, so we
+-- trade migration machinery for simplicity.
 --
--- This migration does NOT carry single-account v0–v5 data forward. The
--- previous draft of 0006 minted a synthetic "legacy seed" accounts row
--- and stamped every existing cache row with its UUID, but that path
--- created more friction than value: the seed row clung around as a
--- fake account that the toolbar / dialogs had to filter out, and the
--- on-the-wire OAuth → first-sync flow was simpler when we knew an
--- accounts row could only come from a real sign-in. Pre-0006 caches
--- are now rejected at startup by `Migrations::run` (see the v < 6
--- guard there); users with an old cache must let the app re-sync from
--- scratch.
---
--- On a fresh install the v1–v5 migrations create empty single-tenant
--- tables; this migration drops and recreates them in multi-tenant
--- shape. The DROP/CREATE/RENAME dance below therefore moves no rows
--- on a fresh install — it's only doing schema work.
+-- Bump kSchemaVersion in Migrations.cpp when this file changes
+-- structurally. Existing local DBs at any other version will be
+-- rejected.
 
--- 1. Accounts table.
+-- ---------------------------------------------------------------------
+-- meta
+-- ---------------------------------------------------------------------
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- ---------------------------------------------------------------------
+-- accounts (signed-in Gmail accounts)
+-- ---------------------------------------------------------------------
 CREATE TABLE accounts (
     id              TEXT PRIMARY KEY,             -- stable UUID, NOT the email
     email           TEXT NOT NULL UNIQUE,
     display_name    TEXT,
-    color_hint      TEXT,                         -- v3 accent palette key
+    color_hint      TEXT,
     sort_order      INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
     last_used_at    INTEGER,
     is_default      INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX idx_accounts_sort       ON accounts(sort_order, email);
+CREATE INDEX idx_accounts_sort         ON accounts(sort_order, email);
 CREATE UNIQUE INDEX idx_accounts_email ON accounts(email);
 
--- 2. Per-account meta. The schema keeps `meta` as a global key/value
--- sheet (schema_version, fts_version, body_html_version) and uses
--- account_meta for anything that varies per account.
+-- Per-account scratch state (sync cursors, crawl-exhausted flags, etc.).
 CREATE TABLE account_meta (
     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     key        TEXT NOT NULL,
@@ -45,20 +42,9 @@ CREATE TABLE account_meta (
     PRIMARY KEY (account_id, key)
 );
 
--- 3. FK enforcement is toggled OFF by the runner around this whole
--- migration (PRAGMA foreign_keys must be set outside a transaction;
--- sqlite ignores changes to it inside one). The composite-FK rebuild
--- below would otherwise trip on still-pointing-at-v5-schema child
--- tables during the in-flight states between DROP TABLE and RENAME.
---
--- 4. Drop the FTS triggers up front so messages-table rebuild doesn't
--- fire stale ones.
-DROP TRIGGER IF EXISTS messages_ai;
-DROP TRIGGER IF EXISTS messages_ad;
-DROP TRIGGER IF EXISTS messages_au;
-
--- ---------- threads ----------
-DROP TABLE IF EXISTS threads;
+-- ---------------------------------------------------------------------
+-- threads
+-- ---------------------------------------------------------------------
 CREATE TABLE threads (
     account_id                  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     id                          TEXT NOT NULL,
@@ -70,11 +56,9 @@ CREATE TABLE threads (
 CREATE INDEX idx_threads_account_lastdate
     ON threads(account_id, last_message_internal_date DESC);
 
--- ---------- labels ----------
--- parent_id is informational only — Gmail's API never returns one,
--- and LabelTreeModel builds the visual hierarchy by splitting label
--- names on '/'. No FK from parent_id back to labels.
-DROP TABLE IF EXISTS labels;
+-- ---------------------------------------------------------------------
+-- labels (Gmail "labels" = folders + tags)
+-- ---------------------------------------------------------------------
 CREATE TABLE labels (
     account_id               TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     id                       TEXT NOT NULL,
@@ -91,8 +75,9 @@ CREATE TABLE labels (
 );
 CREATE INDEX idx_labels_account_name ON labels(account_id, name);
 
--- ---------- messages ----------
-DROP TABLE IF EXISTS messages;
+-- ---------------------------------------------------------------------
+-- messages
+-- ---------------------------------------------------------------------
 CREATE TABLE messages (
     account_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     id                  TEXT NOT NULL,
@@ -112,9 +97,14 @@ CREATE TABLE messages (
     is_starred          INTEGER NOT NULL DEFAULT 0,
     is_important        INTEGER NOT NULL DEFAULT 0,
     has_attachment      INTEGER NOT NULL DEFAULT 0,
+    -- body_text / body_html keep TEXT affinity but may hold compressed
+    -- BLOB bytes (SQLite is dynamic). body_compression interprets them:
+    --   0 = plaintext
+    --   1 = zstd_dict_v1 (BodyCodec magic-prefixed; see body_compression_dict)
     body_text           TEXT,
     body_html           TEXT,
     body_html_present   INTEGER NOT NULL DEFAULT 0,
+    body_compression    INTEGER NOT NULL DEFAULT 0,
     raw_headers         TEXT,
     fetched_format      TEXT,
     bytes_cached        INTEGER NOT NULL DEFAULT 0,
@@ -132,8 +122,6 @@ CREATE INDEX idx_messages_account_unread        ON messages(account_id, is_unrea
 CREATE INDEX idx_messages_account_snooze
     ON messages(account_id, snooze_until) WHERE snooze_until IS NOT NULL;
 
--- ---------- message_labels ----------
-DROP TABLE IF EXISTS message_labels;
 CREATE TABLE message_labels (
     account_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -145,8 +133,6 @@ CREATE TABLE message_labels (
 CREATE INDEX idx_message_labels_account_label
     ON message_labels(account_id, label_id);
 
--- ---------- attachments ----------
-DROP TABLE IF EXISTS attachments;
 CREATE TABLE attachments (
     account_id  TEXT NOT NULL,
     id          TEXT NOT NULL,
@@ -161,8 +147,9 @@ CREATE TABLE attachments (
 CREATE INDEX idx_attachments_account_message
     ON attachments(account_id, message_id);
 
--- ---------- drafts ----------
-DROP TABLE IF EXISTS drafts;
+-- ---------------------------------------------------------------------
+-- drafts
+-- ---------------------------------------------------------------------
 CREATE TABLE drafts (
     account_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     id                   TEXT NOT NULL,
@@ -181,8 +168,9 @@ CREATE TABLE drafts (
 CREATE INDEX idx_drafts_account_updated
     ON drafts(account_id, updated_at DESC);
 
--- ---------- outbox ----------
-DROP TABLE IF EXISTS outbox;
+-- ---------------------------------------------------------------------
+-- outbox  (pending sends — RFC 5322 blobs queued for the OutboxWorker)
+-- ---------------------------------------------------------------------
 CREATE TABLE outbox (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id               TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -200,8 +188,9 @@ CREATE TABLE outbox (
 CREATE INDEX idx_outbox_account_due
     ON outbox(account_id, next_retry_at);
 
--- ---------- pending_ops ----------
-DROP TABLE IF EXISTS pending_ops;
+-- ---------------------------------------------------------------------
+-- pending_ops  (deferred label flips / mark-read / etc. for the PendingOpsWorker)
+-- ---------------------------------------------------------------------
 CREATE TABLE pending_ops (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -215,8 +204,14 @@ CREATE TABLE pending_ops (
 CREATE INDEX idx_pending_ops_account
     ON pending_ops(account_id);
 
--- ---------- messages_fts ----------
-DROP TABLE IF EXISTS messages_fts;
+-- ---------------------------------------------------------------------
+-- messages_fts  (full-text search shadow of messages.subject/from/body/snippet)
+--
+-- Triggers from earlier schema iterations are intentionally absent —
+-- they can't read compressed body_text payloads. MessageRepository now
+-- maintains messages_fts programmatically from its upsert/delete paths
+-- with plaintext content held in memory at write time.
+-- ---------------------------------------------------------------------
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     subject, from_text, body, snippet,
     account_id UNINDEXED,
@@ -225,44 +220,14 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
-CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, subject, from_text, body, snippet, account_id)
-        VALUES (new.rowid,
-                COALESCE(new.subject, ''),
-                COALESCE(new.from_name, '') || ' ' || COALESCE(new.from_addr, ''),
-                COALESCE(new.body_text, ''),
-                COALESCE(new.snippet, ''),
-                new.account_id);
-END;
-
-CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, subject, from_text, body, snippet, account_id)
-        VALUES ('delete', old.rowid,
-                COALESCE(old.subject, ''),
-                COALESCE(old.from_name, '') || ' ' || COALESCE(old.from_addr, ''),
-                COALESCE(old.body_text, ''),
-                COALESCE(old.snippet, ''),
-                old.account_id);
-END;
-
-CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, subject, from_text, body, snippet, account_id)
-        VALUES ('delete', old.rowid,
-                COALESCE(old.subject, ''),
-                COALESCE(old.from_name, '') || ' ' || COALESCE(old.from_addr, ''),
-                COALESCE(old.body_text, ''),
-                COALESCE(old.snippet, ''),
-                old.account_id);
-    INSERT INTO messages_fts(rowid, subject, from_text, body, snippet, account_id)
-        VALUES (new.rowid,
-                COALESCE(new.subject, ''),
-                COALESCE(new.from_name, '') || ' ' || COALESCE(new.from_addr, ''),
-                COALESCE(new.body_text, ''),
-                COALESCE(new.snippet, ''),
-                new.account_id);
-END;
-
--- 5. Bump fts_version (the FTS schema changed shape, so any pre-0006
--- fts_version is no longer valid).
-INSERT INTO meta(key, value) VALUES ('fts_version', '2')
-    ON CONFLICT(key) DO UPDATE SET value = '2';
+-- ---------------------------------------------------------------------
+-- body_compression_dict  (per-account zstd dictionary)
+-- ---------------------------------------------------------------------
+CREATE TABLE body_compression_dict (
+    account_id   TEXT    PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    dict         BLOB    NOT NULL,
+    version      INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    sample_bytes INTEGER NOT NULL DEFAULT 0
+);

@@ -14,14 +14,7 @@ qt_add_resources(fc_cache "fc_cache_schema"
     PREFIX "/schema"
     BASE   "${CMAKE_SOURCE_DIR}/resources/schema"
     FILES
-        "${CMAKE_SOURCE_DIR}/resources/schema/0001_init.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0002_fts.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0003_body_html.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0004_send_at.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0005_snooze.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0006_multi_account.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0007_drop_legacy_seed.sql"
-        "${CMAKE_SOURCE_DIR}/resources/schema/0008_body_compression.sql"
+        "${CMAKE_SOURCE_DIR}/resources/schema/schema.sql"
 )
 target_include_directories(fc_cache PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(fc_cache
