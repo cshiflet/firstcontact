@@ -1339,21 +1339,80 @@ int MessageRepository::bodyCountFor(const QString& accountId) {
 // Bulk FTS reconciliation. Used after wholesale row deletes (dropCache,
 // clearMessagesOlderThan, clearMessagesToTargetSize) where doing
 // per-row FTS 'delete' would require fetching every row's content
-// before the delete. The 'rebuild' command walks the live messages
-// table and re-derives the index — slow (O(N) over the table) but
-// safe and correct.
+// before the delete.
+//
+// We can't use FTS5's `'rebuild'` command here: the messages_fts
+// virtual table declares columns (subject, from_text, body, snippet)
+// that don't correspond 1:1 to messages columns — from_text is
+// synthesized from `from_name || ' ' || from_addr`, and body comes
+// from body_text (different name) which may be zstd-compressed. The
+// dropped v0006 triggers handled the mapping at INSERT time;
+// rebuild has no way to.
+//
+// So: delete-all the FTS index, then walk every surviving message
+// and re-insert with the same column mapping the upsert path uses
+// (decompressed body, concatenated from_text). Global (across all
+// accounts) because FTS5 doesn't support partial 'delete-all'.
+// Acceptable since this only fires after bulk deletes.
 void MessageRepository::reconcileFtsForAccount(const QString& accountId) {
     Q_UNUSED(accountId);
     auto db = databaseHandle();
-    QSqlQuery q(db);
-    // FTS5 'rebuild' is global (rebuilds the entire content='messages'
-    // index). Per-account scoping isn't supported by FTS5 — the
-    // tradeoff is one O(total messages) rebuild per bulk delete.
-    if (!q.exec(QStringLiteral(
-            "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"))) {
-        qWarning("reconcileFtsForAccount: %s",
-                 qUtf8Printable(q.lastError().text()));
+    QSqlQuery wipe(db);
+    if (!wipe.exec(QStringLiteral(
+            "INSERT INTO messages_fts(messages_fts) VALUES('delete-all')"))) {
+        qWarning("reconcileFtsForAccount delete-all: %s",
+                 qUtf8Printable(wipe.lastError().text()));
+        return;
     }
+    QSqlQuery sel(db);
+    if (!sel.exec(QStringLiteral(
+            "SELECT account_id, rowid, "
+            "       COALESCE(subject, ''), "
+            "       COALESCE(from_name, ''), "
+            "       COALESCE(from_addr, ''), "
+            "       body_text, "
+            "       COALESCE(snippet, '') "
+            "FROM messages"))) {
+        qWarning("reconcileFtsForAccount select: %s",
+                 qUtf8Printable(sel.lastError().text()));
+        return;
+    }
+    QSqlQuery ins(db);
+    ins.prepare(QStringLiteral(
+        "INSERT INTO messages_fts(rowid, subject, from_text, body, "
+        "                          snippet, account_id) "
+        "VALUES (:rowid, :subject, :from_text, :body, :snippet, :a)"));
+    int reinserted = 0;
+    while (sel.next()) {
+        const QString aid     = sel.value(0).toString();
+        const qint64  rowid   = sel.value(1).toLongLong();
+        const QString subject = sel.value(2).toString();
+        const QString fromN   = sel.value(3).toString();
+        const QString fromA   = sel.value(4).toString();
+        // body_text may be a compressed BLOB; decompress to plaintext
+        // before indexing so search queries find the right tokens.
+        const QString body    = decompressBody(aid,
+                                    sel.value(5).toByteArray());
+        const QString snippet = sel.value(6).toString();
+
+        ins.bindValue(QStringLiteral(":rowid"),     rowid);
+        ins.bindValue(QStringLiteral(":subject"),   subject);
+        ins.bindValue(QStringLiteral(":from_text"),
+                       fromN.isEmpty() ? fromA
+                                       : (fromN + QLatin1Char(' ') + fromA));
+        ins.bindValue(QStringLiteral(":body"),      body);
+        ins.bindValue(QStringLiteral(":snippet"),   snippet);
+        ins.bindValue(QStringLiteral(":a"),         aid);
+        if (!ins.exec()) {
+            qWarning("reconcileFtsForAccount insert (rowid=%lld): %s",
+                     static_cast<long long>(rowid),
+                     qUtf8Printable(ins.lastError().text()));
+            continue;
+        }
+        ++reinserted;
+    }
+    qInfo("reconcileFtsForAccount: re-indexed %d row(s) (caller=%s)",
+          reinserted, qUtf8Printable(accountId));
 }
 
 }  // namespace fc::cache
