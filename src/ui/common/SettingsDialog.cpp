@@ -571,7 +571,20 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     crawlIntervalSpin->setSuffix(tr(" sec"));
     crawlIntervalSpin->setValue(Preferences::backgroundCrawlIntervalSec());
     crawlIntervalSpin->setEnabled(crawlBox->isChecked());
-    syncForm->addRow(tr("Tick interval"), crawlIntervalSpin);
+    // Pack the "Tick interval" caption + spinbox into a horizontal
+    // strip and feed it as a single field-column row. addRow(label,
+    // widget) would force the form's label column wide enough to
+    // fit "Tick interval", which then indents every QString()-label
+    // row below it (Low-bandwidth, Background prefetch checkboxes)
+    // away from the left margin so they no longer align with the
+    // Auto-prune checkbox in the form above.
+    auto* crawlIntervalRow = new QHBoxLayout;
+    crawlIntervalRow->setContentsMargins(0, 0, 0, 0);
+    auto* crawlIntervalLabel = new QLabel(tr("Tick interval"), content);
+    crawlIntervalRow->addWidget(crawlIntervalLabel);
+    crawlIntervalRow->addWidget(crawlIntervalSpin);
+    crawlIntervalRow->addStretch(1);
+    syncForm->addRow(QString(), crawlIntervalRow);
     auto* crawlHint = new QLabel(tr(
         "When enabled, one un-exhausted label advances by a single "
         "page each tick. Foreground sync and user-requested top-ups "

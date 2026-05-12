@@ -20,7 +20,14 @@ ARCH             := $(shell uname -m)
 APPIMAGE         := $(APP_NAME)-$(APP_VERSION)-$(ARCH).AppImage
 LINUXDEPLOY_DIR  ?= $(HOME)/.local/bin
 SANITIZERS       ?= OFF
-LOCK_FILE        := $(HOME)/.local/share/FirstContact/firstcontact.lock
+# Qt's QStandardPaths::AppLocalDataLocation produces .../<Org>/<App>/ on
+# Linux — both the organization and the application names are
+# "FirstContact" in main.cpp, so the singular path
+# .../FirstContact/firstcontact.lock the Makefile pointed at for ages
+# is a phantom; the real lock lives one directory deeper. (The smoke
+# target was relying on QLockFile's 30s staleness window to recover
+# instead of the rm clearing it.) Updated to match.
+LOCK_FILE        := $(HOME)/.local/share/FirstContact/FirstContact/firstcontact.lock
 
 CMAKE_FLAGS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
               -DFC_ENABLE_SANITIZERS=$(SANITIZERS)
