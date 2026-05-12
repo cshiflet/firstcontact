@@ -1,5 +1,6 @@
 #include "Application.h"
 #include "Bootstrap.h"
+#include "Cli.h"
 
 #include "ui/MainWindow.h"
 #include "ui/common/Preferences.h"
@@ -10,6 +11,7 @@
 #include <QCoreApplication>
 #include <QFont>
 #include <QLockFile>
+#include <QStringList>
 
 int main(int argc, char** argv) {
     // QSettings keys off the org/app names; set them BEFORE QApplication
@@ -19,6 +21,25 @@ int main(int argc, char** argv) {
     // inline WebEngine HTML preview" commit.)
     QCoreApplication::setOrganizationName(QStringLiteral("FirstContact"));
     QCoreApplication::setApplicationName(QStringLiteral("FirstContact"));
+
+    // CLI subcommands (db-stats / clear-cache / compress-db / help)
+    // run on QCoreApplication and skip the GUI bootstrap entirely.
+    // Detect by sniffing argv[1] BEFORE we construct the heavier
+    // QApplication so we don't pay for widgets we won't use.
+    if (fc::app::argsLookLikeCliSubcommand(argc, argv)) {
+        QCoreApplication cliApp(argc, argv);
+        fc::util::installLogger();
+        QStringList args;
+        args.reserve(argc);
+        for (int i = 0; i < argc; ++i) {
+            args << QString::fromLocal8Bit(argv[i]);
+        }
+        const int rc = fc::app::tryRunCli(argc, argv, args);
+        // Negative = "no CLI command actually ran"; shouldn't happen
+        // here because argsLookLikeCliSubcommand already confirmed
+        // one of the recognized tokens. Treat as success if it does.
+        return rc < 0 ? 0 : rc;
+    }
 
     fc::app::Application app(argc, argv);
     fc::util::installLogger();

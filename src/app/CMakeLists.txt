@@ -2,6 +2,7 @@ qt_add_executable(firstcontact
     main.cpp
     Application.h Application.cpp
     Bootstrap.h Bootstrap.cpp
+    Cli.h Cli.cpp
 )
 
 target_link_libraries(firstcontact
