@@ -42,6 +42,7 @@
 #include "tray/TrayController.h"
 #include "util/Browser.h"
 #include "util/DryRun.h"
+#include "util/Format.h"
 #include "util/MimeBuilder.h"
 
 #include <QSqlDatabase>
@@ -1749,34 +1750,20 @@ void MainWindow::wireSignals() {
     connect(shortcuts_, &Shortcuts::showHelp, this, &MainWindow::onShowShortcutsHelp);
 }
 
-namespace {
-
-QString humanBytes(qint64 b) {
-    constexpr qint64 KB = 1024;
-    constexpr qint64 MB = KB * 1024;
-    constexpr qint64 GB = MB * 1024;
-    if (b >= GB) return QStringLiteral("%1 GB").arg(b / double(GB), 0, 'f', 2);
-    if (b >= MB) return QStringLiteral("%1 MB").arg(b / double(MB), 0, 'f', 1);
-    if (b >= KB) return QStringLiteral("%1 KB").arg(b / double(KB), 0, 'f', 1);
-    return QStringLiteral("%1 B").arg(b);
-}
-
-}  // namespace
-
 void MainWindow::refreshBandwidthLabel() {
     if (!bandwidthLabel_) return;
     const auto& s = fc::api::SessionTransfer::instance();
     const qint64 down = s.bytesIn();
     const qint64 up   = s.bytesOut();
     const int reqs    = s.requestCount();
-    bandwidthLabel_->setText(QStringLiteral("↓ %1").arg(humanBytes(down)));
+    bandwidthLabel_->setText(QStringLiteral("↓ %1").arg(fc::util::humanBytes(down)));
     bandwidthLabel_->setAccessibleName(tr("Bandwidth used this session"));
     bandwidthLabel_->setToolTip(tr(
         "Session transfer since launch:\n"
         "↓ %1 received\n"
         "↑ %2 sent\n"
         "%3 request(s)")
-        .arg(humanBytes(down), humanBytes(up))
+        .arg(fc::util::humanBytes(down), fc::util::humanBytes(up))
         .arg(reqs));
 }
 

@@ -4,6 +4,7 @@
 #include "account/AccountManager.h"
 #include "auth/OAuthClient.h"
 #include "Preferences.h"
+#include "util/Format.h"
 
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -21,19 +22,7 @@
 
 namespace fc::ui {
 
-namespace {
-
-QString humanBytes(qint64 b) {
-    constexpr qint64 KB = 1024;
-    constexpr qint64 MB = KB * 1024;
-    constexpr qint64 GB = MB * 1024;
-    if (b >= GB) return QStringLiteral("%1 GB").arg(double(b) / GB, 0, 'f', 2);
-    if (b >= MB) return QStringLiteral("%1 MB").arg(double(b) / MB, 0, 'f', 1);
-    if (b >= KB) return QStringLiteral("%1 KB").arg(double(b) / KB, 0, 'f', 1);
-    return QStringLiteral("%1 B").arg(b);
-}
-
-}  // namespace
+using fc::util::humanBytes;
 
 CacheManagerDialog::CacheManagerDialog(
         fc::account::AccountManager* accounts, QWidget* parent)
