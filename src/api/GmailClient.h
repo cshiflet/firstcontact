@@ -35,9 +35,41 @@ public:
                       int maxResults,
                       std::function<void(ListPage, ApiError)> cb);
 
-    // GET /gmail/v1/users/me/messages/{id}?format=full
+    // GET /gmail/v1/users/me/messages/{id}?format=<format>
+    //
+    // `format` is "full" (default) or "metadata". The metadata variant
+    // returns headers/labels/snippet/internalDate without bodies — used
+    // by the meta-first sync path so we don't pull bodies for every
+    // synced message up front.
+    void getMessage(const QString& id,
+                    const QString& format,
+                    std::function<void(fc::Message, ApiError)> cb);
+
+    // Convenience overload kept for callers that just want a full
+    // body — pre-batch code paths and on-demand fetch from the reader.
     void getMessage(const QString& id,
                     std::function<void(fc::Message, ApiError)> cb);
+
+    // Issues one Gmail /batch round-trip that fetches up to ~50
+    // messages by id. Returns a vector aligned with `ids`; entries
+    // whose sub-response was a non-success have an empty Message id
+    // and the corresponding ApiError. The top-level error covers a
+    // network-level failure of the batch envelope itself (in which
+    // case `results` is empty).
+    //
+    // `format` is "metadata" (default for the meta-first pass) or
+    // "full". The caller decides how many ids fit in one batch; Gmail
+    // documents a hard limit of 100 sub-requests per batch but
+    // practical sweet spots are 20-50 to keep individual response
+    // sizes manageable.
+    struct BatchMessageResult {
+        fc::Message msg;
+        ApiError    err;
+    };
+    void batchGetMessages(const QStringList& ids,
+                           const QString& format,
+                           std::function<void(std::vector<BatchMessageResult>,
+                                                ApiError)> cb);
 
     // GET /gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId}
     // Returns the raw decoded bytes (the API replies with base64url-encoded

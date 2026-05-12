@@ -4,6 +4,7 @@
 #include "SessionTransfer.h"
 #include "auth/OAuthClient.h"
 
+#include <QByteArray>
 #include <QHttpMultiPart>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -11,6 +12,8 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QTimer>
 
 namespace fc::api {
@@ -178,6 +181,213 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
 
         cb(data, err);
     });
+}
+
+// ---- Batch endpoint -------------------------------------------------------
+//
+// Gmail's /batch endpoint accepts a single multipart/mixed POST containing
+// one application/http sub-part per logical request, and replies with a
+// multipart/mixed body of the same shape on the response side. Each
+// sub-request gets routed by the server as if it had arrived on its own
+// connection, with one notable saving: the batch counts as a single
+// concurrent request against the per-user quota regardless of how many
+// sub-requests it carries. For our meta-only first-pass over freshly-
+// listed message ids this turns ~50 round-trips into ~1.
+
+namespace {
+
+QByteArray verbName(RestClient::Verb v) {
+    switch (v) {
+        case RestClient::Verb::Get:    return "GET";
+        case RestClient::Verb::Post:   return "POST";
+        case RestClient::Verb::Put:    return "PUT";
+        case RestClient::Verb::Patch:  return "PATCH";
+        case RestClient::Verb::Delete: return "DELETE";
+    }
+    return "GET";
+}
+
+QByteArray randomBoundary() {
+    // Boundary just needs to be unique enough that no message body can
+    // accidentally contain it. Random 64-bit hex matches the convention
+    // used by Google's own client libraries.
+    const quint64 r1 = QRandomGenerator::global()->generate64();
+    const quint64 r2 = QRandomGenerator::global()->generate64();
+    return QByteArrayLiteral("batch_")
+         + QByteArray::number(r1, 16)
+         + QByteArray::number(r2, 16);
+}
+
+}  // namespace
+
+void RestClient::sendBatch(std::vector<BatchSubRequest> requests,
+                            BatchDoneCb cb) {
+    if (requests.empty()) {
+        cb({}, ApiError{});
+        return;
+    }
+
+    const QByteArray boundary = randomBoundary();
+    QByteArray body;
+    body.reserve(int(requests.size()) * 256);
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const auto& r = requests[i];
+        body += "--";
+        body += boundary;
+        body += "\r\n";
+        body += "Content-Type: application/http\r\n";
+        // Content-ID is what Gmail echoes back on the response so we
+        // can map a response part to its index. Using the form
+        // <item-N> matches what the official client uses; the server
+        // returns <response-item-N> in the corresponding response
+        // part — that's what the parser keys on.
+        body += "Content-ID: <item-";
+        body += QByteArray::number(qulonglong(i));
+        body += ">\r\n\r\n";
+        body += verbName(r.verb);
+        body += ' ';
+        body += r.path;
+        body += " HTTP/1.1\r\n";
+        if (!r.body.isEmpty()) {
+            if (!r.contentType.isEmpty()) {
+                body += "Content-Type: ";
+                body += r.contentType;
+                body += "\r\n";
+            }
+            body += "Content-Length: ";
+            body += QByteArray::number(r.body.size());
+            body += "\r\n\r\n";
+            body += r.body;
+            body += "\r\n";
+        } else {
+            body += "\r\n";
+        }
+    }
+    body += "--";
+    body += boundary;
+    body += "--\r\n";
+
+    const QByteArray outerContentType =
+        QByteArrayLiteral("multipart/mixed; boundary=") + boundary;
+
+    const int expected = int(requests.size());
+    const QUrl url(QStringLiteral("https://gmail.googleapis.com/batch"));
+
+    // The outer call is a POST through `send`, so the existing
+    // retry-only-on-429 policy applies (correct: a successful POST
+    // could double-process sub-requests if we naively re-sent on a
+    // 5xx). Sub-request-level retry is the caller's responsibility
+    // — typical pattern is to re-batch failures with backoff.
+    send(Verb::Post, url, body, outerContentType,
+        [cb = std::move(cb), expected]
+        (QByteArray respBody, ApiError err) {
+            if (err) { cb({}, err); return; }
+            // Need the outer Content-Type to find the response
+            // boundary. send() doesn't surface headers, so we use a
+            // tolerant scan: pull the boundary from the first part
+            // marker in the body itself. Every Gmail batch response
+            // starts with "--<boundary>\r\n", so the first non-empty
+            // line gives us what we need without depending on a
+            // header passthrough.
+            QByteArray boundary;
+            const int firstNl = respBody.indexOf("\r\n");
+            if (firstNl > 2 && respBody.startsWith("--")) {
+                boundary = respBody.mid(2, firstNl - 2);
+            }
+            if (boundary.isEmpty()) {
+                cb({}, ApiError{ApiErrorKind::Parse, 0,
+                                QStringLiteral("batch: no boundary in response"),
+                                {}});
+                return;
+            }
+            cb(RestClient::parseBatchResponse(respBody, boundary, expected),
+                ApiError{});
+        });
+}
+
+std::vector<RestClient::BatchSubResult>
+RestClient::parseBatchResponse(const QByteArray& body,
+                                const QByteArray& boundary,
+                                int expected) {
+    std::vector<BatchSubResult> results(expected);
+
+    const QByteArray sep = QByteArrayLiteral("--") + boundary;
+    int searchFrom = 0;
+    QRegularExpression contentIdRe(
+        QStringLiteral("Content-ID:\\s*<response-item-(\\d+)>"),
+        QRegularExpression::CaseInsensitiveOption);
+    QRegularExpression statusLineRe(
+        QStringLiteral("^HTTP/[\\d.]+\\s+(\\d+)"));
+
+    while (true) {
+        const int start = body.indexOf(sep, searchFrom);
+        if (start < 0) break;
+        int afterSep = start + sep.size();
+        // Trailing "--" marks the end of the multipart envelope.
+        if (afterSep + 2 <= body.size()
+            && body.at(afterSep) == '-' && body.at(afterSep + 1) == '-') {
+            break;
+        }
+        // Skip the CRLF that follows the boundary line.
+        if (afterSep + 1 < body.size()
+            && body.at(afterSep) == '\r' && body.at(afterSep + 1) == '\n') {
+            afterSep += 2;
+        } else if (afterSep < body.size() && body.at(afterSep) == '\n') {
+            afterSep += 1;
+        }
+        const int nextSep = body.indexOf(sep, afterSep);
+        const int partEnd = (nextSep < 0) ? body.size() : nextSep;
+        // Trim the single trailing CRLF that sits between the part and
+        // the next boundary marker (RFC 2046: the CRLF preceding the
+        // boundary delimiter is considered part of the delimiter, not
+        // the part). Do NOT trim further — an HTTP response with no
+        // body still terminates its headers with \r\n\r\n, and over-
+        // eager trimming would erase that separator and break the
+        // inner header/body split below.
+        int partStop = partEnd;
+        if (partStop - afterSep >= 2
+            && body.at(partStop - 2) == '\r'
+            && body.at(partStop - 1) == '\n') {
+            partStop -= 2;
+        } else if (partStop - afterSep >= 1
+                   && body.at(partStop - 1) == '\n') {
+            partStop -= 1;
+        }
+        const QByteArray part = body.mid(afterSep, partStop - afterSep);
+        searchFrom = (nextSep < 0) ? body.size() : nextSep;
+
+        // Split the part into outer headers vs the embedded HTTP
+        // response. The outer headers carry Content-ID identifying
+        // the index; the embedded response carries the inner status
+        // line + headers + body.
+        const int outerHdrEnd = part.indexOf("\r\n\r\n");
+        if (outerHdrEnd < 0) continue;
+        const QByteArray outerHeaders = part.left(outerHdrEnd);
+        const QByteArray inner = part.mid(outerHdrEnd + 4);
+
+        int idx = -1;
+        const auto m = contentIdRe.match(QString::fromLatin1(outerHeaders));
+        if (m.hasMatch()) idx = m.captured(1).toInt();
+        if (idx < 0 || idx >= expected) continue;
+
+        // Inner: status line, then inner headers, then body.
+        const int innerHdrEnd = inner.indexOf("\r\n\r\n");
+        if (innerHdrEnd < 0) continue;
+        const QByteArray innerHead = inner.left(innerHdrEnd);
+        const QByteArray innerBody = inner.mid(innerHdrEnd + 4);
+
+        // First line of innerHead carries the status.
+        int firstLineEnd = innerHead.indexOf("\r\n");
+        if (firstLineEnd < 0) firstLineEnd = innerHead.size();
+        const QByteArray statusLine = innerHead.left(firstLineEnd);
+        const auto sm = statusLineRe.match(QString::fromLatin1(statusLine));
+        int status = 0;
+        if (sm.hasMatch()) status = sm.captured(1).toInt();
+
+        results[idx].status = status;
+        results[idx].body   = innerBody;
+    }
+    return results;
 }
 
 }  // namespace fc::api

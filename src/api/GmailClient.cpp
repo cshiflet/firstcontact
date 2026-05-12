@@ -52,16 +52,92 @@ void GmailClient::listMessages(const QString& labelId,
 }
 
 void GmailClient::getMessage(const QString& id,
+                             const QString& format,
                              std::function<void(fc::Message, ApiError)> cb) {
     QUrl url = base(QStringLiteral("/messages/") + id);
     QUrlQuery q;
-    q.addQueryItem(QStringLiteral("format"), QStringLiteral("full"));
+    const QString fmt = format.isEmpty() ? QStringLiteral("full") : format;
+    q.addQueryItem(QStringLiteral("format"), fmt);
     url.setQuery(q);
 
     rest_->send(RestClient::Verb::Get, url, {}, {},
         [cb = std::move(cb)](QByteArray body, ApiError err) {
             if (err) { cb({}, err); return; }
             cb(MessageParser::parse(QJsonDocument::fromJson(body).object()), {});
+        });
+}
+
+void GmailClient::getMessage(const QString& id,
+                             std::function<void(fc::Message, ApiError)> cb) {
+    getMessage(id, QStringLiteral("full"), std::move(cb));
+}
+
+void GmailClient::batchGetMessages(
+        const QStringList& ids,
+        const QString& format,
+        std::function<void(std::vector<BatchMessageResult>, ApiError)> cb) {
+    if (ids.isEmpty()) {
+        cb({}, {});
+        return;
+    }
+    const QString fmt = format.isEmpty() ? QStringLiteral("metadata") : format;
+
+    std::vector<RestClient::BatchSubRequest> requests;
+    requests.reserve(ids.size());
+    for (const QString& id : ids) {
+        RestClient::BatchSubRequest r;
+        r.verb = RestClient::Verb::Get;
+        // The path is relative to https://gmail.googleapis.com — include
+        // /gmail/v1/users/me explicitly because the batch endpoint itself
+        // is rooted at /batch (no implicit /gmail/v1 prefix).
+        r.path = (QStringLiteral("/gmail/v1/users/me/messages/")
+                  + id
+                  + QStringLiteral("?format=") + fmt).toUtf8();
+        requests.push_back(std::move(r));
+    }
+
+    rest_->sendBatch(std::move(requests),
+        [ids, cb = std::move(cb)]
+        (std::vector<RestClient::BatchSubResult> parts, ApiError err) {
+            if (err) { cb({}, err); return; }
+            std::vector<BatchMessageResult> out;
+            out.reserve(parts.size());
+            for (size_t i = 0; i < parts.size(); ++i) {
+                BatchMessageResult br;
+                const auto& p = parts[i];
+                if (p.status >= 200 && p.status < 300 && !p.body.isEmpty()) {
+                    br.msg = MessageParser::parse(
+                        QJsonDocument::fromJson(p.body).object());
+                } else if (p.status == 0) {
+                    br.err = ApiError{ApiErrorKind::Parse, 0,
+                                      QStringLiteral("batch: missing sub-response"),
+                                      {}};
+                } else {
+                    br.err = ApiError{};
+                    br.err.httpStatus = p.status;
+                    if (p.status == 429) br.err.kind = ApiErrorKind::RateLimited;
+                    else if (p.status == 404) br.err.kind = ApiErrorKind::NotFound;
+                    else if (p.status >= 500) br.err.kind = ApiErrorKind::Server;
+                    else if (p.status >= 400) br.err.kind = ApiErrorKind::BadRequest;
+                    else br.err.kind = ApiErrorKind::Other;
+                }
+                out.push_back(std::move(br));
+            }
+            // If every sub-response is empty/missing, surface a single
+            // parse error so the caller doesn't silently get a vector
+            // of empties.
+            bool anyOk = false;
+            for (const auto& r : out) {
+                if (!r.msg.id.isEmpty()) { anyOk = true; break; }
+            }
+            if (!anyOk && !out.empty()) {
+                cb(std::move(out),
+                   ApiError{ApiErrorKind::Parse, 0,
+                            QStringLiteral("batch: all sub-responses empty"),
+                            {}});
+                return;
+            }
+            cb(std::move(out), {});
         });
 }
 
