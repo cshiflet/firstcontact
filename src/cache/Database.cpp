@@ -27,6 +27,12 @@ void applyPragmas(QSqlDatabase& db) {
     q.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
     q.exec(QStringLiteral("PRAGMA temp_store = MEMORY"));
     q.exec(QStringLiteral("PRAGMA mmap_size = 67108864"));  // 64 MB
+    // Wait up to 5s for transient SQLITE_BUSY before erroring out.
+    // Without this, any cross-thread write contention (sync writing
+    // while the compression worker UPDATEs, etc.) surfaces as an
+    // immediate "database is locked" failure even though the lock
+    // would have cleared in milliseconds.
+    q.exec(QStringLiteral("PRAGMA busy_timeout = 5000"));
 }
 
 }  // namespace

@@ -213,13 +213,15 @@ void BodyCompressionWorker::doWork() {
     emit progress(accountId_, 0, totalToRewrite);
 
     int done = 0;
+    int failedUpdates = 0;
     qint64 savedBytes = 0;
+    // Cursor-style pagination: each chunk SELECT pulls ids strictly
+    // greater than the previous chunk's max id. Without this, a row
+    // whose UPDATE failed mid-walk (e.g. transient SQLITE_BUSY) would
+    // stay eligible for selection and reappear in every subsequent
+    // chunk — infinite loop, `done` climbing past totalToRewrite.
+    QString cursorId;   // empty = start at the beginning of id order
     while (true) {
-        // Pull a chunk of row ids that still need rewriting. We
-        // re-query each iteration so concurrent sync writes that
-        // flip a row to compressed (because they used the new dict)
-        // naturally drop out — the WHERE clause excludes already-
-        // compressed rows in InitialTrain mode.
         std::vector<QString> rowIds;
         {
             auto db = databaseHandle();
@@ -231,11 +233,13 @@ void BodyCompressionWorker::doWork() {
             q.prepare(QStringLiteral(
                 "SELECT id FROM messages "
                 "WHERE account_id = :a "
+                "  AND id > :cursor "
                 "  AND ((body_text  IS NOT NULL AND length(body_text)  > 0) "
                 "    OR (body_html  IS NOT NULL AND length(body_html)  > 0))"
-                "%1 LIMIT :n").arg(whereCompression));
-            q.bindValue(QStringLiteral(":a"), accountId_);
-            q.bindValue(QStringLiteral(":n"), kBackfillChunkSize);
+                "%1 ORDER BY id LIMIT :n").arg(whereCompression));
+            q.bindValue(QStringLiteral(":a"),      accountId_);
+            q.bindValue(QStringLiteral(":cursor"), cursorId);
+            q.bindValue(QStringLiteral(":n"),      kBackfillChunkSize);
             if (!q.exec()) {
                 emit failed(accountId_,
                     QStringLiteral("compression chunk query: %1")
@@ -246,6 +250,10 @@ void BodyCompressionWorker::doWork() {
             while (q.next()) rowIds.push_back(q.value(0).toString());
         }
         if (rowIds.empty()) break;
+        // Advance the cursor to the last id in this chunk, regardless
+        // of whether individual UPDATEs succeed. Failed rows are
+        // logged but never re-attempted by this run.
+        cursorId = rowIds.back();
 
         // Rewrite the chunk inside one transaction. Each UPDATE is
         // a separate prepared statement; SQLite buffers them in the
@@ -343,6 +351,7 @@ void BodyCompressionWorker::doWork() {
                 qWarning("BodyCompression: update %s failed: %s",
                          qUtf8Printable(id),
                          qUtf8Printable(upd.lastError().text()));
+                ++failedUpdates;
                 continue;
             }
 
@@ -371,8 +380,9 @@ void BodyCompressionWorker::doWork() {
         }
     }
 
-    qInfo("BodyCompression: done. rewroteCount=%d savedBytes=%lld",
-          done, static_cast<long long>(savedBytes));
+    qInfo("BodyCompression: done. rewroteCount=%d failedUpdates=%d "
+          "savedBytes=%lld",
+          done, failedUpdates, static_cast<long long>(savedBytes));
     emit finished(accountId_, done, savedBytes);
     thread_->quit();
 }
