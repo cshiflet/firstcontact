@@ -606,13 +606,7 @@ void MainWindow::onOpenSettings() {
         cdlg.exec();
     });
     connect(&dlg, &SettingsDialog::recompressRequested, this, [this] {
-        // Pick the account to recompress: today there's no Settings-
-        // side account picker, so default to the active account.
-        // Future improvement: per-account row in the Storage section
-        // with its own Recompress button. For now this matches the
-        // single most-common case.
-        if (currentAccountId_.isEmpty()) return;
-        onRecompressRequested(currentAccountId_);
+        onRecompressAllAccounts();
     });
     connect(&dlg, &SettingsDialog::backgroundCrawlSettingsChanged, this,
             [this] { applyBackgroundCrawlerSettings(); });
@@ -3710,6 +3704,58 @@ void MainWindow::onCompressionPromptDue(const QString& accountId,
     // Cancel = do nothing; the dialog won't pop again this session.
 }
 
+void MainWindow::onRecompressAllAccounts() {
+    if (!accounts_) return;
+    QStringList eligible;
+    int totalRows = 0;
+    QStringList lines;
+    for (const auto& a : accounts_->accounts()) {
+        auto* c = accounts_->contextFor(a.id);
+        if (!c || !c->auth() || !c->auth()->isAuthorized()) continue;
+        const int rows = fc::cache::MessageRepository::bodyCountFor(a.id);
+        if (rows == 0) continue;
+        eligible << a.id;
+        totalRows += rows;
+        lines << tr("  • %1 — %n message(s)", "", rows)
+                  .arg(a.email.isEmpty() ? a.id : a.email);
+    }
+    if (eligible.isEmpty()) {
+        QMessageBox::information(this, tr("Recompress"),
+            tr("No signed-in accounts have cached bodies to recompress."));
+        return;
+    }
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Recompress message database"));
+    box.setText(tr("Recompress every signed-in account?"));
+    box.setInformativeText(tr(
+        "Per account:\n%1\n\n"
+        "Total: %2 message(s). Accounts run sequentially; the "
+        "progress dialog stays open per account so you can watch "
+        "each pass and see any errors.")
+        .arg(lines.join(QStringLiteral("\n")))
+        .arg(QLocale::system().toString(totalRows)));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    box.setDefaultButton(QMessageBox::No);
+    if (box.exec() != QMessageBox::Yes) return;
+
+    recompressPending_ = eligible;
+    dequeueNextRecompress();
+}
+
+void MainWindow::dequeueNextRecompress() {
+    if (recompressPending_.isEmpty()) return;
+    const QString next = recompressPending_.takeFirst();
+    // Skip accounts whose worker is already in flight (shouldn't
+    // happen during a batch, but a stray manual recompress could).
+    if (compressionWorkers_.value(next)) {
+        dequeueNextRecompress();
+        return;
+    }
+    startCompressionWorker(next,
+        fc::cache::BodyCompressionWorker::Mode::Recompress);
+}
+
 void MainWindow::onRecompressRequested(const QString& accountId) {
     if (accountId.isEmpty()) return;
     if (compressionWorkers_.value(accountId)) {
@@ -3771,6 +3817,9 @@ void MainWindow::startCompressionWorker(
                     tr("Compression done: %1 message(s) rewritten, "
                        "%2 reclaimed.").arg(rewroteCount).arg(human),
                     15000);
+                // No-op when recompressPending_ is empty (single-
+                // account path); kicks the next account otherwise.
+                self->dequeueNextRecompress();
             });
     connect(w, &fc::cache::BodyCompressionWorker::failed, this,
             [self, accountId](const QString&, const QString& reason) {
@@ -3778,6 +3827,7 @@ void MainWindow::startCompressionWorker(
                 self->compressionWorkers_.remove(accountId);
                 self->statusBar()->showMessage(
                     tr("Compression failed: %1").arg(reason), 15000);
+                self->dequeueNextRecompress();
             });
 
     w->start();

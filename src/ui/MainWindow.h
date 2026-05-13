@@ -133,6 +133,17 @@ private slots:
     // spawns a BodyCompressionWorker in Recompress mode.
     void onRecompressRequested(const QString& accountId);
 
+    // Settings → "Recompress now…" entry point: enumerates every
+    // authorized account, shows a single batch confirmation, then
+    // runs Recompress sequentially across them. Dialog stays open
+    // per account; finishing one auto-starts the next via the queue.
+    void onRecompressAllAccounts();
+
+    // Internal: pop the next queued account off recompressPending_
+    // and kick off its Recompress worker. Wired from the per-worker
+    // finished / failed handlers in startCompressionWorker.
+    void dequeueNextRecompress();
+
     // Helper: spawn a worker, wire its signals to status-bar
     // progress, and stash the QPointer in compressionWorkers_ so a
     // duplicate trigger is gated out. Mode controls whether existing
@@ -322,6 +333,11 @@ private:
     // exit), so MainWindow doesn't need to delete it.
     QHash<QString, QPointer<fc::cache::BodyCompressionWorker>>
                               compressionWorkers_;
+    // Account ids still waiting to be Recompress'd as part of a
+    // batch run kicked off by onRecompressAllAccounts. The active
+    // worker's finished/failed handler pops the next one and starts
+    // it. Empty when no batch is in flight.
+    QStringList               recompressPending_;
     QHash<QString, bool>     serverExhaustedByLabel_;
 
     // Per-label scroll memory: keyed by `<accountId>::<labelId>` so
