@@ -1364,6 +1364,19 @@ void MainWindow::wireSignals() {
     // brings the new rows back via refreshFromSource above.
     connect(listModel_, &fc::MessageListModel::cacheExhausted,
             this,        [this](const QString& labelId) {
+                // Once Gmail has told us "no more for this label",
+                // re-kicking topUpLabel is a free no-op for the
+                // worker but a feedback loop here: the view stays
+                // scrolled to the bottom, the model keeps emitting
+                // cacheExhausted, and we'd keep posting topUpLabel
+                // forever (the log fills with "kicking topUpLabel"
+                // / "busy, skip" / "newRows=0 serverExhausted=1"
+                // cycles). Mirror the same guard the scroll-bar
+                // handler below uses.
+                if (serverExhaustedByLabel_.value(labelId, false)) {
+                    refreshListFooter();
+                    return;
+                }
                 qInfo("MainWindow: cacheExhausted label='%s', kicking topUpLabel",
                       qUtf8Printable(labelId));
                 if (auto* ctx = accounts_ ? accounts_->currentContext()
