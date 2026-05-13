@@ -207,6 +207,62 @@ bool plainTextLooksLossy(const QString& text) {
     return false;
 }
 
+// Strip the invisible-padding HTML entities marketers stuff into the
+// text/plain part to keep "preview text" out of inbox snippets:
+//   &zwnj; / &zwj;  — zero-width (non-)joiners
+//   &shy;            — soft hyphen
+//   &nbsp;           — non-breaking space → collapse to ' '
+// Numeric forms (&#8204;, &#x200C; etc.) are normalized too. Runs of
+// whitespace left behind are collapsed; the result is what a normal
+// person would consider the "actual" plaintext content.
+QString stripPaddingEntities(const QString& in) {
+    if (in.isEmpty()) return in;
+    QString s = in;
+    static const QStringList kStrip = {
+        QStringLiteral("&zwnj;"),  QStringLiteral("&zwj;"),
+        QStringLiteral("&shy;"),
+        QStringLiteral("&#8204;"), QStringLiteral("&#8205;"),
+        QStringLiteral("&#173;"),
+        QStringLiteral("&#x200C;"),QStringLiteral("&#x200c;"),
+        QStringLiteral("&#x200D;"),QStringLiteral("&#x200d;"),
+        QStringLiteral("&#xAD;"),  QStringLiteral("&#xad;"),
+    };
+    for (const auto& e : kStrip) s.replace(e, QString());
+    s.replace(QStringLiteral("&nbsp;"),  QStringLiteral(" "));
+    s.replace(QStringLiteral("&#160;"),  QStringLiteral(" "));
+    s.replace(QStringLiteral("&#xA0;"),  QStringLiteral(" "));
+    s.replace(QStringLiteral("&#xa0;"),  QStringLiteral(" "));
+    // Collapse the long runs of spaces left behind by stripping, but
+    // keep newlines so paragraphs survive.
+    QString out;
+    out.reserve(s.size());
+    bool prevSpace = false;
+    for (QChar c : s) {
+        const bool isSpace = (c == QLatin1Char(' ') || c == QLatin1Char('\t'));
+        if (isSpace) {
+            if (!prevSpace) out += QLatin1Char(' ');
+            prevSpace = true;
+        } else {
+            out += c;
+            prevSpace = (c == QLatin1Char('\n')) ? false : false;
+            if (c == QLatin1Char('\n')) prevSpace = false;
+        }
+    }
+    return out.trimmed();
+}
+
+// Recognize the entity-padding pattern even when individual lines stay
+// short (the lossy-line heuristic above won't catch this). Compares
+// the visible character count after entity-stripping to the original
+// length: if stripping eats more than 60% of the body AND what's left
+// is tiny, the part is decoration not content.
+bool plainTextIsEntityPadding(const QString& text) {
+    if (text.size() < 200) return false;   // small bodies aren't worth scanning
+    const QString stripped = stripPaddingEntities(text);
+    if (stripped.size() < 64) return true;
+    return stripped.size() * 5 < text.size() * 2;   // < 40% retained
+}
+
 QString bodyHtml(const fc::Message& m) {
     QElapsedTimer timer; timer.start();
     qInfo("ReaderPane bodyHtml: id=%s bodyText=%lld bodyHtml=%lld",
@@ -216,16 +272,22 @@ QString bodyHtml(const fc::Message& m) {
 
     // Prefer the HTML body when the plain-text part looks auto-generated
     // and lossy — we can re-derive plain text from HTML with paragraph
-    // structure intact via util::html2text. The original bodyText path
-    // still wins when text/plain is genuinely useful (most personal
-    // mail, mailing-list digests, and any sender who composed a
-    // text-first body).
+    // structure intact via util::html2text. Triggers: a wall-of-text
+    // line (ESP tag-strippers' output) or invisible-entity padding
+    // (marketers stuffing &zwnj;/&shy; to push real content off the
+    // inbox-preview snippet).
     const bool preferHtmlOverLossyText = !m.bodyHtml.isEmpty()
-        && plainTextLooksLossy(m.bodyText);
+        && (plainTextLooksLossy(m.bodyText)
+            || plainTextIsEntityPadding(m.bodyText));
 
     if (!m.bodyText.isEmpty() && !preferHtmlOverLossyText) {
         const qint64 t0 = timer.elapsed();
-        QString out = util::linkifyPlainText(m.bodyText,
+        // Even when we stick with text/plain, strip padding entities
+        // first so a half-padded body doesn't render with rows of
+        // visible "&zwnj;" tokens. Cheap (a handful of replace()
+        // passes) and a no-op for entity-free bodies.
+        const QString cleaned = stripPaddingEntities(m.bodyText);
+        QString out = util::linkifyPlainText(cleaned,
                                               Preferences::linkDisplayMode());
         qInfo("ReaderPane: text-only (cached bodyText path) "
               "linkify=%lldms total=%lldms",
