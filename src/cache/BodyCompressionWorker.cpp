@@ -230,10 +230,16 @@ void BodyCompressionWorker::doWork() {
                 (mode_ == Mode::Recompress)
                 ? QString()
                 : QStringLiteral(" AND body_compression = 0");
+            // COALESCE(:cursor, '') because Qt's SQLite driver binds
+            // an empty QString as SQL NULL — without the coalesce,
+            // `id > NULL` is NULL (falsy) and the very first chunk
+            // returns zero rows. With the coalesce, an empty cursor
+            // becomes '', which compares less than any real (non-
+            // empty) Gmail message id.
             q.prepare(QStringLiteral(
                 "SELECT id FROM messages "
                 "WHERE account_id = :a "
-                "  AND id > :cursor "
+                "  AND id > COALESCE(:cursor, '') "
                 "  AND ((body_text  IS NOT NULL AND length(body_text)  > 0) "
                 "    OR (body_html  IS NOT NULL AND length(body_html)  > 0))"
                 "%1 ORDER BY id LIMIT :n").arg(whereCompression));
@@ -281,17 +287,17 @@ void BodyCompressionWorker::doWork() {
 
             const qint64 beforeBytes = bt.size() + bh.size();
 
-            // Decompress with the OLD dict snapshot — the rows on
-            // disk were typically written against it. Compress
-            // below with the NEW dict. As a fallback, try the NEW
-            // dict for decompression too: a concurrent sync write
-            // (e.g. the GUI process re-fetching bodies while
-            // compress-db runs from the CLI) may have stored rows
-            // with the dict we JUST trained, so they need the new
-            // dict to decode. An empty result from BOTH dicts is a
-            // genuine mismatch; abort there rather than silently
-            // null out body content across the rest of the cache.
-            auto decompressOrAbort = [&](QByteArray& field,
+            // Decompress with the OLD dict snapshot first (the
+            // typical case), falling back to the just-trained dict
+            // for rows written by a concurrent sync. If BOTH fail
+            // the row is an orphan from a prior aborted recompress
+            // — the bytes on disk were compressed with a dict
+            // neither we nor the DB has anymore. Skip it (don't
+            // rewrite) and let the reader's next attempt re-fetch
+            // from Gmail. One bad row no longer aborts the whole
+            // recompress.
+            bool rowSkipped = false;
+            auto decompressOrSkip = [&](QByteArray& field,
                                           const char* which) -> bool {
                 if (!fc::util::BodyCodec::isCompressed(field)) return true;
                 if (!oldDict.isEmpty()) {
@@ -302,8 +308,6 @@ void BodyCompressionWorker::doWork() {
                         return true;
                     }
                 }
-                // Old dict missing or wrong — try the newly-trained
-                // dict (handles the concurrent-sync race).
                 QByteArray decoded =
                     fc::util::BodyCodec::decompress(field, dict);
                 if (!decoded.isEmpty()) {
@@ -311,20 +315,17 @@ void BodyCompressionWorker::doWork() {
                     return true;
                 }
                 qWarning("BodyCompression: %s decompress failed for "
-                         "%s under both old and new dicts; aborting.",
+                         "%s (orphaned dict); skipping row.",
                          which, qUtf8Printable(id));
+                rowSkipped = true;
                 return false;
             };
-            if (!decompressOrAbort(bt, "body_text")
-                || !decompressOrAbort(bh, "body_html")) {
-                db.rollback();
-                emit failed(accountId_, QStringLiteral(
-                    "compression: aborting to preserve cache — "
-                    "decompress failed mid-walk. Body content "
-                    "on disk is unchanged."));
-                thread_->quit();
-                return;
+            if (!decompressOrSkip(bt, "body_text")
+                || !decompressOrSkip(bh, "body_html")) {
+                ++failedUpdates;
+                continue;
             }
+            Q_UNUSED(rowSkipped);
 
             const QByteArray newBt = bt.isEmpty()
                 ? QByteArray() : fc::util::BodyCodec::compress(bt, dict);
