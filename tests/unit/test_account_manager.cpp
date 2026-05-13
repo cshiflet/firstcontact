@@ -215,7 +215,14 @@ private slots:
         }
 
         const qint64 size = mgr.cacheSizeFor(id);
-        QVERIFY(size >= 3 * 1024);
+        // The intent here is to verify cacheSizeFor sums bytes_cached
+        // across the per-account messages — not to assert any
+        // particular storage size. With the bundled-dict fallback in
+        // MessageRepository::dictionaryFor, bodies that previously
+        // landed as raw plaintext are now zstd-compressed, so the
+        // old "size >= 3 * 1024" lower bound no longer holds (3 KB of
+        // 'x's compresses to ~30 bytes).
+        QVERIFY(size > 0);
     }
 
     void orphanedAccountIdsListsRowsWithoutAccountsEntry() {

@@ -6,6 +6,7 @@
 #include "util/BodyCodec.h"
 
 #include <QDateTime>
+#include <QFile>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -58,6 +59,25 @@ QByteArray loadDictFromDb(const QString& accountId) {
     return q.value(0).toByteArray();
 }
 
+// Bundled public-corpus-trained dictionary (dictID 0x46430001),
+// shipped at :/compression/bundled-bodies-v1.zdict. Loaded once per
+// process via a thread-safe static (C++11 magic-static); the returned
+// QByteArray is implicit-shared so per-account cache entries that
+// reference it cost essentially nothing extra in memory.
+const QByteArray& loadBundledDict() {
+    static const QByteArray bundled = []() {
+        QFile f(QStringLiteral(":/compression/bundled-bodies-v1.zdict"));
+        if (!f.open(QIODevice::ReadOnly)) {
+            qWarning("MessageRepository: bundled dict resource missing — "
+                     "compression will pass through until per-account "
+                     "training runs");
+            return QByteArray();
+        }
+        return f.readAll();
+    }();
+    return bundled;
+}
+
 QByteArray dictFor(const QString& accountId) {
     if (accountId.isEmpty()) return {};
     QMutexLocker lock(&g_dictMutex);
@@ -69,6 +89,15 @@ QByteArray dictFor(const QString& accountId) {
     // harmless (one of two identical dictionaries wins the insert).
     lock.unlock();
     QByteArray dict = loadDictFromDb(accountId);
+    if (dict.isEmpty()) {
+        // No per-account dict yet — fall back to the bundled dict so
+        // new writes still compress and any previously-compressed rows
+        // (e.g. carried over from a fresh install that started with
+        // the bundled dict) remain decompressable. When the user later
+        // runs per-account training, saveDictionary overwrites the
+        // cache entry with the trained per-account bytes.
+        dict = loadBundledDict();
+    }
     lock.relock();
     g_dictCache.insert(accountId, dict);
     g_dictLoaded.insert(accountId);
