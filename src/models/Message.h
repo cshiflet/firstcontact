@@ -55,6 +55,11 @@ struct Message {
     // opens a message that was only meta-synced.
     QString fetchedFormat;
 
+    // 0 = plaintext, 1 = zstd_dict_v1, 2 = orphan (bytes compressed
+    // against a dict we no longer have; reader triggers re-fetch).
+    // Mirrors messages.body_compression.
+    int     bodyCompression = 0;
+
     QStringList labelIds;
     std::vector<Attachment> attachments;
 

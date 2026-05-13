@@ -73,6 +73,7 @@ QVariant MessageListModel::data(const QModelIndex& idx, int role) const {
         case IsChildRole:       return m.isThreadChild;
         case IsExpandedRole:    return !m.isThreadChild
                                      && expandedThreads_.contains(m.threadId);
+        case IsBodyOrphanedRole: return m.bodyCompression == 2;
         case Qt::DisplayRole:
             return QStringLiteral("%1 — %2").arg(
                 decode(m.fromName.isEmpty() ? m.fromAddr : m.fromName),
@@ -100,6 +101,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const {
         {IsExpandedRole,        "expanded"},
         {IsPlaceholderRole,     "isPlaceholder"},
         {PlaceholderTextRole,   "placeholderText"},
+        {IsBodyOrphanedRole,    "bodyOrphaned"},
     };
 }
 

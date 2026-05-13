@@ -52,6 +52,11 @@ public:
         IsPlaceholderRole,
         // Text content for the placeholder row.
         PlaceholderTextRole,
+        // Bool — true when messages.body_compression == 2 (orphan
+        // sentinel: bytes were compressed against a dict we no
+        // longer have). Drives a tiny "needs re-fetch" indicator
+        // in the delegate.
+        IsBodyOrphanedRole,
     };
 
     // Footer placeholder state — drives the synthetic last-row

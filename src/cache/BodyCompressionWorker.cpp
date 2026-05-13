@@ -322,6 +322,21 @@ void BodyCompressionWorker::doWork() {
             };
             if (!decompressOrSkip(bt, "body_text")
                 || !decompressOrSkip(bh, "body_html")) {
+                // Stamp the row so the reader / list can render it
+                // as "needs re-fetch" without re-attempting the
+                // failed decode every time. body_compression=2 is
+                // the orphan sentinel (documented in schema.sql).
+                QSqlQuery mark(db);
+                mark.prepare(QStringLiteral(
+                    "UPDATE messages SET body_compression = 2 "
+                    "WHERE account_id = :a AND id = :id"));
+                mark.bindValue(QStringLiteral(":a"),  accountId_);
+                mark.bindValue(QStringLiteral(":id"), id);
+                if (!mark.exec()) {
+                    qWarning("BodyCompression: failed to mark orphan "
+                             "%s: %s", qUtf8Printable(id),
+                             qUtf8Printable(mark.lastError().text()));
+                }
                 ++failedUpdates;
                 continue;
             }

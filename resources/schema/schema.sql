@@ -101,6 +101,11 @@ CREATE TABLE messages (
     -- BLOB bytes (SQLite is dynamic). body_compression interprets them:
     --   0 = plaintext
     --   1 = zstd_dict_v1 (BodyCodec magic-prefixed; see body_compression_dict)
+    --   2 = orphaned — bytes are zstd_dict_v1 but compressed against a
+    --       dict we no longer have (a recompress walk couldn't decode
+    --       them with either the snapshotted old dict or the freshly
+    --       trained one). The reader treats these as missing and
+    --       triggers a Gmail re-fetch on open.
     body_text           TEXT,
     body_html           TEXT,
     body_html_present   INTEGER NOT NULL DEFAULT 0,

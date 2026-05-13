@@ -137,6 +137,7 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
     const bool starred    = idx.data(fc::MessageListModel::StarredRole).toBool();
     const bool important  = idx.data(fc::MessageListModel::ImportantRole).toBool();
     const bool hasAttach  = idx.data(fc::MessageListModel::HasAttachmentRole).toBool();
+    const bool bodyOrphan = idx.data(fc::MessageListModel::IsBodyOrphanedRole).toBool();
     const QString fromRaw = idx.data(fc::MessageListModel::FromRole).toString();
     const QString subject = idx.data(fc::MessageListModel::SubjectRole).toString();
     const QString snippet = idx.data(fc::MessageListModel::SnippetRole).toString();
@@ -321,6 +322,23 @@ void MessageItemDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt,
                        kAttachmentIconSize, kAttachmentIconSize);
         icon.paint(p, ir, Qt::AlignCenter, QIcon::Normal, QIcon::On);
         rightCursor = ir.left() - 6;
+    }
+    // Orphan-body indicator: a small amber dot sits to the left of
+    // wherever the attachment icon would have been (or the right edge
+    // if there isn't one). Tells the user "we couldn't decompress
+    // this row's body and the next open will re-fetch from Gmail."
+    if (bodyOrphan) {
+        constexpr int kOrphanDotSize = 8;
+        const int y = inner.bottom() - kOrphanDotSize - 2;
+        const QRect dot(rightCursor - kOrphanDotSize, y,
+                         kOrphanDotSize, kOrphanDotSize);
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing, true);
+        p->setBrush(QColor(0xE5, 0x9A, 0x00));   // amber
+        p->setPen(Qt::NoPen);
+        p->drawEllipse(dot);
+        p->restore();
+        rightCursor = dot.left() - 6;
     }
 
     // Subject (left) + snippet (continuation, dim) on line 2, single line, elided.

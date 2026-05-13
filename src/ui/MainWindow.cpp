@@ -2528,7 +2528,12 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
         !cached.id.isEmpty()
         && !cached.bodyText.isEmpty()
         && (!cached.bodyHtmlPresent || !cached.bodyHtml.isEmpty())
-        && (!cached.hasAttachment   || !cached.attachments.empty());
+        && (!cached.hasAttachment   || !cached.attachments.empty())
+        // body_compression=2 = orphan: bytes are zstd_dict_v1 but
+        // compressed against a dict we no longer have. Treat as
+        // missing and re-fetch from Gmail — the upsert that lands
+        // the fresh plaintext will clear the orphan flag.
+        && cached.bodyCompression != 2;
 
     if (cacheLooksComplete) {
         renderThread(cached);

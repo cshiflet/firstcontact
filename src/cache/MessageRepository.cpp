@@ -187,6 +187,7 @@ fc::Message rowToMessage(const QString& accountId, const QSqlQuery& q) {
     m.isImportant     = q.value(QStringLiteral("is_important")).toBool();
     m.hasAttachment   = q.value(QStringLiteral("has_attachment")).toBool();
     m.fetchedFormat   = q.value(QStringLiteral("fetched_format")).toString();
+    m.bodyCompression = q.value(QStringLiteral("body_compression")).toInt();
     return m;
 }
 
@@ -328,7 +329,7 @@ QString buildThreadRollupSql(const QString& innerWhere) {
         "       size_estimate, from_addr, from_name, to_addrs, cc_addrs, "
         "       bcc_addrs, reply_to, subject, snippet, body_text, body_html, "
         "       body_html_present, is_unread, is_starred, is_important, "
-        "       has_attachment, fetched_format, "
+        "       has_attachment, fetched_format, body_compression, "
         "       t_count, t_unread, t_starred, t_attach "
         "FROM ranked "
         "WHERE rn = 1 "
