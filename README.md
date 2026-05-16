@@ -41,8 +41,10 @@ sudo apt install qt6-webengine-dev
 ### Windows
 
 Install **Qt 6.7+** via the [Qt online installer](https://www.qt.io/download)
-(MSVC 2022 64-bit) and **WiX Toolset** for MSI packaging. Use
-`vcpkg.json` for `qtkeychain-qt6` and `gtest`.
+(MSVC 2022 64-bit) and **WiX Toolset** for MSI packaging. `qtkeychain-qt6`
+isn't shipped by the Qt installer — pull it (and the optional `gtest`) via
+the bundled `vcpkg.json` by setting `VCPKG_ROOT` before configuring with
+`cmake --preset windows-msvc-release`.
 
 ### macOS
 

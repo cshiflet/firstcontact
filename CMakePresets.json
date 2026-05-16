@@ -24,7 +24,7 @@
         {
             "name": "linux-debug",
             "displayName": "Linux Debug",
-            "inherits": ["base", "vcpkg"],
+            "inherits": ["base"],
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "FC_ENABLE_SANITIZERS": "ON"
@@ -34,7 +34,7 @@
         {
             "name": "linux-release",
             "displayName": "Linux Release",
-            "inherits": ["base", "vcpkg"],
+            "inherits": ["base"],
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
         },

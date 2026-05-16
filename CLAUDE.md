@@ -30,7 +30,7 @@ make format    # clang-format src/ tests/ in place
 
 Knobs: `BUILD_TYPE=Release`, `SANITIZERS=ON` (ASan/UBSan in Debug). `make build SANITIZERS=ON` is the autonomous-review default.
 
-CMake presets (`CMakePresets.json`): `linux-debug` (sanitizers on), `linux-release`, `windows-msvc-release`, `macos-release`. They use vcpkg toolchain via `$VCPKG_ROOT`.
+CMake presets (`CMakePresets.json`): `linux-debug` (sanitizers on), `linux-release`, `windows-msvc-release`, `macos-release`. Linux presets configure straight against system packages; the Windows and macOS presets pull `qtkeychain-qt6` (and optional `gtest`) through the vcpkg toolchain, which needs `$VCPKG_ROOT` set.
 
 **Single test:** `ctest --test-dir build -R test_html_sanitizer --output-on-failure` (or `make test ARGS="-R name"` won't work — call ctest directly). All tests need `QT_QPA_PLATFORM=offscreen` — the Makefile sets it; manual ctest invocations should too.
 
@@ -75,4 +75,4 @@ This eliminates double-send on transient send failures. Don't widen retries on n
 
 ## Dependencies
 
-System Qt 6.7+ (apt/dnf/pacman, never bundled via vcpkg). vcpkg supplies `qtkeychain` and `gtest` only — see `vcpkg.json`. AGPL-3.0-only.
+System Qt 6.7+ (apt/dnf/pacman, never bundled via vcpkg). On Linux every native dep (Qt, `qtkeychain-qt6`, `libzstd`, sanitizers) comes from distro packages — `make setup` installs the full set, and `cmake --preset linux-debug` works without any vcpkg checkout. vcpkg is only consulted on Windows and macOS, where `qtkeychain-qt6` and the optional `gtest` aren't available natively; see `vcpkg.json`. AGPL-3.0-only.
