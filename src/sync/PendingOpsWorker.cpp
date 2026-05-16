@@ -84,12 +84,10 @@ void PendingOpsWorker::flush() {
             continue;
         }
 
-        // client lives on its AccountContext's sync thread; bounce the
-        // modify call onto that thread so QNetworkAccessManager isn't
-        // touched cross-thread. The callback runs on the sync thread
-        // and uses that thread's per-thread DB connection for the
-        // PendingOpsRepository writes; the worker's signals re-cross
-        // back to UI via queued delivery on emit.
+        // client lives in its AccountContext on the UI thread. Keep the
+        // queued dispatch so the modify call runs through the target
+        // object's event loop and the worker finishes this tick's
+        // bookkeeping before callbacks mutate pending-op rows.
         const QString messageId   = op.messageId;
         const QStringList addList = op.addLabels;
         const QStringList remList = op.removeLabels;

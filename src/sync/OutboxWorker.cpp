@@ -53,8 +53,8 @@ void OutboxWorker::stop() { if (d_->timer) d_->timer->stop(); }
 void OutboxWorker::flush() {
     if (d_->busy) return;
     // Pull due rows across every account; each row carries the
-    // account_id it was enqueued against. Step 6 wires AccountContext
-    // and turns this into a per-account GmailClient dispatch.
+    // account_id it was enqueued against, and the resolver maps it to
+    // that account's GmailClient.
     auto items = fc::cache::OutboxRepository::dueForSendAllAccounts();
     if (items.empty()) return;
     d_->busy = true;
@@ -85,15 +85,10 @@ void OutboxWorker::flush() {
             continue;
         }
         fc::cache::OutboxRepository::markSending(it.id);
-        // client lives on its AccountContext's sync thread; we live on
-        // the UI thread. Bounce the call onto the right thread —
-        // GmailClient → RestClient → QNetworkAccessManager are all
-        // thread-affine and would warn (and probably hang the request)
-        // if we touched them directly from here. The callback then runs
-        // on the sync thread; the DB writes inside it use the sync
-        // thread's per-thread connection (Database::perThreadName), and
-        // the signal emits cross-thread via the workers' queued
-        // delivery to MainWindow.
+        // client lives in its AccountContext on the UI thread. Keep the
+        // queued dispatch so the Gmail call runs through the target
+        // object's event loop and the callback settles after the worker
+        // has returned to idle bookkeeping.
         const QByteArray rfc = it.rfc5322;
         const QString threadId = it.threadId;
         const qint64 id = it.id;

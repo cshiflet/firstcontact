@@ -15,7 +15,7 @@ Cache, sync, compose, search, and HTML-on-demand land in Phases 2–3.
 - Native UI on Linux (priority), Windows, and macOS.
 - Idle RAM under **80 MB** (under 200 MB when the optional HTML webview is engaged).
 - SQLite + FTS5 for offline read and search.
-- OAuth 2.0 + PKCE — no client secret, you supply your own Google Cloud client ID.
+- OAuth 2.0 + PKCE using your own Google Cloud Desktop-app Client ID and Client Secret.
 - Plain-text reading by default; webview only when you click "Show full HTML".
 
 ## Build dependencies
@@ -69,22 +69,24 @@ cmake --build build
 
 ## First-run setup
 
-FirstContact uses your own Google OAuth Desktop-app client ID:
+FirstContact uses your own Google OAuth Desktop-app Client ID and Client Secret:
 
 1. Open the [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
 2. Create (or pick) a project and **enable the Gmail API**.
 3. Configure the **OAuth consent screen** (External, add your email as a test user).
 4. Create credentials → **OAuth client ID** → application type **Desktop app**.
-   No client secret is needed (PKCE).
-5. Launch FirstContact. The setup wizard prompts for the Client ID. Click
-   **Sign In**, consent in your browser, and you're done.
+5. Copy both the **Client ID** and **Client Secret** from the credential details.
+   FirstContact uses PKCE, but Google's Desktop-app token endpoint still requires
+   the client secret value.
+6. Launch FirstContact. The setup wizard prompts for the Client ID and Client
+   Secret. Click **Sign In**, consent in your browser, and you're done.
 
 ## Layout
 
 ```
 src/
   app/      main, QApplication, service wiring
-  auth/     OAuth + PKCE, QtKeychain token store, client_id config
+  auth/     OAuth + PKCE, QtKeychain token store, client_id/client_secret config
   api/      QNAM REST client, Gmail endpoints, batch, history, parser
   sync/     (Phase 2) initial + incremental sync, outbox, draft sync
   cache/    (Phase 2) SQLite + FTS5 schema, repositories, LRU evictor
