@@ -92,9 +92,10 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	    qt6-qtbase-devel qt6-qttools-devel qt6-qtnetworkauth-devel \
 	    qt6-qtdeclarative-devel qt6-qt5compat-devel \
 	    qt6-qtsvg-devel \
-	    qt6-qtkeychain-devel libsecret-devel sqlite-devel \
+	    qtkeychain-qt6-devel libsecret-devel sqlite-devel \
 	    libzstd-devel \
-	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb
+	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb \
+            libasan libubsan pkgconf-pkg-config xdg-utils
 
 setup-arch: ## Install build deps via pacman (Arch / Manjaro).
 	sudo pacman -S --needed --noconfirm \
