@@ -121,16 +121,11 @@ void AccountManagerDialog::rebuild() {
         delete item;
     }
 
-    // Filter to authorized accounts only. The accounts table can carry
-    // a synthetic "legacy@local" row inserted by migration 0006 on every
-    // fresh install (its UUID owns any pre-multi-account cache rows
-    // for users who upgraded). It has no OAuth tokens and never will,
-    // so showing it in Manage accounts looks like an internal
-    // placeholder leaking — and worse, invites the user to "Sign out"
-    // a row that has nothing to sign out of. The cache-manager dialog
-    // is the one place it stays visible: that surface is explicitly
-    // about cache rows, where legacy@local is the data owner of
-    // anything migrated from a pre-0006 install.
+    // Filter to authorized accounts only. Sign-out can intentionally
+    // leave an account row behind so cached messages remain available
+    // for cache management, but that row has no active OAuth session.
+    // Showing it in Manage accounts would invite the user to sign out
+    // of something that is already signed out.
     QList<fc::account::AccountInfo> accounts;
     if (accounts_) {
         for (const auto& a : accounts_->accounts()) {

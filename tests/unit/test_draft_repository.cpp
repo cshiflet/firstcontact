@@ -15,8 +15,8 @@ class TestDraftRepository : public QObject {
     Q_OBJECT
 private:
     // Multi-account schema requires every per-account row's account_id to
-    // resolve to an accounts row. Tests seed one explicitly — the legacy
-    // synthetic-seed migration was removed, so a fresh DB has no rows.
+    // resolve to an accounts row. Tests seed one explicitly because a
+    // fresh DB has no account rows.
     static constexpr const char* kAccountId =
         "00000000-0000-4000-8000-aaaaaaaaaaa1";
 

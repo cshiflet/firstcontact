@@ -1006,11 +1006,10 @@ void MainWindow::wireSignals() {
             [this](const QString& email) {
                 auth_->setAccountEmail(email);
                 // First sign-in for a fresh account: AccountManager has
-                // no row for this email yet (the legacy seed has a
-                // placeholder email or "legacy@local"). Add the row so
-                // the toolbar account menu picks it up. Idempotent —
-                // adds for an existing email return the same id and
-                // just refresh display_name.
+                // no row for this email yet. Add the row so the toolbar
+                // account menu picks it up. Idempotent — adds for an
+                // existing email return the same id and just refresh
+                // display_name.
                 if (accounts_) {
                     const QString id = accounts_->add(email);
                     if (!id.isEmpty()) {
@@ -1838,11 +1837,9 @@ void MainWindow::refreshAccountMenu() {
     // One menu entry per *signed-in* account — i.e., accounts whose
     // per-account OAuthClient currently has valid tokens. The accounts
     // table can also hold rows for accounts that were signed in once
-    // and signed out (sign-out keeps the row by default), plus a
-    // synthetic "legacy@local" row that migration 0006 inserts on
-    // every fresh install. Listing all of them in the toolbar would
-    // surface a "legacy@local" entry on a launch with no real
-    // accounts; filter to authorized ones here.
+    // and signed out (sign-out keeps the row by default). Listing all
+    // of them in the toolbar would surface inactive accounts as usable
+    // targets; filter to authorized ones here.
     //
     // The active account gets a checkmark; selecting another flips
     // currentAccountId via AccountManager::setCurrentAccountId, which
@@ -1962,8 +1959,8 @@ void MainWindow::onSignIn() {
 //     though that data still exists on disk.
 //
 // "Not signed in" is the strict condition. The accounts table can
-// carry rows for sign-out-with-keep-cache and for the synthetic
-// legacy seed; neither implies an active account.
+// carry rows for sign-out-with-keep-cache; those rows do not imply an
+// active account.
 void MainWindow::enforceActiveAccountGate() {
     bool anyAuthorized = false;
     if (accounts_) {
@@ -2031,20 +2028,18 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
         "outbox, and labels for this account. The next sign-in will do "
         "a full initial sync."));
     auto* dropBtn = box.addButton(
-        tr("Sign out and delete local account data"),
+        tr("Sign out and delete\nlocal account data"),
         QMessageBox::DestructiveRole);
     auto* keepBtn = box.addButton(tr("Sign out"),
                                    QMessageBox::AcceptRole);
     box.addButton(QMessageBox::Cancel);
     box.setDefaultButton(keepBtn);
-    // QMessageBox sizes to its informativeText; long custom button
-    // labels (here "Sign out and delete local account data" — 41 chars)
-    // get clipped without an explicit hint. Force the destructive
-    // button to its sizeHint and set a min-width on the dialog so all
-    // three buttons fit on one row.
+    // QMessageBox sizes to its informativeText; the custom destructive
+    // button still needs its size hint, and the text column needs a
+    // sensible width so the body does not make the button row sprawl.
     dropBtn->adjustSize();
     if (auto* layout = qobject_cast<QGridLayout*>(box.layout())) {
-        layout->setColumnMinimumWidth(0, 600);
+        layout->setColumnMinimumWidth(1, 420);
     }
     box.exec();
     auto* clicked = box.clickedButton();
