@@ -37,9 +37,8 @@ private slots:
     }
 
     void freshDatabaseHasNoAccounts() {
-        // The legacy synthetic-seed migration was removed; a freshly
-        // initialised cache has zero accounts rows and no current
-        // selection.
+        // A freshly initialised cache has zero account rows and no
+        // current selection.
         fc::account::AccountManager mgr;
         QCOMPARE(int(mgr.accounts().size()), 0);
         QVERIFY(mgr.currentAccountId().isEmpty());
@@ -107,8 +106,8 @@ private slots:
         QCOMPARE(mgr.currentAccountId(), dId);
         QVERIFY(spy.count() >= 1);
 
-        // Stamping last_used_at moves d ahead of the legacy seed in
-        // the most-recently-used selection rule.
+        // Stamping last_used_at makes d eligible for the
+        // most-recently-used selection rule.
         QVERIFY(mgr.accountById(dId).lastUsedAt > 0);
     }
 

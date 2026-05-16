@@ -67,6 +67,22 @@ cmake --build build
 ./build/src/app/firstcontact
 ```
 
+## Pre-release database policy
+
+FirstContact is still pre-release. The app creates fresh caches from the
+current consolidated SQLite schema and rejects older pre-release database
+versions instead of migrating them. If startup reports an old database version,
+run:
+
+```bash
+firstcontact reset-db
+```
+
+This discards the local cache and lets the next launch create a fresh database.
+Schema history and supported forward migrations will be added with the first
+supported release. See [docs/multi-account-plan.md](docs/multi-account-plan.md)
+for the multi-account hardening notes.
+
 ## First-run setup
 
 FirstContact uses your own Google OAuth Desktop-app Client ID and Client Secret:
