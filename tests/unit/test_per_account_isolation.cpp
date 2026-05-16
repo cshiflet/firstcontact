@@ -72,8 +72,7 @@ private slots:
         QFile::remove(fc::cache::Database::filePath());
         fc::cache::Database::initialize();
 
-        // The migration seeds a "legacy" account; we add two more so each
-        // test slot has its own pair.
+        // Fresh schema has no account rows; seed the pair every slot uses.
         seedAccount(kAccountA, QStringLiteral("a@accounta.test"));
         seedAccount(kAccountB, QStringLiteral("b@accountb.test"));
     }
@@ -260,6 +259,46 @@ private slots:
         }
         QVERIFY(foundA);
         QVERIFY(foundB);
+
+        const qint64 opA = fc::cache::PendingOpsRepository::enqueueModify(
+            kAccountA, QStringLiteral("pending-A"),
+            {QStringLiteral("STARRED")}, {QStringLiteral("UNREAD")});
+        const qint64 opB = fc::cache::PendingOpsRepository::enqueueModify(
+            kAccountB, QStringLiteral("pending-B"),
+            {QStringLiteral("IMPORTANT")}, {QStringLiteral("INBOX")});
+        QVERIFY(opA > 0);
+        QVERIFY(opB > 0);
+
+        fc::cache::PendingOpsRepository::markAttempt(
+            opB, QStringLiteral("account-b-only"));
+
+        const auto pendingA = fc::cache::PendingOpsRepository::due(kAccountA);
+        bool sawOpA = false, sawOpBOnA = false;
+        for (const auto& op : pendingA) {
+            if (op.id == opA) {
+                sawOpA = true;
+                QCOMPARE(op.accountId, kAccountA);
+                QCOMPARE(op.messageId, QStringLiteral("pending-A"));
+                QCOMPARE(op.attempts, 0);
+            }
+            if (op.id == opB) sawOpBOnA = true;
+        }
+        QVERIFY(sawOpA);
+        QVERIFY(!sawOpBOnA);
+
+        const auto pendingB = fc::cache::PendingOpsRepository::due(kAccountB);
+        bool sawOpB = false;
+        for (const auto& op : pendingB) {
+            if (op.id == opB) {
+                sawOpB = true;
+                QCOMPARE(op.accountId, kAccountB);
+                QCOMPARE(op.messageId, QStringLiteral("pending-B"));
+                QCOMPARE(op.attempts, 1);
+                QCOMPARE(op.lastError, QStringLiteral("account-b-only"));
+            }
+            QVERIFY(op.id != opA);
+        }
+        QVERIFY(sawOpB);
     }
 
     void draftsAreScopedPerAccount() {
@@ -292,6 +331,121 @@ private slots:
         }
         QVERIFY(seenA);
         QVERIFY(seenB);
+    }
+
+    void draftMutationsAreScopedWhenIdsCollide() {
+        fc::cache::DraftRow dA;
+        dA.id      = QStringLiteral("shared-draft-id");
+        dA.subject = QStringLiteral("draft A shared");
+        dA.dirty   = true;
+        QCOMPARE(fc::cache::DraftRepository::upsert(kAccountA, dA),
+                 QStringLiteral("shared-draft-id"));
+
+        fc::cache::DraftRow dB;
+        dB.id      = QStringLiteral("shared-draft-id");
+        dB.subject = QStringLiteral("draft B shared");
+        dB.dirty   = true;
+        QCOMPARE(fc::cache::DraftRepository::upsert(kAccountB, dB),
+                 QStringLiteral("shared-draft-id"));
+
+        fc::cache::DraftRepository::markSynced(
+            kAccountA, QStringLiteral("shared-draft-id"),
+            QStringLiteral("gmail-draft-A"));
+
+        QVERIFY(fc::cache::DraftRepository::byId(
+            kAccountA, QStringLiteral("shared-draft-id")).id.isEmpty());
+        QCOMPARE(fc::cache::DraftRepository::byId(
+            kAccountA, QStringLiteral("gmail-draft-A")).subject,
+            QStringLiteral("draft A shared"));
+
+        const auto bStillLocal = fc::cache::DraftRepository::byId(
+            kAccountB, QStringLiteral("shared-draft-id"));
+        QCOMPARE(bStillLocal.subject, QStringLiteral("draft B shared"));
+        QVERIFY(bStillLocal.dirty);
+
+        fc::cache::DraftRepository::remove(
+            kAccountB, QStringLiteral("shared-draft-id"));
+        QVERIFY(fc::cache::DraftRepository::byId(
+            kAccountB, QStringLiteral("shared-draft-id")).id.isEmpty());
+        QCOMPARE(fc::cache::DraftRepository::byId(
+            kAccountA, QStringLiteral("gmail-draft-A")).subject,
+            QStringLiteral("draft A shared"));
+    }
+
+    void messageAndLabelMutationsAreScopedWhenIdsCollide() {
+        fc::cache::LabelRepository::upsert(
+            kAccountA, makeLabel(kAccountA, QStringLiteral("SCOPE_INBOX"),
+                                  QStringLiteral("Scoped Inbox")));
+        fc::cache::LabelRepository::upsert(
+            kAccountB, makeLabel(kAccountB, QStringLiteral("SCOPE_INBOX"),
+                                  QStringLiteral("Scoped Inbox")));
+        fc::cache::LabelRepository::upsert(
+            kAccountA, makeLabel(kAccountA, QStringLiteral("SCOPE_DONE"),
+                                  QStringLiteral("Scoped Done")));
+        fc::cache::LabelRepository::upsert(
+            kAccountB, makeLabel(kAccountB, QStringLiteral("SCOPE_DONE"),
+                                  QStringLiteral("Scoped Done")));
+
+        auto mA = makeMessage(kAccountA, QStringLiteral("shared-message-id"),
+                              QStringLiteral("shared-thread-id"),
+                              QStringLiteral("Scoped message A"));
+        mA.isUnread = true;
+        mA.labelIds = {QStringLiteral("SCOPE_INBOX")};
+        QVERIFY(fc::cache::MessageRepository::upsert(kAccountA, mA) > 0);
+
+        auto mB = makeMessage(kAccountB, QStringLiteral("shared-message-id"),
+                              QStringLiteral("shared-thread-id"),
+                              QStringLiteral("Scoped message B"));
+        mB.isUnread = false;
+        mB.labelIds = {QStringLiteral("SCOPE_INBOX")};
+        QVERIFY(fc::cache::MessageRepository::upsert(kAccountB, mB) > 0);
+
+        fc::cache::MessageRepository::applyLabelDiff(
+            kAccountA, QStringLiteral("shared-message-id"),
+            {QStringLiteral("SCOPE_DONE")}, {QStringLiteral("SCOPE_INBOX")});
+
+        const auto doneA = fc::cache::MessageRepository::listByLabel(
+            kAccountA, QStringLiteral("SCOPE_DONE"), 100, 0);
+        const auto inboxA = fc::cache::MessageRepository::listByLabel(
+            kAccountA, QStringLiteral("SCOPE_INBOX"), 100, 0);
+        bool sawSharedInDoneA = false;
+        for (const auto& m : doneA) {
+            if (m.id == QStringLiteral("shared-message-id")) sawSharedInDoneA = true;
+        }
+        for (const auto& m : inboxA) {
+            QVERIFY(m.id != QStringLiteral("shared-message-id"));
+        }
+        QVERIFY(sawSharedInDoneA);
+
+        const auto doneB = fc::cache::MessageRepository::listByLabel(
+            kAccountB, QStringLiteral("SCOPE_DONE"), 100, 0);
+        const auto inboxB = fc::cache::MessageRepository::listByLabel(
+            kAccountB, QStringLiteral("SCOPE_INBOX"), 100, 0);
+        for (const auto& m : doneB) {
+            QVERIFY(m.id != QStringLiteral("shared-message-id"));
+        }
+        bool sawSharedInInboxB = false;
+        for (const auto& m : inboxB) {
+            if (m.id == QStringLiteral("shared-message-id")) sawSharedInInboxB = true;
+        }
+        QVERIFY(sawSharedInInboxB);
+
+        fc::cache::LabelRepository::recomputeCounts(kAccountA);
+        fc::cache::LabelRepository::recomputeCounts(kAccountB);
+        QCOMPARE(fc::cache::LabelRepository::byId(
+            kAccountA, QStringLiteral("SCOPE_INBOX")).totalCount, 0);
+        QCOMPARE(fc::cache::LabelRepository::byId(
+            kAccountA, QStringLiteral("SCOPE_DONE")).totalCount, 1);
+        QCOMPARE(fc::cache::LabelRepository::byId(
+            kAccountB, QStringLiteral("SCOPE_INBOX")).totalCount, 1);
+
+        QVERIFY(fc::cache::MessageRepository::remove(
+            kAccountA, QStringLiteral("shared-message-id")));
+        QVERIFY(fc::cache::MessageRepository::byId(
+            kAccountA, QStringLiteral("shared-message-id")).id.isEmpty());
+        QCOMPARE(fc::cache::MessageRepository::byId(
+            kAccountB, QStringLiteral("shared-message-id")).subject,
+            QStringLiteral("Scoped message B"));
     }
 };
 

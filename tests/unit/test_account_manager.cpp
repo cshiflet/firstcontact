@@ -59,9 +59,11 @@ private slots:
         // accounts.is_default INSERT branch fires when the table is
         // otherwise empty).
         QVERIFY(info.isDefault);
+        QCOMPARE(mgr.currentAccountId(), id);
 
         // Round-trip: new manager instance reads the same data.
         fc::account::AccountManager mgr2;
+        QCOMPARE(mgr2.currentAccountId(), id);
         bool found = false;
         for (const auto& a : mgr2.accounts()) {
             if (a.email == QStringLiteral("alice@example.test")) {
