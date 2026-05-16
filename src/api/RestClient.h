@@ -25,9 +25,10 @@ namespace fc::api {
 //
 // The token getter is a callable that returns the current access token,
 // blocking long enough to refresh if needed. In production the lambda
-// dispatches to OAuthClient::accessTokenBlocking; tests inject a
-// scriptable getter so the retry / refresh logic can be exercised
-// without touching QtKeychain.
+// dispatches to OAuthClient::accessTokenBlocking; the forced-refresh getter
+// refreshes even for stale-but-not-expired tokens after the first HTTP 401.
+// Tests may inject scriptable getters so the retry / refresh logic can be
+// exercised without touching QtKeychain.
 class RestClient : public QObject {
     Q_OBJECT
 public:
@@ -68,6 +69,8 @@ public:
 
     // Test / DI constructor — caller supplies the token getter directly.
     RestClient(TokenGetter tokenGetter, QObject* parent = nullptr);
+    RestClient(TokenGetter tokenGetter, TokenGetter forceRefreshTokenGetter,
+               QObject* parent = nullptr);
 
     // Fire and forget; cb runs on this object's thread.
     void send(Verb verb,
@@ -112,11 +115,13 @@ public:
 
 private:
     TokenGetter             getToken_;
+    TokenGetter             forceRefreshToken_;
     QNetworkAccessManager*  nam_;
 
     void sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
                   const QByteArray& contentType,
-                  int attempt, bool refreshedOnce, DoneCb cb);
+                  int attempt, bool refreshedOnce, DoneCb cb,
+                  const QString& tokenOverride = QString());
 };
 
 }  // namespace fc::api

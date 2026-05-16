@@ -66,8 +66,11 @@ public:
     void setAccountEmail(const QString& email);
 
     // Returns a non-empty access token, refreshing if within 60s of expiry.
+    // When forceRefresh is true, refreshes even if the current access token
+    // has not expired yet; used after an HTTP 401 proves the server rejected
+    // our cached token.
     // Blocking call safe to use from the sync thread.
-    QString accessTokenBlocking();
+    QString accessTokenBlocking(bool forceRefresh = false);
 
     // Triggers the browser-based authorization flow. Emits granted/failed.
     void authorize();
@@ -98,7 +101,7 @@ private:
     void ensureHandler();
     void onAuthCodeCallback(const QVariantMap& params);
     void exchangeCodeForTokens(const QString& code);
-    bool refreshIfNeededLocked();
+    bool refreshIfNeededLocked(bool forceRefresh);
 
     struct Impl;
     Impl* d_;

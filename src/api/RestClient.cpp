@@ -55,11 +55,21 @@ ApiError parseErrorBody(int status, const QByteArray& body) {
 RestClient::RestClient(fc::auth::OAuthClient* auth, QObject* parent)
     : QObject(parent),
       getToken_([auth]() { return auth->accessTokenBlocking(); }),
+      forceRefreshToken_([auth]() { return auth->accessTokenBlocking(true); }),
       nam_(new QNetworkAccessManager(this)) {}
 
 RestClient::RestClient(TokenGetter tokenGetter, QObject* parent)
     : QObject(parent),
       getToken_(std::move(tokenGetter)),
+      forceRefreshToken_([this]() { return getToken_(); }),
+      nam_(new QNetworkAccessManager(this)) {}
+
+RestClient::RestClient(TokenGetter tokenGetter,
+                       TokenGetter forceRefreshTokenGetter,
+                       QObject* parent)
+    : QObject(parent),
+      getToken_(std::move(tokenGetter)),
+      forceRefreshToken_(std::move(forceRefreshTokenGetter)),
       nam_(new QNetworkAccessManager(this)) {}
 
 void RestClient::send(Verb verb, const QUrl& url, const QByteArray& body,
@@ -70,8 +80,9 @@ void RestClient::send(Verb verb, const QUrl& url, const QByteArray& body,
 
 void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
                           const QByteArray& contentType,
-                          int attempt, bool refreshedOnce, DoneCb cb) {
-    const QString token = getToken_();
+                          int attempt, bool refreshedOnce, DoneCb cb,
+                          const QString& tokenOverride) {
+    const QString token = tokenOverride.isNull() ? getToken_() : tokenOverride;
     if (token.isEmpty()) {
         cb({}, ApiError{ApiErrorKind::Auth, 0, QStringLiteral("no token"), {}});
         return;
@@ -158,10 +169,17 @@ void RestClient::sendOnce(Verb verb, const QUrl& url, const QByteArray& body,
         ApiError err = parseErrorBody(status, data);
 
         if (err.kind == ApiErrorKind::Auth && !refreshedOnce) {
-            // Try once more after a forced refresh; accessTokenBlocking will
-            // observe the expiry window and refresh.
+            // Try once more after a forced refresh. This matters when the
+            // cached token is stale-but-not-expired: a normal token getter
+            // would keep returning it, but the 401 proves the server rejected
+            // it.
+            const QString refreshedToken = forceRefreshToken_();
+            if (refreshedToken.isEmpty()) {
+                cb(data, err);
+                return;
+            }
             sendOnce(verb, url, body, contentType, attempt, /*refreshedOnce=*/true,
-                     std::move(cb));
+                     std::move(cb), refreshedToken);
             return;
         }
 

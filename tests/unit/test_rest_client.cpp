@@ -7,6 +7,7 @@
 #include <QTcpSocket>
 #include <QHostAddress>
 #include <QEventLoop>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 
@@ -45,6 +46,7 @@ public:
 
     void script(std::vector<Step> steps) { steps_ = std::move(steps); }
     int requestsSeen() const { return requestsSeen_; }
+    QStringList authorizationHeaders() const { return authorizationHeaders_; }
 
 private slots:
     void onNewConnection() {
@@ -55,6 +57,7 @@ private slots:
                 // We don't parse — the test only cares about request count.
                 if (!buf_.contains("\r\n\r\n")) return;
 
+                authorizationHeaders_.push_back(extractAuthorization(buf_));
                 const int idx = requestsSeen_++;
                 const Step step = idx < int(steps_.size())
                     ? steps_[idx]
@@ -92,6 +95,19 @@ private:
     std::vector<Step>  steps_;
     int                requestsSeen_ = 0;
     QByteArray         buf_;
+    QStringList        authorizationHeaders_;
+
+    static QString extractAuthorization(const QByteArray& request) {
+        const QByteArray prefix = QByteArrayLiteral("Authorization:");
+        const auto lines = request.split('\n');
+        for (QByteArray line : lines) {
+            line = line.trimmed();
+            if (line.startsWith(prefix)) {
+                return QString::fromLatin1(line.mid(prefix.size()).trimmed());
+            }
+        }
+        return {};
+    }
 };
 
 namespace {
@@ -163,29 +179,11 @@ private slots:
         QCOMPARE(server.requestsSeen(), 2);
     }
 
-    // Documents observed Qt 6.4 QNAM behaviour: when a server closes the
-    // connection without sending any response bytes, QNAM transparently
-    // retries the request — for ALL verbs, including POST/PATCH/DELETE,
-    // BELOW our application layer. The retry uses QIODevice::reset() on
-    // the upload byte device.
-    //
-    // This means our round-3 idempotent-only retry policy
-    // (RestClient.cpp:112) does NOT fully prevent double-send on a flaky
-    // connection that drops before any HTTP response: QNAM has already
-    // resent the request and we never see the failure. The application
-    // layer only sees the result of QNAM's second attempt.
-    //
-    // Mitigation in production: 401 / 429 / 5xx come over a *received*
-    // connection (server wrote bytes), so QNAM does NOT auto-retry those —
-    // our application policy is the only retry path, and the round-3 fix
-    // is what guards them. The remaining hole is "TCP dropped before any
-    // response byte", which is rare on Gmail's well-provisioned endpoints
-    // but not impossible.
-    //
-    // If a future Qt release changes this behaviour (no transparent retry,
-    // or via an attribute we can opt out of), this test will start
-    // failing — at which point RestClient should be updated to surface
-    // the transport error and rely solely on application-layer policy.
+    // Qt 6.10 surfaces this transport failure to RestClient, so our
+    // non-idempotent guard can return a Network error without re-sending.
+    // Historical context: Qt 6.4 QNAM transparently retried this case below
+    // the application layer, including for POST, so older runs saw a clean
+    // 200 here and the server saw two requests.
     void qnamTransparentlyRetriesPostOnTransportFailure_documented() {
         ScriptedHttpServer server;
         QVERIFY(server.start());
@@ -196,10 +194,8 @@ private slots:
         RestClient client([]() { return QStringLiteral("token"); });
         const auto out = runSend(client, RestClient::Verb::Post, urlFor(server.port()));
         QVERIFY(out.fired);
-        // QNAM swallowed the transport failure and retried; we observe a
-        // clean 200 at the application layer. Server saw two requests.
-        QVERIFY(out.err.isOk());
-        QCOMPARE(server.requestsSeen(), 2);
+        QCOMPARE(out.err.kind, ApiErrorKind::Network);
+        QCOMPARE(server.requestsSeen(), 1);
     }
 
     // GET should retry on 5xx (idempotent — server may have processed
@@ -265,10 +261,9 @@ private slots:
         QCOMPARE(server.requestsSeen(), 2);
     }
 
-    // 401 triggers a single token refresh + retry, regardless of verb. The
-    // token getter is asked twice; on the second call we hand back a "fresh"
-    // value (the production OAuthClient internally observes expiry and
-    // refreshes — here we simulate by returning a different string).
+    // 401 triggers a single token refresh + retry, regardless of verb.
+    // The one-getter constructor preserves existing test ergonomics: its
+    // default forced-refresh path calls the same scriptable getter again.
     void authRefreshFiresOnceAndRetries() {
         ScriptedHttpServer server;
         QVERIFY(server.start());
@@ -287,6 +282,42 @@ private slots:
         QVERIFY(out.err.isOk());
         QCOMPARE(server.requestsSeen(), 2);
         QCOMPARE(tokenCalls, 2);
+    }
+
+    // A 401 must force-refresh even when the normal getter would keep
+    // returning a stale-but-not-expired token. This exercises the RestClient
+    // abstraction directly without needing to stand up OAuth/QtKeychain.
+    void auth401UsesForcedRefreshForStaleUnexpiredToken() {
+        ScriptedHttpServer server;
+        QVERIFY(server.start());
+        server.script({
+            { ScriptedHttpServer::Action::Status, 401 },
+            { ScriptedHttpServer::Action::Status, 200 },
+        });
+
+        QString currentToken = QStringLiteral("stale");
+        int normalTokenCalls = 0;
+        int forcedRefreshCalls = 0;
+        RestClient client(
+            [&]() {
+                ++normalTokenCalls;
+                return currentToken;
+            },
+            [&]() {
+                ++forcedRefreshCalls;
+                currentToken = QStringLiteral("fresh");
+                return currentToken;
+            });
+
+        const auto out = runSend(client, RestClient::Verb::Get, urlFor(server.port()));
+        QVERIFY(out.fired);
+        QVERIFY(out.err.isOk());
+        QCOMPARE(server.requestsSeen(), 2);
+        QCOMPARE(normalTokenCalls, 1);
+        QCOMPARE(forcedRefreshCalls, 1);
+        QCOMPARE(server.authorizationHeaders(),
+                 QStringList({QStringLiteral("Bearer stale"),
+                              QStringLiteral("Bearer fresh")}));
     }
 
     // Two consecutive 401s — the second is NOT retried again; the caller
