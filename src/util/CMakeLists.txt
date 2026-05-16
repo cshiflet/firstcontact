@@ -14,6 +14,6 @@ add_library(fc_util STATIC
     Format.h Format.cpp
 )
 target_include_directories(fc_util PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(fc_util PUBLIC Qt6::Core Qt6::Gui PkgConfig::ZSTD)
+target_link_libraries(fc_util PUBLIC Qt6::Core Qt6::Gui fc_zstd)
 fc_set_warnings(fc_util)
 fc_apply_sanitizers(fc_util)

@@ -18,37 +18,69 @@ Cache, sync, compose, search, and HTML-on-demand land in Phases 2–3.
 - OAuth 2.0 + PKCE using your own Google Cloud Desktop-app Client ID and Client Secret.
 - Plain-text reading by default; webview only when you click "Show full HTML".
 
-## Build dependencies
+## Toolchains and setup
 
-### Linux (Ubuntu 24.04+)
+FirstContact builds with CMake + Ninja and Qt 6. The repo includes
+idempotent setup targets/scripts for the supported developer platforms.
 
-```bash
-sudo apt install \
-  qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
-  qt6-networkauth-dev libqt6sql6-sqlite \
-  qt6-l10n-tools qt6-declarative-dev \
-  libsecret-1-dev qtkeychain-qt6-dev \
-  sqlite3 libsqlite3-dev \
-  cmake ninja-build pkg-config build-essential
-```
+### Linux
 
-For the optional HTML rendering (Phase 3):
+Ubuntu/Debian, Fedora, and Arch/Manjaro are supported through the Makefile:
 
 ```bash
-sudo apt install qt6-webengine-dev
+make setup
 ```
 
-### Windows
+`make setup` installs the distro Qt packages, qtkeychain, zstd, SQLite,
+compiler tooling, test helpers, and Linux AppImage tooling. You can also call
+the distro-specific target directly:
 
-Install **Qt 6.7+** via the [Qt online installer](https://www.qt.io/download)
-(MSVC 2022 64-bit) and **WiX Toolset** for MSI packaging. `qtkeychain-qt6`
-isn't shipped by the Qt installer — pull it (and the optional `gtest`) via
-the bundled `vcpkg.json` by setting `VCPKG_ROOT` before configuring with
-`cmake --preset windows-msvc-release`.
+```bash
+make setup-ubuntu
+make setup-fedora
+make setup-arch
+```
+
+### Windows 11 Pro
+
+Use **Developer PowerShell for VS 2022**. The setup script installs missing
+tools via `winget`, installs Qt with `aqtinstall`, bootstraps vcpkg, installs
+the manifest dependencies (`qtkeychain-qt6`, `zstd`), and writes local CMake
+presets to `CMakeUserPresets.json`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+cmake --preset windows-msvc-debug-local
+cmake --build --preset windows-msvc-debug-local
+ctest --preset windows-msvc-debug-local
+```
+
+Notes:
+
+- The default Qt version is `6.7.3`. Override it before setup with
+  `$env:FC_QT_VERSION = "6.x.y"` if needed.
+- The default tool root is `%USERPROFILE%\firstcontact-tools`.
+- MSI packaging uses CPack/WiX metadata, but signing is intentionally separate
+  from local developer builds.
 
 ### macOS
 
-Install Xcode CLT and **Qt 6.7+** via the Qt online installer.
+Install Xcode Command Line Tools first, then run the setup target or script:
+
+```bash
+xcode-select --install
+make setup
+```
+
+The macOS setup installs missing Homebrew packages (`cmake`, `ninja`, `qt`,
+`qtkeychain`, `zstd`, etc.) and writes local CMake presets to
+`CMakeUserPresets.json`.
+
+```bash
+cmake --preset macos-debug-local
+cmake --build --preset macos-debug-local
+ctest --preset macos-debug-local
+```
 
 ## Build
 
@@ -57,6 +89,14 @@ cmake --preset linux-debug
 cmake --build --preset linux-debug
 ctest --preset linux-debug
 ./build/linux-debug/src/app/firstcontact
+```
+
+Or through the Makefile on Linux, or on any shell where CMake can already find
+the installed Qt/dependency prefixes:
+
+```bash
+make build
+make test
 ```
 
 Or without presets:

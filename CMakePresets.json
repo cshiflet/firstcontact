@@ -39,6 +39,13 @@
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
         },
         {
+            "name": "windows-msvc-debug",
+            "displayName": "Windows MSVC Debug",
+            "inherits": ["base", "vcpkg"],
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
             "name": "windows-msvc-release",
             "displayName": "Windows MSVC Release",
             "inherits": ["base", "vcpkg"],
@@ -46,9 +53,16 @@
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
         },
         {
+            "name": "macos-debug",
+            "displayName": "macOS Debug",
+            "inherits": ["base"],
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+        },
+        {
             "name": "macos-release",
             "displayName": "macOS Release",
-            "inherits": ["base", "vcpkg"],
+            "inherits": ["base"],
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
         }
@@ -56,11 +70,17 @@
     "buildPresets": [
         { "name": "linux-debug",         "configurePreset": "linux-debug" },
         { "name": "linux-release",       "configurePreset": "linux-release" },
+        { "name": "windows-msvc-debug",  "configurePreset": "windows-msvc-debug" },
         { "name": "windows-msvc-release","configurePreset": "windows-msvc-release" },
+        { "name": "macos-debug",         "configurePreset": "macos-debug" },
         { "name": "macos-release",       "configurePreset": "macos-release" }
     ],
     "testPresets": [
         { "name": "linux-debug", "configurePreset": "linux-debug",
+          "output": { "outputOnFailure": true } },
+        { "name": "windows-msvc-debug", "configurePreset": "windows-msvc-debug",
+          "output": { "outputOnFailure": true } },
+        { "name": "macos-debug", "configurePreset": "macos-debug",
           "output": { "outputOnFailure": true } }
     ]
 }

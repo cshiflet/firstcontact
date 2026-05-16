@@ -7,10 +7,9 @@ add_executable(train_bundled_dict
     train_bundled_dict.cpp
 )
 
-# zstd's dictionary builder API lives in libzstd; on most distros it's
-# linked alongside the regular compression API in the same .so. The
-# top-level CMakeLists imports it as PkgConfig::ZSTD.
-target_link_libraries(train_bundled_dict PRIVATE PkgConfig::ZSTD)
+# zstd's dictionary builder API lives in libzstd; the top-level CMakeLists
+# imports a cross-platform fc_zstd interface target.
+target_link_libraries(train_bundled_dict PRIVATE fc_zstd)
 
 set_target_properties(train_bundled_dict PROPERTIES
     CXX_STANDARD 20

@@ -24,11 +24,23 @@ include(Sanitizers)
 include(Qt6Setup)
 
 # libzstd: message-body compression with per-account trained dictionary.
-# System package (apt: libzstd-dev / dnf: libzstd-devel / pacman: zstd /
-# vcpkg: zstd). pkg-config is the most portable lookup; the IMPORTED
-# target keeps target_link_libraries call sites clean across platforms.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+# Prefer CMake config packages (vcpkg/Windows, some Homebrew installs), then
+# fall back to pkg-config (Linux distro packages, Homebrew).
+find_package(zstd CONFIG QUIET)
+add_library(fc_zstd INTERFACE)
+if(TARGET zstd::libzstd_shared)
+    target_link_libraries(fc_zstd INTERFACE zstd::libzstd_shared)
+elseif(TARGET zstd::libzstd_static)
+    target_link_libraries(fc_zstd INTERFACE zstd::libzstd_static)
+elseif(TARGET zstd::libzstd)
+    target_link_libraries(fc_zstd INTERFACE zstd::libzstd)
+elseif(TARGET unofficial::zstd::libzstd)
+    target_link_libraries(fc_zstd INTERFACE unofficial::zstd::libzstd)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+    target_link_libraries(fc_zstd INTERFACE PkgConfig::ZSTD)
+endif()
 
 add_subdirectory(src)
 

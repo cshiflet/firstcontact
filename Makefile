@@ -3,10 +3,10 @@
 # Run `make help` to list every target.
 #
 # Standard flow on a fresh box:
-#   make setup     # install distro packages + fetch linuxdeploy
+#   make setup     # install platform build tools/dependencies
 #   make build     # debug build
 #   make test      # ctest
-#   make appimage  # produces FirstContact-<ver>-<arch>.AppImage
+#   make appimage  # Linux: produces FirstContact-<ver>-<arch>.AppImage
 
 # ---- Configurable knobs (override on the command line) --------------------
 #   make build BUILD_TYPE=Release SANITIZERS=ON
@@ -17,6 +17,7 @@ GENERATOR        ?= Ninja
 APP_NAME         ?= FirstContact
 APP_VERSION      ?= 0.1.0
 ARCH             := $(shell uname -m)
+UNAME_S          := $(shell uname -s 2>/dev/null)
 APPIMAGE         := $(APP_NAME)-$(APP_VERSION)-$(ARCH).AppImage
 LINUXDEPLOY_DIR  ?= $(HOME)/.local/bin
 SANITIZERS       ?= OFF
@@ -35,7 +36,7 @@ CMAKE_FLAGS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 # Treat every target as PHONY by default — none of them produce a single file
 # the way Make's default rule expects.
 .PHONY: help \
-        setup setup-ubuntu setup-fedora setup-arch tools \
+        setup setup-ubuntu setup-fedora setup-arch setup-macos setup-windows tools \
         configure build run smoke test \
         release-config release install appimage \
         bundled-dict bundled-dict-fetch bundled-dict-newsletters \
@@ -56,10 +57,12 @@ help:  ## Show this help.
 
 # ---- Dependency installation ----------------------------------------------
 
-setup: tools ## Install distro build deps + fetch linuxdeploy. Auto-detects distro.
-	@if   [ -f /etc/debian_version ]; then $(MAKE) --no-print-directory setup-ubuntu; \
-	elif  [ -f /etc/fedora-release ]; then $(MAKE) --no-print-directory setup-fedora; \
-	elif  [ -f /etc/arch-release   ]; then $(MAKE) --no-print-directory setup-arch;   \
+setup: ## Install platform build deps. Auto-detects Linux distro, macOS, or Windows shell.
+	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) --no-print-directory setup-windows; \
+	elif [ "$(UNAME_S)" = "Darwin" ]; then $(MAKE) --no-print-directory setup-macos; \
+	elif [ -f /etc/debian_version ]; then $(MAKE) --no-print-directory setup-ubuntu; \
+	elif [ -f /etc/fedora-release ]; then $(MAKE) --no-print-directory setup-fedora; \
+	elif [ -f /etc/arch-release   ]; then $(MAKE) --no-print-directory setup-arch;   \
 	else \
 	    echo "Unknown distro. Install: Qt6 (Core/Gui/Widgets/Network/NetworkAuth/Sql/"; \
 	    echo "  Concurrent), qtkeychain-qt6, libsecret, sqlite,"; \
@@ -67,7 +70,7 @@ setup: tools ## Install distro build deps + fetch linuxdeploy. Auto-detects dist
 	    exit 1; \
 	fi
 
-setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
+setup-ubuntu: tools ## Install build deps via apt (Ubuntu 24.04+, Debian 13+) + linuxdeploy.
 	sudo apt update && sudo apt install -y \
 	    build-essential cmake ninja-build pkg-config git curl \
 	    qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
@@ -86,7 +89,7 @@ setup-ubuntu: ## Install build deps via apt (Ubuntu 24.04+, Debian 13+).
 	    sudo apt install -y wslu; \
 	fi
 
-setup-fedora: ## Install build deps via dnf (Fedora 40+).
+setup-fedora: tools ## Install build deps via dnf (Fedora 40+) + linuxdeploy.
 	sudo dnf install -y \
 	    cmake ninja-build gcc-c++ git curl \
 	    qt6-qtbase-devel qt6-qttools-devel qt6-qtnetworkauth-devel \
@@ -97,13 +100,26 @@ setup-fedora: ## Install build deps via dnf (Fedora 40+).
 	    fuse-libs librsvg2-tools appstream xorg-x11-server-Xvfb \
 	    libasan libubsan pkgconf-pkg-config xdg-utils
 
-setup-arch: ## Install build deps via pacman (Arch / Manjaro).
+setup-arch: tools ## Install build deps via pacman (Arch / Manjaro) + linuxdeploy.
 	sudo pacman -S --needed --noconfirm \
 	    base-devel cmake ninja git curl \
 	    qt6-base qt6-tools qt6-networkauth qt6-declarative \
 	    qt6-svg \
 	    qtkeychain-qt6 libsecret sqlite zstd \
 	    librsvg appstream xorg-server-xvfb
+
+setup-macos: ## Install build deps via Homebrew and generate local macOS CMake presets.
+	bash scripts/setup-macos.sh
+
+setup-windows: ## Install Windows deps via winget/aqt/vcpkg and generate local CMake presets.
+	@if command -v pwsh >/dev/null 2>&1; then \
+	    pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup-windows.ps1; \
+	elif command -v powershell.exe >/dev/null 2>&1; then \
+	    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-windows.ps1; \
+	else \
+	    echo "PowerShell 7 (pwsh) or Windows PowerShell is required for setup-windows."; \
+	    exit 1; \
+	fi
 
 tools: $(LINUXDEPLOY_DIR)/linuxdeploy $(LINUXDEPLOY_DIR)/linuxdeploy-plugin-qt  ## Fetch linuxdeploy + qt plugin into ~/.local/bin.
 
