@@ -265,12 +265,22 @@ private:
     // — gmail_ is the no-tokens Bootstrap fallback and would fail
     // with "no token" on every request.
     fc::api::GmailClient* activeGmail() const;
+    fc::api::GmailClient* gmailForAccount(const QString& accountId) const;
+    QString accountForCurrentMessage() const;
+    QString accountForMessageId(const QString& messageId) const;
+    fc::Message cachedMessageForId(const QString& messageId,
+                                   QString* accountIdOut = nullptr) const;
 
     // Apply (add, remove) label sets to every message in a thread,
     // queue the equivalent server reconciliation for each, and refresh
     // the visible inbox. Used by archive, mark-read toggle, and the
     // auto-mark-on-open flow.
-    void applyLabelDiffToThread(const QString& threadId,
+    void applyLabelDiffToMessage(const QString& accountId,
+                                  const QString& messageId,
+                                  const QStringList& add,
+                                  const QStringList& remove);
+    void applyLabelDiffToThread(const QString& accountId,
+                                 const QString& threadId,
                                  const QStringList& add,
                                  const QStringList& remove);
 

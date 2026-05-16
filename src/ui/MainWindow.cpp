@@ -2350,6 +2350,54 @@ fc::api::GmailClient* MainWindow::activeGmail() const {
     return gmail_;
 }
 
+fc::api::GmailClient* MainWindow::gmailForAccount(const QString& accountId) const {
+    if (accounts_ && !accountId.isEmpty()) {
+        if (auto* ctx = accounts_->contextFor(accountId)) {
+            if (ctx->gmail()) return ctx->gmail();
+        }
+    }
+    return activeGmail();
+}
+
+QString MainWindow::accountForCurrentMessage() const {
+    if (!currentMessage_.accountId.isEmpty()) return currentMessage_.accountId;
+    if (listModel_ && currentRow_ >= 0 && currentRow_ < listModel_->rowCount()) {
+        const auto idx = listModel_->index(currentRow_, 0);
+        const QString accountId =
+            idx.data(fc::MessageListModel::AccountIdRole).toString();
+        if (!accountId.isEmpty()) return accountId;
+    }
+    return currentAccountId_;
+}
+
+QString MainWindow::accountForMessageId(const QString& messageId) const {
+    if (messageId.isEmpty()) return {};
+    if (currentMessage_.id == messageId && !currentMessage_.accountId.isEmpty()) {
+        return currentMessage_.accountId;
+    }
+    if (listModel_) {
+        const int n = listModel_->rowCount();
+        for (int i = 0; i < n; ++i) {
+            const auto idx = listModel_->index(i, 0);
+            if (idx.data(fc::MessageListModel::IdRole).toString() != messageId) {
+                continue;
+            }
+            const QString accountId =
+                idx.data(fc::MessageListModel::AccountIdRole).toString();
+            if (!accountId.isEmpty()) return accountId;
+        }
+    }
+    return accountForCurrentMessage();
+}
+
+fc::Message MainWindow::cachedMessageForId(const QString& messageId,
+                                           QString* accountIdOut) const {
+    const QString accountId = accountForMessageId(messageId);
+    if (accountIdOut) *accountIdOut = accountId;
+    if (accountId.isEmpty()) return {};
+    return fc::cache::MessageRepository::byId(accountId, messageId);
+}
+
 void MainWindow::refreshListFooter() {
     if (!listModel_) return;
 
@@ -2505,7 +2553,7 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
         bool anyUnread = false;
         for (const auto& m : thread) if (m.isUnread) { anyUnread = true; break; }
         if (anyUnread) {
-            applyLabelDiffToThread(selected.threadId, {},
+            applyLabelDiffToThread(lookupAccount, selected.threadId, {},
                                    {QStringLiteral("UNREAD")});
             currentMessage_.isUnread = false;
             // Repaint sidebar (unread counts) + message list (bold/
@@ -2799,21 +2847,21 @@ void MainWindow::onForwardCurrent() {
 
 void MainWindow::onReplyToMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
+    fc::Message m = cachedMessageForId(messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::Reply));
 }
 
 void MainWindow::onReplyAllToMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
+    fc::Message m = cachedMessageForId(messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::ReplyAll));
 }
 
 void MainWindow::onForwardMessage(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_, messageId);
+    fc::Message m = cachedMessageForId(messageId);
     if (m.id.isEmpty()) return;
     openComposeWindow(&m, int(ComposeWindow::Mode::Forward));
 }
@@ -2825,9 +2873,10 @@ void MainWindow::onArchiveMessage(const QString& messageId) {
             tr("Dry-run mode: archive blocked."), 4000);
         return;
     }
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty()) return;
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, {}, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, {}, rem);
+    applyLabelDiffToMessage(accountId, messageId, {}, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Message archived."), 3000);
     reloadCurrentLabel();
@@ -2840,11 +2889,12 @@ void MainWindow::onMarkMessageRead(const QString& messageId, bool read) {
             tr("Dry-run mode: mark read/unread blocked."), 4000);
         return;
     }
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty()) return;
     QStringList add, rem;
     if (read) rem << QStringLiteral("UNREAD");
     else      add << QStringLiteral("UNREAD");
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, add, rem);
+    applyLabelDiffToMessage(accountId, messageId, add, rem);
     pending_->flush();
     statusBar()->showMessage(read ? tr("Marked read.") : tr("Marked unread."),
                               3000);
@@ -2864,10 +2914,11 @@ void MainWindow::onDeleteMessage(const QString& messageId) {
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
         return;
     }
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty()) return;
     const QStringList add{QStringLiteral("TRASH")};
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, add, rem);
+    applyLabelDiffToMessage(accountId, messageId, add, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Message moved to Trash."), 3000);
     reloadCurrentLabel();
@@ -2914,11 +2965,12 @@ void MainWindow::onSnoozeMessage(const QString& messageId) {
         return;
     }
 
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty()) return;
     const qint64 wakeAt = when.toMSecsSinceEpoch();
-    fc::cache::MessageRepository::setSnoozeUntil(currentAccountId_, messageId, wakeAt);
+    fc::cache::MessageRepository::setSnoozeUntil(accountId, messageId, wakeAt);
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId, {}, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId, {}, rem);
+    applyLabelDiffToMessage(accountId, messageId, {}, rem);
     pending_->flush();
     statusBar()->showMessage(
         tr("Snoozed until %1.").arg(when.toString(QStringLiteral("MMM d, h:mm AP"))),
@@ -3126,18 +3178,15 @@ void MainWindow::onToggleStarFor(const QString& messageId) {
     // Re-read from cache so we toggle relative to the row the user clicked,
     // not to whatever currentMessage_ happens to be (the click target may
     // not be the currently-selected row).
-    const fc::Message m = fc::cache::MessageRepository::byId(currentAccountId_,
-                                                              messageId);
+    QString accountId;
+    const fc::Message m = cachedMessageForId(messageId, &accountId);
     if (m.id.isEmpty()) return;
 
     QStringList add, rem;
     if (m.isStarred) rem << QStringLiteral("STARRED");
     else             add << QStringLiteral("STARRED");
 
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, messageId,
-                                                  add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, messageId,
-                                                    add, rem);
+    applyLabelDiffToMessage(accountId, messageId, add, rem);
     pending_->flush();
 
     // Keep currentMessage_ in sync if the toggle was on the currently-shown
@@ -3225,8 +3274,10 @@ void MainWindow::onOpenAttachment(const QString& messageId,
     }
 
     statusBar()->showMessage(tr("Opening %1…").arg(filename));
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty()) return;
     QPointer<MainWindow> self(this);
-    fc::api::GmailClient* gmail = activeGmail();
+    fc::api::GmailClient* gmail = gmailForAccount(accountId);
     // Queue the API call through the GmailClient event loop. The callback
     // can do its temp-file write inline (POSIX file I/O), but the status-bar
     // + QDesktopServices::openUrl work stays on the UI callback path.
@@ -3296,8 +3347,9 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
 
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
     QPointer<MainWindow> self(this);
-    const QString accountForSave = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    const QString accountForSave = accountForMessageId(messageId);
+    if (accountForSave.isEmpty()) return;
+    fc::api::GmailClient* gmail = gmailForAccount(accountForSave);
     postToObject(gmail, [gmail, messageId, attachmentId, target, self,
                           accountForSave] {
         gmail->getAttachment(messageId, attachmentId,
@@ -3345,7 +3397,9 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
         return;
     }
 
-    const auto m = fc::cache::MessageRepository::byId(currentAccountId_,
+    const QString accountForBatch = accountForMessageId(messageId);
+    if (accountForBatch.isEmpty()) return;
+    const auto m = fc::cache::MessageRepository::byId(accountForBatch,
                                                        messageId);
     if (m.attachments.empty()) {
         statusBar()->showMessage(tr("No attachments on this message."), 4000);
@@ -3367,8 +3421,7 @@ void MainWindow::onDownloadAllAttachments(const QString& messageId) {
 
     int kicked = 0;
     QPointer<MainWindow> self(this);
-    const QString accountForBatch = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    fc::api::GmailClient* gmail = gmailForAccount(accountForBatch);
     for (const auto& a : m.attachments) {
         if (a.id.isEmpty()) continue;   // inline-only; not addressable
         const QString target = uniqueTargetPath(dir, a.filename);
@@ -3442,25 +3495,35 @@ void MainWindow::onDeleteCurrent() {
     const QString id = currentMessage_.id;
     const QStringList add{QStringLiteral("TRASH")};
     const QStringList rem{QStringLiteral("INBOX")};
-    fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, id, add, rem);
-    fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, id, add, rem);
+    const QString accountId = accountForCurrentMessage();
+    if (accountId.isEmpty()) return;
+    applyLabelDiffToMessage(accountId, id, add, rem);
     pending_->flush();
     statusBar()->showMessage(tr("Moved to Trash."), 3000);
     reloadCurrentLabel();
 }
 
-void MainWindow::applyLabelDiffToThread(const QString& threadId,
+void MainWindow::applyLabelDiffToMessage(const QString& accountId,
+                                          const QString& messageId,
+                                          const QStringList& add,
+                                          const QStringList& remove) {
+    if (accountId.isEmpty() || messageId.isEmpty()) return;
+    fc::cache::MessageRepository::applyLabelDiff(accountId, messageId,
+                                                  add, remove);
+    fc::cache::PendingOpsRepository::enqueueModify(accountId, messageId,
+                                                    add, remove);
+}
+
+void MainWindow::applyLabelDiffToThread(const QString& accountId,
+                                         const QString& threadId,
                                          const QStringList& add,
                                          const QStringList& remove) {
-    if (threadId.isEmpty()) return;
-    const auto messages = fc::cache::MessageRepository::byThread(currentAccountId_,
+    if (accountId.isEmpty() || threadId.isEmpty()) return;
+    const auto messages = fc::cache::MessageRepository::byThread(accountId,
                                                                   threadId);
     for (const auto& m : messages) {
         if (m.id.isEmpty()) continue;
-        fc::cache::MessageRepository::applyLabelDiff(currentAccountId_, m.id,
-                                                      add, remove);
-        fc::cache::PendingOpsRepository::enqueueModify(currentAccountId_, m.id,
-                                                        add, remove);
+        applyLabelDiffToMessage(accountId, m.id, add, remove);
     }
     pending_->flush();
 }
@@ -3476,7 +3539,8 @@ bool MainWindow::guardedThreadAction(const QString& dryRunKey,
         statusBar()->showMessage(blockedStatus, 4000);
         return false;
     }
-    applyLabelDiffToThread(currentMessage_.threadId, add, remove);
+    applyLabelDiffToThread(accountForCurrentMessage(), currentMessage_.threadId,
+                           add, remove);
     statusBar()->showMessage(successStatus, 3000);
     reloadCurrentLabel();
     if (refreshSidebar) reloadSidebar();
@@ -3509,7 +3573,8 @@ void MainWindow::onToggleReadCurrent() {
     // and vice versa. Avoids the surprise of "I clicked toggle and only
     // one of three messages flipped state."
     const auto messages = fc::cache::MessageRepository::byThread(
-                              currentAccountId_, currentMessage_.threadId);
+                              accountForCurrentMessage(),
+                              currentMessage_.threadId);
     bool anyUnread = false;
     for (const auto& m : messages) if (m.isUnread) { anyUnread = true; break; }
 
@@ -3625,7 +3690,7 @@ void MainWindow::onMarkImportant() {
         statusBar()->showMessage(tr("Dry-run mode: mark-important blocked."), 4000);
         return;
     }
-    applyLabelDiffToThread(currentMessage_.threadId,
+    applyLabelDiffToThread(accountForCurrentMessage(), currentMessage_.threadId,
                             {QStringLiteral("IMPORTANT")}, {});
     statusBar()->showMessage(tr("Marked important."), 3000);
 }
@@ -3636,7 +3701,7 @@ void MainWindow::onMarkNotImportant() {
         statusBar()->showMessage(tr("Dry-run mode: mark-not-important blocked."), 4000);
         return;
     }
-    applyLabelDiffToThread(currentMessage_.threadId,
+    applyLabelDiffToThread(accountForCurrentMessage(), currentMessage_.threadId,
                             {}, {QStringLiteral("IMPORTANT")});
     statusBar()->showMessage(tr("Marked not important."), 3000);
 }
@@ -3873,7 +3938,7 @@ void MainWindow::onApplyLabelsCurrent() {
         for (const auto& id : m.labelIds) applied.insert(id);
     }
 
-    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, currentAccountId_,
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::Apply, threadAccount,
                             applied, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
@@ -3881,7 +3946,7 @@ void MainWindow::onApplyLabelsCurrent() {
     const QStringList rem = dlg.removed();
     if (add.isEmpty() && rem.isEmpty()) return;
 
-    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    applyLabelDiffToThread(threadAccount, currentMessage_.threadId, add, rem);
     statusBar()->showMessage(tr("Labels updated."), 3000);
     reloadCurrentLabel();
     reloadSidebar();
@@ -3903,7 +3968,7 @@ void MainWindow::onMoveToLabelCurrent() {
         for (const auto& id : m.labelIds) applied.insert(id);
     }
 
-    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, currentAccountId_,
+    LabelChooserDialog dlg(LabelChooserDialog::Mode::MoveTo, threadAccount,
                             applied, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
@@ -3924,7 +3989,7 @@ void MainWindow::onMoveToLabelCurrent() {
     if (!applied.contains(chosen)) add << chosen;
 
     if (add.isEmpty() && rem.isEmpty()) return;
-    applyLabelDiffToThread(currentMessage_.threadId, add, rem);
+    applyLabelDiffToThread(threadAccount, currentMessage_.threadId, add, rem);
     statusBar()->showMessage(tr("Moved."), 3000);
     reloadCurrentLabel();
     reloadSidebar();
@@ -4075,15 +4140,15 @@ void MainWindow::onSnoozeCurrent() {
     // the conversation gone from Inbox there too); the wake-up will
     // re-apply INBOX which restores it on Gmail web's side as well.
     const QString tid = currentMessage_.threadId;
-    const auto thread = fc::cache::MessageRepository::byThread(currentAccountId_,
-                                                                tid);
+    const QString accountId = accountForCurrentMessage();
+    if (accountId.isEmpty()) return;
+    const auto thread = fc::cache::MessageRepository::byThread(accountId, tid);
     const qint64 wakeAt = when.toMSecsSinceEpoch();
     for (const auto& m : thread) {
         if (m.id.isEmpty()) continue;
-        fc::cache::MessageRepository::setSnoozeUntil(currentAccountId_,
-                                                      m.id, wakeAt);
+        fc::cache::MessageRepository::setSnoozeUntil(accountId, m.id, wakeAt);
     }
-    applyLabelDiffToThread(tid, {}, {QStringLiteral("INBOX")});
+    applyLabelDiffToThread(accountId, tid, {}, {QStringLiteral("INBOX")});
     statusBar()->showMessage(
         tr("Snoozed until %1.")
             .arg(when.toString(QStringLiteral("ddd MMM d, h:mm AP"))),
@@ -4108,7 +4173,8 @@ void MainWindow::wakeDueSnoozedMessages() {
     }
     // Restore INBOX per thread (one diff per thread, not per message).
     for (const QString& tid : threads) {
-        applyLabelDiffToThread(tid, {QStringLiteral("INBOX")}, {});
+        applyLabelDiffToThread(currentAccountId_, tid,
+                               {QStringLiteral("INBOX")}, {});
     }
     qInfo("Snooze: woke %d message(s) across %d thread(s)",
           int(due.size()), int(threads.size()));
