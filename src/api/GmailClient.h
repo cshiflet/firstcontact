@@ -115,7 +115,12 @@ public:
         QString id;
         QStringList messagesAdded;
         QStringList messagesDeleted;
-        // (Phase 2.5: labelsAdded/Removed deltas if we want richer behaviour.)
+        struct LabelDelta {
+            QString messageId;
+            QStringList labelIds;
+        };
+        std::vector<LabelDelta> labelsAdded;
+        std::vector<LabelDelta> labelsRemoved;
     };
     struct HistoryPage {
         std::vector<HistoryEntry> entries;

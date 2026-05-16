@@ -87,6 +87,10 @@ public:
                                          const QString& id);
     static bool                     exists(const QString& accountId,
                                             const QString& id);
+    static bool                     remove(const QString& accountId,
+                                            const QString& id);
+    static int                      removeMany(const QString& accountId,
+                                                const QStringList& ids);
     static std::vector<fc::Message> byThread(const QString& accountId,
                                              const QString& threadId);
     static void                     applyLabelDiff(const QString& accountId,
