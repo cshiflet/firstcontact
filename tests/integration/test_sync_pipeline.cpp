@@ -10,6 +10,7 @@
 
 #include "api/MessageParser.h"
 #include "cache/Database.h"
+#include "cache/LabelRepository.h"
 #include "cache/MessageRepository.h"
 #include "models/Message.h"
 
@@ -63,12 +64,36 @@ void seedSystemLabels() {
     const QString aid = testAccountId();
     for (const QString& id : {QStringLiteral("INBOX"),
                                QStringLiteral("UNREAD"),
+                               QStringLiteral("IMPORTANT"),
                                QStringLiteral("STARRED"),
                                QStringLiteral("CATEGORY_PERSONAL")}) {
         q.bindValue(QStringLiteral(":acc"), aid);
         q.bindValue(QStringLiteral(":id"), id);
         q.exec();
     }
+}
+
+int countForMessage(const QString& table, const QString& messageId) {
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("SELECT COUNT(*) FROM %1 "
+                             "WHERE account_id = :a AND message_id = :m")
+                  .arg(table));
+    q.bindValue(QStringLiteral(":a"), testAccountId());
+    q.bindValue(QStringLiteral(":m"), messageId);
+    if (!q.exec() || !q.next()) return -1;
+    return q.value(0).toInt();
+}
+
+int countThreadRows(const QString& threadId) {
+    auto db = fc::cache::databaseHandle();
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM threads WHERE account_id = :a AND id = :t"));
+    q.bindValue(QStringLiteral(":a"), testAccountId());
+    q.bindValue(QStringLiteral(":t"), threadId);
+    if (!q.exec() || !q.next()) return -1;
+    return q.value(0).toInt();
 }
 
 }  // namespace
@@ -201,6 +226,95 @@ private slots:
             /*unreadOnly=*/true);
         QCOMPARE(rows.size(), size_t(1));
         QCOMPARE(rows[0].id, QStringLiteral("msg-aaa"));
+    }
+
+    void labelDiffUpdatesEdgesFlagsAndCounts() {
+        seedSystemLabels();
+
+        fc::Message m;
+        m.id = QStringLiteral("msg-label-delta");
+        m.threadId = QStringLiteral("thr-label-delta");
+        m.subject = QStringLiteral("Label delta subject");
+        m.fromAddr = QStringLiteral("delta@example.test");
+        m.internalDate = 1702000000000LL;
+        m.labelIds = {QStringLiteral("INBOX"), QStringLiteral("UNREAD")};
+        m.isUnread = true;
+        QVERIFY(fc::cache::MessageRepository::upsert(testAccountId(), m) > 0);
+
+        fc::cache::MessageRepository::applyLabelDiff(
+            testAccountId(), m.id,
+            {QStringLiteral("STARRED"), QStringLiteral("IMPORTANT")},
+            {QStringLiteral("UNREAD")});
+        fc::cache::LabelRepository::recomputeCounts(testAccountId());
+
+        const auto row = fc::cache::MessageRepository::byId(testAccountId(), m.id);
+        QVERIFY(!row.isUnread);
+        QVERIFY(row.isStarred);
+        QVERIFY(row.isImportant);
+
+        const auto unread = fc::cache::MessageRepository::listByLabel(
+            testAccountId(), QStringLiteral("UNREAD"), 100, 0);
+        for (const auto& r : unread) QVERIFY(r.id != m.id);
+
+        bool foundStarred = false;
+        for (const auto& r : fc::cache::MessageRepository::listByLabel(
+                 testAccountId(), QStringLiteral("STARRED"), 100, 0)) {
+            if (r.id == m.id) {
+                foundStarred = true;
+                QVERIFY(r.labelIds.contains(QStringLiteral("IMPORTANT")));
+                QVERIFY(!r.labelIds.contains(QStringLiteral("UNREAD")));
+                break;
+            }
+        }
+        QVERIFY(foundStarred);
+
+        const auto starred = fc::cache::LabelRepository::byId(
+            testAccountId(), QStringLiteral("STARRED"));
+        QVERIFY(starred.totalCount >= 1);
+        QCOMPARE(starred.unreadCount, 0);
+    }
+
+    void remoteDeleteRemovesVisibleRowsSearchAndDependents() {
+        seedSystemLabels();
+
+        fc::Message m;
+        m.id = QStringLiteral("msg-remote-delete");
+        m.threadId = QStringLiteral("thr-remote-delete");
+        m.subject = QStringLiteral("Remote delete subject");
+        m.fromAddr = QStringLiteral("delete@example.test");
+        m.internalDate = 1703000000000LL;
+        m.bodyText = QStringLiteral("remotedeleteneedle");
+        m.labelIds = {QStringLiteral("INBOX")};
+        m.hasAttachment = true;
+        fc::Attachment a;
+        a.id = QStringLiteral("att-remote-delete");
+        a.filename = QStringLiteral("delete.txt");
+        a.mimeType = QStringLiteral("text/plain");
+        a.size = 12;
+        m.attachments.push_back(a);
+        QVERIFY(fc::cache::MessageRepository::upsert(testAccountId(), m) > 0);
+
+        QCOMPARE(countForMessage(QStringLiteral("attachments"), m.id), 1);
+        QCOMPARE(countForMessage(QStringLiteral("message_labels"), m.id), 1);
+        QCOMPARE(countThreadRows(m.threadId), 1);
+        QCOMPARE(fc::cache::MessageRepository::searchFts(
+                     testAccountId(), QStringLiteral("remotedeleteneedle"), 10).size(),
+                 size_t(1));
+
+        QVERIFY(fc::cache::MessageRepository::remove(testAccountId(), m.id));
+        QVERIFY(!fc::cache::MessageRepository::exists(testAccountId(), m.id));
+        QCOMPARE(countForMessage(QStringLiteral("attachments"), m.id), 0);
+        QCOMPARE(countForMessage(QStringLiteral("message_labels"), m.id), 0);
+        QCOMPARE(countThreadRows(m.threadId), 0);
+        QVERIFY(fc::cache::MessageRepository::byThread(
+                    testAccountId(), m.threadId).empty());
+        QVERIFY(fc::cache::MessageRepository::searchFts(
+                    testAccountId(), QStringLiteral("remotedeleteneedle"), 10).empty());
+
+        for (const auto& r : fc::cache::MessageRepository::listByLabel(
+                 testAccountId(), QStringLiteral("INBOX"), 100, 0)) {
+            QVERIFY(r.id != m.id);
+        }
     }
 
     // Meta-first sync upserts messages with empty body_text / body_html

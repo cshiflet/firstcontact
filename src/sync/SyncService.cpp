@@ -314,23 +314,59 @@ void SyncService::doIncrementalSync() {
                 for (const auto& id : e.messagesAdded)   added.insert(id);
                 for (const auto& id : e.messagesDeleted) deleted.insert(id);
             }
-            // (We don't process labelAdded/labelRemoved deltas yet; the next
-            // full message refetch picks up flag changes via upsert.)
 
             if (!page.historyId.isEmpty()) {
                 fc::cache::MetaRepository::setHistoryId(d_->accountId,
                                                         page.historyId);
             }
 
-            if (added.isEmpty() && deleted.isEmpty()) {
+            QStringList deletedIds;
+            for (const auto& id : deleted) {
+                deletedIds << id;
+                added.remove(id);
+            }
+
+            const int removedCount = fc::cache::MessageRepository::removeMany(
+                d_->accountId, deletedIds);
+
+            bool labelDeltaApplied = false;
+            for (const auto& e : page.entries) {
+                for (const auto& d : e.labelsAdded) {
+                    if (deleted.contains(d.messageId) ||
+                        added.contains(d.messageId) ||
+                        !fc::cache::MessageRepository::exists(d_->accountId,
+                                                              d.messageId)) {
+                        continue;
+                    }
+                    fc::cache::MessageRepository::applyLabelDiff(
+                        d_->accountId, d.messageId, d.labelIds, {});
+                    labelDeltaApplied = true;
+                }
+                for (const auto& d : e.labelsRemoved) {
+                    if (deleted.contains(d.messageId) ||
+                        added.contains(d.messageId) ||
+                        !fc::cache::MessageRepository::exists(d_->accountId,
+                                                              d.messageId)) {
+                        continue;
+                    }
+                    fc::cache::MessageRepository::applyLabelDiff(
+                        d_->accountId, d.messageId, {}, d.labelIds);
+                    labelDeltaApplied = true;
+                }
+            }
+
+            if (removedCount > 0 || labelDeltaApplied) {
+                fc::cache::LabelRepository::recomputeCounts(d_->accountId);
+                emit labelsUpdated();
+                emit messagesUpdated();
+            }
+
+            if (added.isEmpty()) {
                 d_->busy = false;
                 setState(State::Idle);
                 return;
             }
 
-            // Note: deletions should be applied to the local cache too. We
-            // keep the rows for now and only delete from listings via the
-            // label edges. A Phase 4 evictor will clean up orphans.
             QStringList ids = added.values();
             fetchAndStoreMessages(ids, int(added.size()), /*isInitial=*/false);
         });

@@ -979,13 +979,170 @@ bool MessageRepository::exists(const QString& accountId, const QString& id) {
     return q.exec() && q.next();
 }
 
+namespace {
+
+bool removeOneNoTxn(QSqlDatabase& db, const QString& accountId,
+                    const QString& id) {
+    if (accountId.isEmpty() || id.isEmpty()) return false;
+
+    qint64 rowid = -1;
+    QString threadId;
+    QString subject;
+    QString fromName;
+    QString fromAddr;
+    QString bodyText;
+    QString snippet;
+    {
+        QSqlQuery snap(db);
+        snap.prepare(QStringLiteral(
+            "SELECT rowid, thread_id, COALESCE(subject, ''), "
+            "       COALESCE(from_name, ''), COALESCE(from_addr, ''), "
+            "       body_text, COALESCE(snippet, '') "
+            "FROM messages WHERE account_id = :a AND id = :id"));
+        snap.bindValue(QStringLiteral(":a"), accountId);
+        snap.bindValue(QStringLiteral(":id"), id);
+        if (!snap.exec()) {
+            qWarning("MessageRepository::remove snapshot %s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(id),
+                     qUtf8Printable(snap.lastError().text()));
+            return false;
+        }
+        if (!snap.next()) return false;
+        rowid = snap.value(0).toLongLong();
+        threadId = snap.value(1).toString();
+        subject = snap.value(2).toString();
+        fromName = snap.value(3).toString();
+        fromAddr = snap.value(4).toString();
+        bodyText = decompressBody(accountId, snap.value(5).toByteArray());
+        snippet = snap.value(6).toString();
+    }
+
+    const QString fromText = fromName.isEmpty()
+        ? fromAddr : (fromName + QLatin1Char(' ') + fromAddr);
+    if (rowid >= 0) {
+        ftsDeleteByRowid(db, rowid, subject, fromText, bodyText, snippet,
+                         accountId);
+    }
+
+    for (const QString& sql : {
+             QStringLiteral("DELETE FROM attachments "
+                            "WHERE account_id = :a AND message_id = :id"),
+             QStringLiteral("DELETE FROM message_labels "
+                            "WHERE account_id = :a AND message_id = :id"),
+             QStringLiteral("DELETE FROM messages "
+                            "WHERE account_id = :a AND id = :id")}) {
+        QSqlQuery q(db);
+        q.prepare(sql);
+        q.bindValue(QStringLiteral(":a"), accountId);
+        q.bindValue(QStringLiteral(":id"), id);
+        if (!q.exec()) {
+            qWarning("MessageRepository::remove delete %s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(id),
+                     qUtf8Printable(q.lastError().text()));
+            return false;
+        }
+    }
+
+    QSqlQuery latest(db);
+    latest.prepare(QStringLiteral(
+        "SELECT history_id, snippet, internal_date "
+        "FROM messages WHERE account_id = :a AND thread_id = :t "
+        "ORDER BY internal_date DESC LIMIT 1"));
+    latest.bindValue(QStringLiteral(":a"), accountId);
+    latest.bindValue(QStringLiteral(":t"), threadId);
+    if (!latest.exec()) {
+        qWarning("MessageRepository::remove latest thread %s/%s: %s",
+                 qUtf8Printable(accountId), qUtf8Printable(threadId),
+                 qUtf8Printable(latest.lastError().text()));
+        return false;
+    }
+    if (latest.next()) {
+        QSqlQuery up(db);
+        up.prepare(QStringLiteral(
+            "UPDATE threads SET history_id = :h, snippet = :s, "
+            "       last_message_internal_date = :d "
+            "WHERE account_id = :a AND id = :t"));
+        up.bindValue(QStringLiteral(":h"), latest.value(0).toString());
+        up.bindValue(QStringLiteral(":s"), latest.value(1).toString());
+        up.bindValue(QStringLiteral(":d"), latest.value(2).toLongLong());
+        up.bindValue(QStringLiteral(":a"), accountId);
+        up.bindValue(QStringLiteral(":t"), threadId);
+        if (!up.exec()) {
+            qWarning("MessageRepository::remove update thread %s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(threadId),
+                     qUtf8Printable(up.lastError().text()));
+            return false;
+        }
+    } else {
+        QSqlQuery delThread(db);
+        delThread.prepare(QStringLiteral(
+            "DELETE FROM threads WHERE account_id = :a AND id = :t"));
+        delThread.bindValue(QStringLiteral(":a"), accountId);
+        delThread.bindValue(QStringLiteral(":t"), threadId);
+        if (!delThread.exec()) {
+            qWarning("MessageRepository::remove delete thread %s/%s: %s",
+                     qUtf8Printable(accountId), qUtf8Printable(threadId),
+                     qUtf8Printable(delThread.lastError().text()));
+            return false;
+        }
+    }
+
+    return true;
+}
+
+}  // namespace
+
+bool MessageRepository::remove(const QString& accountId, const QString& id) {
+    if (accountId.isEmpty() || id.isEmpty()) return false;
+    auto db = databaseHandle();
+    if (!db.transaction()) {
+        qWarning("MessageRepository::remove: BEGIN failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return false;
+    }
+    const bool removed = removeOneNoTxn(db, accountId, id);
+    if (!removed) {
+        db.rollback();
+        return false;
+    }
+    if (!db.commit()) {
+        qWarning("MessageRepository::remove: commit failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        db.rollback();
+        return false;
+    }
+    return true;
+}
+
+int MessageRepository::removeMany(const QString& accountId,
+                                  const QStringList& ids) {
+    if (accountId.isEmpty() || ids.isEmpty()) return 0;
+    auto db = databaseHandle();
+    if (!db.transaction()) {
+        qWarning("MessageRepository::removeMany: BEGIN failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        return 0;
+    }
+    int removed = 0;
+    for (const auto& id : ids) {
+        if (removeOneNoTxn(db, accountId, id)) ++removed;
+    }
+    if (!db.commit()) {
+        qWarning("MessageRepository::removeMany: commit failed: %s",
+                 qUtf8Printable(db.lastError().text()));
+        db.rollback();
+        return 0;
+    }
+    return removed;
+}
+
 void MessageRepository::applyLabelDiff(const QString& accountId,
                                        const QString& messageId,
                                        const QStringList& added,
                                        const QStringList& removed) {
     if (accountId.isEmpty()) return;
     auto db = databaseHandle();
-    // Wrap the three-statement label-edge update in a single
+    // Wrap the label-edge update in a single
     // transaction so a crash mid-call doesn't leave the cache in
     // a state where the edges and the derived is_unread / is_starred
     // flags disagree. Without the transaction a partial failure
@@ -1006,7 +1163,11 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
     QSqlQuery ins(db);
     ins.prepare(QStringLiteral(
         "INSERT OR IGNORE INTO message_labels(account_id, message_id, label_id) "
-        "VALUES(:a, :m, :l)"));
+        "SELECT :a, :m, :l "
+        "WHERE EXISTS (SELECT 1 FROM messages "
+        "              WHERE account_id = :a AND id = :m) "
+        "  AND EXISTS (SELECT 1 FROM labels "
+        "              WHERE account_id = :a AND id = :l)"));
     for (const auto& l : added) {
         ins.bindValue(QStringLiteral(":a"), accountId);
         ins.bindValue(QStringLiteral(":m"), messageId);
@@ -1041,7 +1202,9 @@ void MessageRepository::applyLabelDiff(const QString& accountId,
         "  is_unread  = (SELECT COUNT(*) FROM message_labels "
         "                 WHERE account_id = :a AND message_id = :m AND label_id = 'UNREAD')  > 0, "
         "  is_starred = (SELECT COUNT(*) FROM message_labels "
-        "                 WHERE account_id = :a AND message_id = :m AND label_id = 'STARRED') > 0 "
+        "                 WHERE account_id = :a AND message_id = :m AND label_id = 'STARRED') > 0, "
+        "  is_important = (SELECT COUNT(*) FROM message_labels "
+        "                 WHERE account_id = :a AND message_id = :m AND label_id = 'IMPORTANT') > 0 "
         "WHERE account_id = :a AND id = :m"));
     flags.bindValue(QStringLiteral(":a"), accountId);
     flags.bindValue(QStringLiteral(":m"), messageId);

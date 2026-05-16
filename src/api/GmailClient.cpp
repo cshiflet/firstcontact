@@ -306,6 +306,32 @@ void GmailClient::listHistory(const QString& startHistoryId,
                         << m.toObject().value(QStringLiteral("message"))
                                        .toObject().value(QStringLiteral("id")).toString();
                 }
+                auto readLabelDeltas =
+                    [](const QJsonArray& arr) {
+                        std::vector<HistoryEntry::LabelDelta> out;
+                        out.reserve(static_cast<size_t>(arr.size()));
+                        for (const auto deltaValue : arr) {
+                            const auto deltaObject = deltaValue.toObject();
+                            HistoryEntry::LabelDelta d;
+                            d.messageId =
+                                deltaObject.value(QStringLiteral("message"))
+                                .toObject()
+                                .value(QStringLiteral("id")).toString();
+                            for (const auto label
+                                 : deltaObject.value(QStringLiteral("labelIds"))
+                                   .toArray()) {
+                                d.labelIds << label.toString();
+                            }
+                            if (!d.messageId.isEmpty() && !d.labelIds.isEmpty()) {
+                                out.push_back(std::move(d));
+                            }
+                        }
+                        return out;
+                    };
+                e.labelsAdded = readLabelDeltas(
+                    h.value(QStringLiteral("labelsAdded")).toArray());
+                e.labelsRemoved = readLabelDeltas(
+                    h.value(QStringLiteral("labelsRemoved")).toArray());
                 p.entries.push_back(std::move(e));
             }
             cb(p, {});
