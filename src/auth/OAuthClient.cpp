@@ -470,14 +470,14 @@ void OAuthClient::exchangeCodeForTokens(const QString& code) {
     });
 }
 
-bool OAuthClient::refreshIfNeededLocked() {
+bool OAuthClient::refreshIfNeededLocked(bool forceRefresh) {
     // tokenMutex held on entry. We RELEASE it across the event loop so other
     // threads can read tokens (e.g. concurrent batched requests). A second
     // refresh racing this one would be wasteful but not incorrect — both end
     // up writing the latest server-issued access_token.
     if (!d_->tokens.valid()) return false;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
-    if (d_->tokens.expiresAtUnix - now > 60) return true;
+    if (!forceRefresh && d_->tokens.expiresAtUnix - now > 60) return true;
 
     const QString clientId     = d_->config->clientId();
     const QString clientSecret = d_->config->clientSecret();
@@ -532,9 +532,9 @@ bool OAuthClient::refreshIfNeededLocked() {
     return true;
 }
 
-QString OAuthClient::accessTokenBlocking() {
+QString OAuthClient::accessTokenBlocking(bool forceRefresh) {
     QMutexLocker lock(&d_->tokenMutex);
-    if (!refreshIfNeededLocked()) return {};
+    if (!refreshIfNeededLocked(forceRefresh)) return {};
     return d_->tokens.accessToken;
 }
 
