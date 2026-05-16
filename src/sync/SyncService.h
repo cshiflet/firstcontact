@@ -14,11 +14,9 @@ namespace fc::sync {
 
 // Coordinates initial and incremental sync against Gmail, persisting results
 // through fc::cache repositories. Per-account SyncService instances live on
-// the AccountContext's dedicated sync thread (see AccountContext.h); SQL
-// batch upserts during initial sync and Gmail REST chatter no longer block
-// the UI's event loop. The legacy anonymous SyncService owned by Bootstrap
-// stays on the main thread (it never sees any real work — runOnce short-
-// circuits on the empty accountId).
+// the UI thread with their AccountContext (see AccountContext.h). The legacy
+// anonymous SyncService owned by Bootstrap also stays on the UI thread and
+// never sees any real work — runOnce short-circuits on the empty accountId.
 class SyncService : public QObject {
     Q_OBJECT
 public:
@@ -73,9 +71,8 @@ public:
     // row, then fires `cb` when complete. Used by the reader pane's
     // on-demand body load: when low-bandwidth mode is on and a user
     // opens a message whose cache row only carries metadata, this
-    // pulls the body in the background. cb runs on this object's
-    // thread (the sync thread); UI callers must marshal back via
-    // QMetaObject::invokeMethod.
+    // pulls the body asynchronously. cb runs on this object's thread, which is
+    // currently the UI thread for AccountContext-owned services.
     void fetchBodyOnDemand(const QString& messageId,
                             std::function<void(fc::api::ApiError)> cb);
 

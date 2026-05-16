@@ -101,14 +101,10 @@ namespace {
 constexpr int kPageSize = 100;
 
 // AccountContext's per-account stack (OAuthClient / RestClient /
-// GmailClient / SyncService) lives on the context's own QThread to
-// keep heavy upserts and Gmail REST traffic off the UI thread. Any
-// non-thread-safe method on those QObjects has to be invoked via a
-// queued cross-thread post, otherwise QNetworkAccessManager and
-// QSqlDatabase would touch state on the wrong thread (best-case Qt
-// warning; worst-case crash). These thin wrappers keep the call
-// sites readable and avoid repeating the lambda+Qt::QueuedConnection
-// boilerplate.
+// GmailClient / SyncService) currently lives on the UI thread with the
+// context. These thin wrappers keep deferred calls readable and avoid
+// repeating the lambda+Qt::QueuedConnection boilerplate at call sites
+// that expect async completion.
 template<class Target, class Fn>
 inline void postToObject(Target* target, Fn&& fn) {
     if (!target) return;
@@ -281,10 +277,9 @@ MainWindow::MainWindow(fc::auth::ClientConfig* config,
     for (auto* ctx : accounts_->allContexts()) {
         if (!ctx || !ctx->auth() || !ctx->auth()->isAuthorized()) continue;
         if (auto* s = ctx->sync()) {
-            // s lives on the AccountContext's sync thread; bounce the
-            // calls cross-thread so SyncService's internal state and
-            // its QTimer-driven scheduler are set up on the right
-            // thread.
+            // Queue the calls through SyncService's event loop so its
+            // state changes and QTimer setup happen after the current
+            // UI/account bootstrap pass unwinds.
             postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
             anyStarted = true;
         }
@@ -304,10 +299,9 @@ void MainWindow::applyBackgroundCrawlerSettings() {
     for (auto* ctx : accounts_->allContexts()) {
         if (!ctx) continue;
         if (auto* s = ctx->sync()) {
-            // SyncService::configureBackgroundCrawl owns a QTimer; it
-            // must be touched on the sync thread or QTimer warns
-            // about wrong-thread start. Use the standard postToObject
-            // dispatch so calls from the UI thread settle correctly.
+            // SyncService::configureBackgroundCrawl owns a QTimer. Use
+            // the standard postToObject dispatch so repeated settings
+            // changes settle in event-loop order.
             postToObject(s, [s, enabled, interval] {
                 s->configureBackgroundCrawl(enabled, interval);
             });
@@ -1264,8 +1258,8 @@ void MainWindow::wireSignals() {
                 // Auto-prune: any account that just synced should be
                 // re-checked against its bounds. Reads Preferences
                 // here (UI thread, where they're available) and posts
-                // the prune onto the account's sync thread so the
-                // DELETE + FTS-rebuild work doesn't block paint.
+                // the prune through the account SyncService so it runs
+                // after the current update notification returns.
                 // applyAutoPruneFor short-circuits internally when
                 // all three caps are zero, so we skip the pre-gating
                 // OR-check the previous shape had.
@@ -2064,9 +2058,9 @@ void MainWindow::onSignOutAccount(const QString& accountId) {
     // the active account's keychain entry untouched.
     if (auto* ctx = accounts_->contextFor(accountId)) {
         if (auto* a = ctx->auth()) {
-            // a lives on the AccountContext's sync thread; signOut
-            // mutates token state and uses QNetworkAccessManager to
-            // revoke at Google. Has to run on that thread.
+            // Queue signOut through the account OAuthClient; it mutates
+            // token state and may use QNetworkAccessManager to revoke
+            // at Google.
             postToObject(a, [a] { a->signOut(); });
         }
     }
@@ -2561,20 +2555,18 @@ void MainWindow::onMessageActivated(const QString& messageId, int row) {
             if (fc->gmail()) fetchGmail = fc->gmail();
         }
     }
-    // fetchGmail lives on the AccountContext's sync thread (for any
-    // signed-in account). Queue the call cross-thread, then bring
-    // the result back to the UI thread before touching widgets.
+    // fetchGmail lives with its AccountContext on the UI thread. Queue the
+    // call so the network request starts after the current selection/render
+    // pass, then touch widgets only from the final UI callback.
     postToObject(fetchGmail, [fetchGmail, messageId, self, renderThread,
                               accountForFetch] {
         fetchGmail->getMessage(messageId,
             [self, renderThread, accountForFetch]
             (fc::Message m, fc::api::ApiError err) {
-                // Callback runs on the sync thread. DB write is safe
-                // here (per-thread connection); UI work has to bounce
-                // back. We invokeMethod on `self` (a MainWindow,
-                // which lives on the UI thread); the queued connection
-                // also handles the destroyed-mid-flight case via the
-                // QPointer null check inside the lambda.
+                // Callback runs on the GmailClient's thread, currently
+                // the UI thread. Keep the final invokeMethod so the
+                // destroyed-mid-flight case is guarded by the QPointer
+                // null check inside the lambda.
                 if (!err && !m.id.isEmpty()) {
                     m.accountId = accountForFetch;
                     fc::cache::MessageRepository::upsert(accountForFetch, m);
@@ -2609,12 +2601,11 @@ void MainWindow::onSearchSubmit() {
     QPointer<MainWindow> self(this);
     const QString accountForSearch = currentAccountId_;
     fc::api::GmailClient* gmail = activeGmail();
-    // gmail lives on the AccountContext's sync thread; bounce the
-    // listMessages call across so QNetworkAccessManager isn't touched
-    // here. The hydration loop inside the callback fires more
-    // getMessage calls — those also need to run on the sync thread,
-    // which they will naturally (the callback already runs there).
-    // UI updates marshal back via invokeMethod(self).
+    // gmail lives with its AccountContext on the UI thread. Queue the
+    // listMessages call so the request starts after search-submit UI
+    // handling returns. The hydration loop inside the callback fires
+    // more getMessage calls on that same object; UI updates still go
+    // through invokeMethod(self) for lifetime guarding.
     postToObject(gmail, [gmail, q, self, accountForSearch] {
         gmail->listMessages({}, q, {}, kPageSize,
             [self, gmail, q, accountForSearch]
@@ -2629,8 +2620,8 @@ void MainWindow::onSearchSubmit() {
                         }, Qt::QueuedConnection);
                     return;
                 }
-                // Hydrate any missing ids on the sync thread (cache
-                // writes use this thread's connection).
+                // Hydrate any missing ids from the same GmailClient
+                // callback path before refreshing the UI.
                 for (const auto& id : page.ids) {
                     if (fc::cache::MessageRepository::exists(accountForSearch, id))
                         continue;
@@ -2960,8 +2951,8 @@ void MainWindow::onCreateLabel(const QString& accountIdArg,
         gmail = ctx->gmail();
     }
     if (!gmail) gmail = activeGmail();   // legacy fallback
-    // gmail lives on the sync thread; bounce the createLabel and
-    // marshal UI work back to the UI thread once the API call lands.
+    // Queue createLabel through the GmailClient event loop and marshal
+    // UI work back once the API call lands.
     postToObject(gmail, [gmail, name, self, accountForCreate] {
         gmail->createLabel(name,
             [self, accountForCreate]
@@ -3236,10 +3227,9 @@ void MainWindow::onOpenAttachment(const QString& messageId,
     statusBar()->showMessage(tr("Opening %1…").arg(filename));
     QPointer<MainWindow> self(this);
     fc::api::GmailClient* gmail = activeGmail();
-    // gmail lives on the sync thread; bounce the API call. The
-    // callback can do its temp-file write on either thread (POSIX
-    // file I/O), but the status-bar + QDesktopServices::openUrl
-    // touch the UI and have to marshal back.
+    // Queue the API call through the GmailClient event loop. The callback
+    // can do its temp-file write inline (POSIX file I/O), but the status-bar
+    // + QDesktopServices::openUrl work stays on the UI callback path.
     postToObject(gmail, [gmail, messageId, attachmentId, filename, self] {
         gmail->getAttachment(messageId, attachmentId,
             [self, filename](QByteArray bytes, fc::api::ApiError err) {
@@ -4321,12 +4311,10 @@ void MainWindow::finalizePendingAddAccountFlow(const QString& email) {
     // is immediately authorized.
     auto* ctx = accounts_->ensureContext(id);
     if (ctx && ctx->auth() && pendingAuth_) {
-        // ctx->auth() lives on the AccountContext's sync thread; both
-        // calls mutate the in-memory token blob (under a mutex) and
-        // kick TokenStore::save asynchronously. Queue them onto that
-        // thread; we don't need to wait for completion here — the
-        // tokensLoaded signal flowing back through AccountManager
-        // already drives the post-adoption UI refresh.
+        // ctx->auth() lives with its AccountContext on the UI thread. Queue
+        // these token mutations so adoption settles after the current
+        // profile callback; tokensLoaded flowing through AccountManager
+        // drives the post-adoption UI refresh.
         auto* a = ctx->auth();
         const auto snap = pendingAuth_->tokensSnapshot();
         postToObject(a, [a, snap, email] {
@@ -4355,8 +4343,8 @@ void MainWindow::finalizePendingAddAccountFlow(const QString& email) {
               static_cast<void*>(s),
               qUtf8Printable(ctx->accountId()),
               qUtf8Printable(id));
-        // s lives on the sync thread now; runOnce/startScheduler touch
-        // d_->state / d_->timer which must be set up there.
+        // Queue sync startup so runOnce/startScheduler settle after the
+        // new account has become current.
         postToObject(s, [s] { s->runOnce(); s->startScheduler(); });
     } else {
         qWarning("MainWindow: no ctx/sync to kick after Add-account "
