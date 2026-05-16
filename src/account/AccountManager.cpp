@@ -346,6 +346,7 @@ QString AccountManager::add(const QString& email,
         return {};
     }
     reload();
+    if (currentId_.isEmpty()) selectInitialCurrent();
     if (config_ && tokenStore_) ensureContext(id);
     return id;
 }
