@@ -1488,25 +1488,33 @@ void MainWindow::wireSignals() {
             });
     connect(accounts_, &fc::account::AccountManager::compressionPromptDue,
             this, &MainWindow::onCompressionPromptDue);
+    auto showSyncFailure = [this](const QString& reason) {
+        lastSyncFailed_ = true;
+        statusBar()->showMessage(
+            tr("Sync failed: %1").arg(reason), 30000);
+        // Persistent attention: keep a red chip in the status bar AND fire
+        // a Critical tray toast. The transient 30 s message in the slot above
+        // will roll off into "Signed in as …" eventually, but the chip stays
+        // until the user dismisses it or another sync starts.
+        if (errorBanner_ && errorBannerLabel_) {
+            errorBannerLabel_->setText(reason);
+            errorBanner_->setToolTip(reason);
+            errorBanner_->show();
+        }
+        if (tray_ && tray_->notifier()) {
+            tray_->notifier()->notifyError(
+                tr("FirstContact — sync failed"), reason);
+        }
+    };
+    connect(accounts_, &fc::account::AccountManager::syncFailed, this,
+            [this, showSyncFailure](const QString& aid,
+                                    const QString& reason) {
+                if (aid != currentAccountId_) return;
+                showSyncFailure(reason);
+            });
     connect(sync_, &fc::sync::SyncService::failed, this,
-            [this](const QString& reason) {
-                lastSyncFailed_ = true;
-                statusBar()->showMessage(
-                    tr("Sync failed: %1").arg(reason), 30000);
-                // Persistent attention: keep a red chip in the status
-                // bar AND fire a Critical tray toast. The transient
-                // 30 s message in the slot above will roll off into
-                // "Signed in as …" eventually, but the chip stays
-                // until the user dismisses it or another sync starts.
-                if (errorBanner_ && errorBannerLabel_) {
-                    errorBannerLabel_->setText(reason);
-                    errorBanner_->setToolTip(reason);
-                    errorBanner_->show();
-                }
-                if (tray_ && tray_->notifier()) {
-                    tray_->notifier()->notifyError(
-                        tr("FirstContact — sync failed"), reason);
-                }
+            [showSyncFailure](const QString& reason) {
+                showSyncFailure(reason);
             });
     // newMessages is now routed via AccountManager::newMessages above
     // (which re-emits the per-account context's signals). The legacy
@@ -2354,6 +2362,27 @@ fc::api::GmailClient* MainWindow::gmailForAccount(const QString& accountId) cons
     return activeGmail();
 }
 
+bool MainWindow::isAccountAuthorized(const QString& accountId) const {
+    if (accounts_ && !accountId.isEmpty()) {
+        if (auto* ctx = accounts_->contextFor(accountId)) {
+            return ctx->auth() && ctx->auth()->isAuthorized();
+        }
+        return false;
+    }
+    return auth_ && auth_->isAuthorized();
+}
+
+bool MainWindow::hasAuthorizedAccount() const {
+    if (accounts_) {
+        for (auto* ctx : accounts_->allContexts()) {
+            if (ctx && ctx->auth() && ctx->auth()->isAuthorized()) {
+                return true;
+            }
+        }
+    }
+    return auth_ && auth_->isAuthorized();
+}
+
 QString MainWindow::accountForCurrentMessage() const {
     if (!currentMessage_.accountId.isEmpty()) return currentMessage_.accountId;
     if (listModel_ && currentRow_ >= 0 && currentRow_ < listModel_->rowCount()) {
@@ -2639,11 +2668,15 @@ void MainWindow::onSearchSubmit() {
     // Enter triggers a server-side search using Gmail's `q` syntax to find
     // anything not in the local cache yet, then merge into the model.
     const QString q = searchEdit_->text().trimmed();
-    if (q.isEmpty() || !auth_->isAuthorized()) return;
+    if (q.isEmpty()) return;
+    const QString accountForSearch = currentAccountId_;
+    if (accountForSearch.isEmpty() || !isAccountAuthorized(accountForSearch)) {
+        onSignIn();
+        return;
+    }
     statusBar()->showMessage(tr("Searching server: %1").arg(q));
     QPointer<MainWindow> self(this);
-    const QString accountForSearch = currentAccountId_;
-    fc::api::GmailClient* gmail = activeGmail();
+    fc::api::GmailClient* gmail = gmailForAccount(accountForSearch);
     // gmail lives with its AccountContext on the UI thread. Queue the
     // listMessages call so the request starts after search-submit UI
     // handling returns. The hydration loop inside the callback fires
@@ -2693,12 +2726,13 @@ void MainWindow::onSearchSubmit() {
 }
 
 void MainWindow::openComposeWindow(const fc::Message* parent, int mode) {
-    if (!auth_->isAuthorized()) { onSignIn(); return; }
+    if (!hasAuthorizedAccount()) { onSignIn(); return; }
 
     // Build the From dropdown choices from every signed-in account.
     QList<ComposeWindow::AccountChoice> choices;
     for (const auto& a : accounts_->accounts()) {
         if (a.email.isEmpty()) continue;
+        if (!isAccountAuthorized(a.id)) continue;
         choices.append(ComposeWindow::AccountChoice{
             a.id, a.email, a.displayName});
     }
@@ -3262,15 +3296,14 @@ void MainWindow::onOpenAttachment(const QString& messageId,
         statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
         return;
     }
-    if (!auth_->isAuthorized()) {
+    const QString accountId = accountForMessageId(messageId);
+    if (accountId.isEmpty() || !isAccountAuthorized(accountId)) {
         statusBar()->showMessage(
             tr("Sign in to open attachments."), 5000);
         return;
     }
 
     statusBar()->showMessage(tr("Opening %1…").arg(filename));
-    const QString accountId = accountForMessageId(messageId);
-    if (accountId.isEmpty()) return;
     QPointer<MainWindow> self(this);
     fc::api::GmailClient* gmail = gmailForAccount(accountId);
     // Queue the API call through the GmailClient event loop. The callback
@@ -3320,7 +3353,8 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
         statusBar()->showMessage(tr("Attachment is not downloadable."), 5000);
         return;
     }
-    if (!auth_->isAuthorized()) {
+    const QString accountForSave = accountForMessageId(messageId);
+    if (accountForSave.isEmpty() || !isAccountAuthorized(accountForSave)) {
         statusBar()->showMessage(
             tr("Sign in to download attachments."), 5000);
         return;
@@ -3342,8 +3376,6 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
 
     statusBar()->showMessage(tr("Downloading %1…").arg(filename));
     QPointer<MainWindow> self(this);
-    const QString accountForSave = accountForMessageId(messageId);
-    if (accountForSave.isEmpty()) return;
     fc::api::GmailClient* gmail = gmailForAccount(accountForSave);
     postToObject(gmail, [gmail, messageId, attachmentId, target, self,
                           accountForSave] {
@@ -3386,14 +3418,13 @@ void MainWindow::onSaveAsAttachment(const QString& messageId,
 
 void MainWindow::onDownloadAllAttachments(const QString& messageId) {
     if (messageId.isEmpty()) return;
-    if (!auth_->isAuthorized()) {
+    const QString accountForBatch = accountForMessageId(messageId);
+    if (accountForBatch.isEmpty() || !isAccountAuthorized(accountForBatch)) {
         statusBar()->showMessage(
             tr("Sign in to download attachments."), 5000);
         return;
     }
 
-    const QString accountForBatch = accountForMessageId(messageId);
-    if (accountForBatch.isEmpty()) return;
     const auto m = fc::cache::MessageRepository::byId(accountForBatch,
                                                        messageId);
     if (m.attachments.empty()) {

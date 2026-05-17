@@ -266,6 +266,8 @@ private:
     // with "no token" on every request.
     fc::api::GmailClient* activeGmail() const;
     fc::api::GmailClient* gmailForAccount(const QString& accountId) const;
+    bool hasAuthorizedAccount() const;
+    bool isAccountAuthorized(const QString& accountId) const;
     QString accountForCurrentMessage() const;
     QString accountForMessageId(const QString& messageId) const;
     fc::Message cachedMessageForId(const QString& messageId,
