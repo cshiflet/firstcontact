@@ -20,7 +20,7 @@ namespace fc::sync {
 class SyncService : public QObject {
     Q_OBJECT
 public:
-    enum class State { Idle, InitialSync, IncrementalSync };
+    enum class State { Idle, InitialSync, IncrementalSync, TopUp };
 
     SyncService(fc::api::GmailClient* gmail, QObject* parent = nullptr);
 

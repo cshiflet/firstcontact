@@ -310,9 +310,13 @@ void SyncService::doIncrementalSync() {
 
             QSet<QString> added;
             QSet<QString> deleted;
+            int labelsAddedCount = 0;
+            int labelsRemovedCount = 0;
             for (const auto& e : page.entries) {
                 for (const auto& id : e.messagesAdded)   added.insert(id);
                 for (const auto& id : e.messagesDeleted) deleted.insert(id);
+                labelsAddedCount += static_cast<int>(e.labelsAdded.size());
+                labelsRemovedCount += static_cast<int>(e.labelsRemoved.size());
             }
 
             if (!page.historyId.isEmpty()) {
@@ -333,9 +337,12 @@ void SyncService::doIncrementalSync() {
             for (const auto& e : page.entries) {
                 for (const auto& d : e.labelsAdded) {
                     if (deleted.contains(d.messageId) ||
-                        added.contains(d.messageId) ||
-                        !fc::cache::MessageRepository::exists(d_->accountId,
+                        added.contains(d.messageId)) {
+                        continue;
+                    }
+                    if (!fc::cache::MessageRepository::exists(d_->accountId,
                                                               d.messageId)) {
+                        added.insert(d.messageId);
                         continue;
                     }
                     fc::cache::MessageRepository::applyLabelDiff(
@@ -354,6 +361,16 @@ void SyncService::doIncrementalSync() {
                     labelDeltaApplied = true;
                 }
             }
+
+            qInfo("SyncService::doIncrementalSync: accountId='%s' "
+                  "entries=%d added=%d deleted=%d labelsAdded=%d "
+                  "labelsRemoved=%d removed=%d labelDeltas=%d",
+                  qUtf8Printable(d_->accountId),
+                  static_cast<int>(page.entries.size()),
+                  static_cast<int>(added.size()),
+                  static_cast<int>(deleted.size()),
+                  labelsAddedCount, labelsRemovedCount, removedCount,
+                  labelDeltaApplied ? 1 : 0);
 
             if (removedCount > 0 || labelDeltaApplied) {
                 fc::cache::LabelRepository::recomputeCounts(d_->accountId);
@@ -435,7 +452,7 @@ void SyncService::topUpLabelStep(const QString& labelId,
         return;
     }
     d_->busy = true;
-    setState(State::IncrementalSync);
+    setState(State::TopUp);
 
     const QString tokenKey = topUpTokenKey(labelId);
     // Per-account scoping: store/load the cursor in account_meta

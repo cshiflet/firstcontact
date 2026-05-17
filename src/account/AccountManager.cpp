@@ -129,15 +129,15 @@ void AccountManager::wireContextForwarding(AccountContext* ctx,
                     emit topUpFinished(aid, labelId, newRows,
                                        serverExhausted);
                 });
-        // Coarse-grained syncStarted/syncFinished: fires on every
-        // Idle ↔ non-Idle transition so the UI can show "Syncing…"
-        // feedback for initial / incremental syncs (not just
-        // top-ups, which only fire for explicit topUpLabel calls).
+        // Coarse-grained syncStarted/syncFinished is for mailbox-wide
+        // initial/incremental sync. Label top-ups have their own scoped
+        // signals; forwarding them here makes background crawls look like
+        // the currently visible mailbox is syncing.
         connect(s, &fc::sync::SyncService::stateChanged, this,
                 [this, aid](fc::sync::SyncService::State st) {
                     if (st == fc::sync::SyncService::State::Idle)
                         emit syncFinished(aid);
-                    else
+                    else if (st != fc::sync::SyncService::State::TopUp)
                         emit syncStarted(aid);
                 });
         connect(s, &fc::sync::SyncService::compressionPromptDue, this,

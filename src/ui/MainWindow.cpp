@@ -1430,15 +1430,16 @@ void MainWindow::wireSignals() {
                           listModel_ ? listModel_->sourceLabelId()
                                      : QString()));
                 if (aid != currentAccountId_) return;
+                if (!listModel_ || labelId != listModel_->sourceLabelId()) {
+                    return;
+                }
                 const QString name = fc::cache::LabelRepository::byId(
                     currentAccountId_, labelId).name;
                 statusBar()->showMessage(name.isEmpty()
                     ? tr("Syncing…")
                     : tr("Syncing %1…").arg(name));
-                if (labelId == listModel_->sourceLabelId()) {
-                    ++topUpsInFlight_;
-                    refreshListFooter();
-                }
+                ++topUpsInFlight_;
+                refreshListFooter();
             });
     connect(accounts_, &fc::account::AccountManager::topUpFinished, this,
             [this](const QString& aid, const QString& labelId,
@@ -1449,14 +1450,16 @@ void MainWindow::wireSignals() {
                       newRows, serverExhausted);
                 if (aid != currentAccountId_) return;
                 serverExhaustedByLabel_[labelId] = serverExhausted;
+                if (!listModel_ || labelId != listModel_->sourceLabelId()) {
+                    return;
+                }
                 // Decrement BEFORE resumeAfterTopUp: that call's
                 // fetchMore may exhaust the cache again and post the
                 // next topUpLabel synchronously inside this handler.
                 // If we decremented after, the new topUpStarted's
                 // increment would land, then ours would zero it out
                 // and the footer would drop to None mid-chain.
-                if (labelId == listModel_->sourceLabelId()
-                    && topUpsInFlight_ > 0) {
+                if (topUpsInFlight_ > 0) {
                     --topUpsInFlight_;
                 }
                 // Only surface the "done" status message when the whole
@@ -1480,8 +1483,7 @@ void MainWindow::wireSignals() {
                 // into the model so the user's scroll-to-bottom session
                 // continues seamlessly. Skip if the user has navigated
                 // away to a different label since the top-up started.
-                if (newRows > 0
-                    && labelId == listModel_->sourceLabelId()) {
+                if (newRows > 0) {
                     listModel_->resumeAfterTopUp();
                 }
                 refreshListFooter();
@@ -1555,6 +1557,8 @@ void MainWindow::wireSignals() {
                         isSyncing_ = true;
                         if (errorBanner_) errorBanner_->hide();
                         statusBar()->showMessage(tr("Syncing…"));
+                        break;
+                    case fc::sync::SyncService::State::TopUp:
                         break;
                     case fc::sync::SyncService::State::Idle: {
                         const bool wasSyncing = isSyncing_;

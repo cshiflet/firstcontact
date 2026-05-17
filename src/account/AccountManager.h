@@ -238,12 +238,10 @@ signals:
                               const QString& labelId, int totalStored,
                               bool cancelled);
     // Coarser-grained "any sync is active for this account" pair.
-    // Fires when the per-account SyncService leaves Idle (initial
-    // sync, incremental sync, or top-up) and again when it returns
-    // to Idle. MainWindow uses these to drive the status-bar /
-    // placeholder "Syncing…" feedback for paths the per-label
-    // topUpStarted/Finished pair doesn't cover (notably the initial
-    // sync after a cache wipe).
+    // Fires for per-account initial/incremental sync and again when the
+    // service returns to Idle. Label top-ups are intentionally excluded:
+    // MainWindow handles them through topUpStarted/Finished so background
+    // crawls do not masquerade as visible mailbox syncs.
     void syncStarted(const QString& accountId);
     void syncFinished(const QString& accountId);
     // Forwarded from the per-account OAuthClient::tokensLoaded.
